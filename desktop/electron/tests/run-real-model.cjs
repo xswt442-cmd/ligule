@@ -183,11 +183,13 @@ async function createApplication() {
     try {
       const request = JSON.parse(frame);
       if (['session.open', 'session.read', 'session.observe', 'prefs.read', 'prefs.write', 'status.get'].includes(request.method)) {
+        const projectRoot = request.params?.projectRoot;
         hostRequests.push({
           id: request.id,
           method: request.method,
           sessionId: request.params?.sessionId,
-          projectMatchesWorkspace: request.params?.projectRoot === undefined || request.params.projectRoot === workspaceRoot,
+          projectRootScope: projectRoot === undefined ? 'omitted'
+            : projectRoot === workspaceRoot ? 'matches_workspace' : 'different_workspace',
           hostPid: host.pid,
           sentAt: Date.now(),
         });
@@ -814,14 +816,21 @@ async function runChecks() {
       const reopenDeadline = clickAt + 45_000;
       let reopened = false;
       while (Date.now() < reopenDeadline) {
+        const uiOpen = hostRequests.slice(reopenRequestStart).findLast(request =>
+          request.method === 'session.open' && request.sessionId === sessionId && !String(request.id).startsWith('real-model-rpc-'));
+        if (uiOpen !== undefined) {
+          assert.equal(uiOpen.projectRootScope, 'matches_workspace', 'reconnect_session_open_project_mismatch');
+          assert.notEqual(uiOpen.hostPid, killedPid, 'reconnect_session_open_used_old_host');
+        }
         const uiRead = hostRequests.slice(reopenRequestStart).findLast(request =>
           request.method === 'session.read' && request.sessionId === sessionId && !String(request.id).startsWith('real-model-rpc-'));
         if (uiRead !== undefined) {
-          assert.equal(uiRead.projectMatchesWorkspace, true, 'reconnect_session_read_project_mismatch');
+          assert.equal(uiRead.projectRootScope, 'omitted', 'reconnect_session_read_project_scope_invalid');
           assert.notEqual(uiRead.hostPid, killedPid, 'reconnect_session_read_used_old_host');
           const response = hostResponses.find(item => item.id === uiRead.id);
           if (response !== undefined) {
             if (response.errorCode === undefined) {
+              assert.ok(uiOpen !== undefined, 'reconnect_session_open_not_observed');
               reopened = true;
               break;
             }
@@ -861,7 +870,7 @@ async function runChecks() {
         const response = hostResponses.find(item => item.id === request.id);
         return {
           method: request.method,
-          projectMatchesWorkspace: request.projectMatchesWorkspace,
+          projectRootScope: request.projectRootScope,
           hostPid: request.hostPid,
           result: response === undefined ? 'pending' : response.errorCode ?? 'ok',
           elapsedMs: response === undefined ? undefined : response.receivedAt - request.sentAt,
@@ -876,13 +885,15 @@ async function runChecks() {
       await control('/hang', { hang: false });
       assert.equal(after, received, 'reconnect_replayed_the_request');
       const last = summary.turns.at(-1) ?? {};
-      assert.notEqual(last.status, 'running', 'pending_turn_not_settled');
+      assert.equal(last.status, 'interrupted', 'pending_turn_status_after_host_restart');
+      assert.equal(last.code, 'host_restarted', 'pending_turn_code_after_host_restart');
       const requestSummary = hostRequests.slice(crashRequestStart).flatMap(request => {
         if (!['session.open', 'session.read', 'session.observe', 'prefs.read', 'prefs.write'].includes(request.method)) return [];
         const response = hostResponses.find(item => item.id === request.id);
         return [{
           method: request.method,
-          projectMatchesWorkspace: request.projectMatchesWorkspace,
+          hostPid: request.hostPid,
+          projectRootScope: request.projectRootScope,
           result: response === undefined ? 'pending' : response.errorCode ?? 'ok',
           elapsedMs: response === undefined ? null : response.receivedAt - request.sentAt,
         }];

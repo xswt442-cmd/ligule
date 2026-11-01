@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { finished } from 'node:stream/promises';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { sessionDirectory } from '../../../core/dist/session/list.js';
 
@@ -604,6 +605,101 @@ async function hostCall(method, params = {}) {
   return response;
 }
 
+async function startLockHoldingHost(sessionId) {
+  const child = spawn(hostNode, [hostEntry, hostCli], {
+    cwd: resolve(resourcesDirectory, 'app'),
+    env: environment,
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+    detached: process.platform !== 'win32',
+    windowsHide: true,
+  });
+  if (child.pid === undefined) throw new Error('lock_holder_host_spawn_failed');
+  processIds.lockHolderHost = child.pid;
+  const pending = new Map();
+  let requestSequence = 0;
+  let buffer = '';
+  const exited = new Promise(resolvePromise => child.once('close', resolvePromise));
+  const failPending = error => {
+    for (const [id, request] of pending) {
+      clearTimeout(request.timer);
+      request.reject(error);
+      pending.delete(id);
+    }
+  };
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', chunk => {
+    buffer += chunk;
+    let end = buffer.indexOf('\n');
+    while (end >= 0) {
+      const line = buffer.slice(0, end).trim();
+      buffer = buffer.slice(end + 1);
+      if (line !== '') {
+        try {
+          const frame = JSON.parse(line);
+          const request = pending.get(frame.id);
+          if (request !== undefined) {
+            clearTimeout(request.timer);
+            pending.delete(frame.id);
+            if (frame.error !== undefined) {
+              request.reject(Object.assign(new Error(frame.error.message ?? frame.error.code), { code: frame.error.code }));
+            } else request.resolve(frame.result);
+          }
+        } catch (error) {
+          failPending(error);
+        }
+      }
+      end = buffer.indexOf('\n');
+    }
+  });
+  child.stderr.on('data', () => {});
+  child.once('error', failPending);
+  child.once('close', (code, signal) => failPending(new Error(`lock_holder_host_closed:${code ?? signal ?? 'unknown'}`)));
+  const call = (method, params) => new Promise((resolvePromise, reject) => {
+    const id = `lock-holder-${requestSequence++}`;
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error('lock_holder_host_rpc_timeout'));
+    }, 60_000);
+    pending.set(id, { resolve: resolvePromise, reject, timer });
+    child.stdin.write(`${JSON.stringify({ id, method, params })}\n`, error => {
+      if (error === null || error === undefined) return;
+      clearTimeout(timer);
+      pending.delete(id);
+      reject(error);
+    });
+  });
+  const close = async () => {
+    try { await call('session.close', { sessionId }); }
+    finally {
+      child.stdin.end();
+      if (child.connected) child.disconnect();
+      const stopped = await Promise.race([exited.then(() => true), delay(10_000).then(() => false)]);
+      if (!stopped && child.exitCode === null) child.kill();
+    }
+  };
+
+  try {
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      try {
+        await call('session.open', { sessionId, projectRoot: workspace });
+        return {
+          pid: child.pid,
+          observe: () => call('session.observe', { projectRoot: workspace, sessionId, limit: 1 }),
+          close,
+        };
+      } catch (error) {
+        if (error?.code !== 'session_locked' || Date.now() >= deadline) throw error;
+        await delay(500);
+      }
+    }
+  } catch (error) {
+    child.kill();
+    await Promise.race([exited, delay(10_000)]);
+    throw error;
+  }
+}
+
 async function notifyHost(method, params = {}) {
   rpcSequence += 1;
   const id = `packaged-smoke-${rpcSequence}`;
@@ -1039,34 +1135,56 @@ async function runChecks() {
       })`);
       throw new Error(`packaged_permission_panel_unavailable:${JSON.stringify(state)}`);
     }
-    const untrusted = await devTools.evaluate(`(() => {
-      const row = [...document.querySelectorAll('.permission-change-state')]
-        .find(item => /项目代码信任|Project code trust/u.test(item.textContent ?? ''));
-      return row?.querySelector('strong')?.textContent?.trim() ?? '';
-    })()`);
-    if (/已信任|Trusted/u.test(untrusted)) {
-      await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
-      return '可信界面确认准确测试工作区已处于信任状态';
-    }
-    if (!/未信任|Untrusted/u.test(untrusted)) throw new Error('isolated_workspace_trust_state_unknown');
-    // P7 之后，信任动作只在“设置 → 权限与安全”里；弹窗里只保留一个跳转链接。
+    const untrustedNotice = await devTools.evaluate(`[...document.querySelectorAll('.permission-note')]
+      .some(item => /项目代码尚未信任|Project code is not trusted yet/u.test(item.textContent ?? ''))`);
     const link = await devTools.evaluate(`(() => {
       const button = document.querySelector('.permission-details-link');
       button?.click();
       return button !== null && button !== undefined;
     })()`);
     if (link !== true) throw new Error('packaged_permission_details_link_missing');
-    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.sheet') !== null`), 10_000, 'packaged_security_settings_open');
+    await waitUntil(async () => await devTools.evaluate(`(() => {
+      const tab = [...document.querySelectorAll('.sheet-nav button[role="tab"][aria-selected="true"]')]
+        .find(item => /^(权限与安全|Permissions and security)$/u.test(item.textContent?.trim() ?? ''));
+      return tab !== undefined && document.querySelector('.security-settings') !== null;
+    })()`), 10_000, 'packaged_security_settings_open');
+    const readWorkspaceTrust = () => devTools.evaluate(`(() => {
+      const section = [...document.querySelectorAll('.security-settings .region-group')]
+        .find(item => /^(工作区信任|Workspace trust)$/u.test(item.querySelector('h3')?.textContent?.trim() ?? ''));
+      const rows = [...(section?.querySelectorAll('.sheet-row') ?? [])];
+      const project = rows.find(item => /^(当前项目|Current project)$/u.test(item.querySelector('.sheet-label')?.textContent?.trim() ?? ''));
+      const trust = rows.find(item => /^(信任状态|Trust status)$/u.test(item.querySelector('.sheet-label')?.textContent?.trim() ?? ''));
+      return {
+        project: project?.querySelector('.catalog-path')?.textContent?.trim() ?? '',
+        state: trust?.querySelector('.sheet-value > span')?.textContent?.trim() ?? '',
+      };
+    })()`);
+    await waitUntil(async () => {
+      const current = await readWorkspaceTrust();
+      return current.project !== '' && current.state !== '' && !/正在读取|Loading/u.test(current.state);
+    }, 15_000, 'packaged_workspace_trust_loaded');
+    const workspaceTrust = await readWorkspaceTrust();
+    if (workspaceTrust.project !== workspace) throw new Error(`packaged_workspace_trust_project_mismatch:${JSON.stringify(workspaceTrust)}`);
+    if (!/^(未信任|Not trusted)$/u.test(workspaceTrust.state)) {
+      throw new Error(`packaged_isolated_workspace_not_initially_untrusted:${JSON.stringify(workspaceTrust)}`);
+    }
+    if (!untrustedNotice) throw new Error('packaged_untrusted_workspace_notice_missing');
     const trustButton = await devTools.evaluate(`(() => {
-      const button = [...document.querySelectorAll('.sheet button')]
+      const section = [...document.querySelectorAll('.security-settings .region-group')]
+        .find(item => /工作区信任|Workspace trust/u.test(item.querySelector('h3')?.textContent ?? ''));
+      const button = [...(section?.querySelectorAll('.sheet-row button') ?? [])]
         .find(item => /信任此工作区|Trust this workspace/u.test(item.textContent ?? ''));
       button?.click();
       return button !== undefined;
     })()`);
     if (trustButton !== true) throw new Error('packaged_workspace_trust_action_missing');
     await waitUntil(async () => await devTools.evaluate(`document.querySelector('.confirm') !== null`), 5_000, 'packaged_workspace_trust_confirmation');
-    const confirmation = await devTools.evaluate(`document.querySelector('.confirm')?.textContent ?? ''`);
-    if (!/信任以下项目中的脚本|trusts scripts/u.test(confirmation)) throw new Error('packaged_workspace_trust_confirmation_mismatch');
+    const confirmation = await devTools.evaluate(`({
+      text: document.querySelector('.confirm')?.textContent ?? '',
+      project: document.querySelector('.confirm .catalog-path')?.textContent?.trim() ?? '',
+    })`);
+    if (confirmation.project !== workspace) throw new Error(`packaged_workspace_trust_confirmation_project_mismatch:${JSON.stringify(confirmation)}`);
+    if (!/信任以下项目中的脚本|trusts scripts/u.test(confirmation.text)) throw new Error('packaged_workspace_trust_confirmation_mismatch');
     const trustConfirmed = await devTools.evaluate(`(() => {
       const button = [...document.querySelectorAll('.confirm button')]
         .find(item => /确认信任|Trust project/u.test(item.textContent ?? ''));
@@ -1075,18 +1193,15 @@ async function runChecks() {
     })()`);
     if (trustConfirmed !== true) throw new Error('packaged_workspace_trust_confirm_button_missing');
     await waitUntil(async () => await devTools.evaluate(`document.querySelector('.confirm') === null`), 5_000, 'packaged_workspace_trust_confirmation_close');
-    await waitUntil(async () => await devTools.evaluate(`[...document.querySelectorAll('.sheet *')]
-      .some(node => node.children.length === 0 && /^(已信任|Trusted)$/u.test(node.textContent?.trim() ?? ''))`), 10_000, 'packaged_workspace_trust_saved');
+    await waitUntil(async () => {
+      const current = await readWorkspaceTrust();
+      return current.project === workspace && /^(已信任|Trusted)$/u.test(current.state);
+    }, 10_000, 'packaged_workspace_trust_saved');
+    const catalog = await hostCall('settings.catalog', { projectRoot: workspace });
+    if (catalog.result?.projectTrusted !== true) throw new Error('packaged_workspace_trust_not_persisted_in_host');
     await devTools.evaluate(`document.querySelector('button[aria-label="关闭设置"], button[aria-label="Close settings"]')?.click(); true`);
     await waitUntil(async () => await devTools.evaluate(`document.querySelector('.sheet') === null`), 5_000, 'packaged_settings_close_after_trust');
-    await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
-    await waitUntil(async () => await devTools.evaluate(`(() => {
-      const row = [...document.querySelectorAll('.permission-change-state')]
-        .find(item => /项目代码信任|Project code trust/u.test(item.textContent ?? ''));
-      return /已信任|Trusted/u.test(row?.querySelector('strong')?.textContent ?? '');
-    })()`), 10_000, 'packaged_permission_trust_reflected');
-    await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
-    return '可信界面显示初始未信任状态，确认后仅将隔离测试工作区标记为可信';
+    return '权限弹窗提示准确，设置页显示精确工作区，确认后 UI 与 Host 均报告已信任';
   });
 
   await check('open local Agent Control and MCP settings in the installed application', async () => {
@@ -1264,6 +1379,21 @@ async function runChecks() {
     if (!roster.result?.workspaces?.some(item => resolve(item.directory).toLowerCase() === resolve(workspace).toLowerCase())) {
       throw new Error('isolated_workspace_not_registered_by_host');
     }
+    const refreshed = await devTools.evaluate(`(() => {
+      const button = [...document.querySelectorAll('.sessions button[aria-label]')]
+        .find(item => /刷新会话列表|Refresh conversations/u.test(item.getAttribute('aria-label') ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
+    if (refreshed !== true) throw new Error('packaged_session_rail_refresh_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('button.session-item[title$=" · ${sessionId}"]') !== null`), 15_000, 'packaged_session_rail_entry');
+    const selected = await devTools.evaluate(`(() => {
+      const item = document.querySelector('button.session-item[title$=" · ${sessionId}"]');
+      item?.click();
+      return item !== null;
+    })()`);
+    if (selected !== true) throw new Error('packaged_session_rail_entry_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('#session-title')?.textContent?.trim() === 'Packaged smoke record'`), 15_000, 'packaged_session_selected_in_ui');
     return `Host 创建会话 ${sessionId} 并登记隔离工作区`;
   });
 
@@ -1314,6 +1444,67 @@ async function runChecks() {
       throw new Error('old_session_record_not_recovered');
     }
     return `Host PID ${oldPid} 已结束；新 PID ${newPid} 接回旧会话并读回记录`;
+  });
+
+  await check('explain a session still held after the lock retry budget', async () => {
+    if (sessionId === undefined) throw new Error('session_not_created');
+    const oldHost = await hostProcessFor(applicationProcess.pid);
+    const oldPid = Number(oldHost.pid);
+    killHostImmediately(oldPid);
+    await hostProcessGone(oldPid);
+    const reconnectSelector = `([...document.querySelectorAll('.banner[role="alert"] button')]
+      .find(button => /重新连接|Reconnect/u.test(button.textContent ?? '')) ?? null)`;
+    await waitUntil(async () => await devTools.evaluate(`${reconnectSelector} !== null`), 30_000, 'locked_session_disconnect_banner');
+    const killedHostFaults = await devTools.evaluate('window.__packagedSmokeFaults.splice(0)');
+    const unexpectedFaults = Array.isArray(killedHostFaults)
+      ? killedHostFaults.filter(fault => !['host_closed:process-exit', 'host_closed:write-failed'].includes(fault))
+      : ['host_fault_list_invalid'];
+    if (unexpectedFaults.length > 0) throw new Error(`locked_session_unexpected_pre_reconnect_faults:${JSON.stringify(unexpectedFaults)}`);
+    const lockHolder = await startLockHoldingHost(sessionId);
+    try {
+      const holderSnapshot = await lockHolder.observe();
+      if (holderSnapshot.writerActive !== true) throw new Error('external_lock_holder_not_active');
+      await devTools.evaluate(`(${reconnectSelector}).click(); true`);
+      const newHostPid = Number((await hostProcessFor(applicationProcess.pid)).pid);
+      if (newHostPid === oldPid || newHostPid === lockHolder.pid) throw new Error('locked_session_host_pid_invalid');
+      const observationReady = () => devTools.evaluate(`(() => ({
+        title: document.querySelector('#session-title')?.textContent?.trim() ?? '',
+        mainComposerExists: document.querySelector('footer.composer:not(.external-session-composer) textarea.composer-input') !== null,
+        statusBanners: [...document.querySelectorAll('.banner[role="status"]')].map(item => item.textContent?.trim() ?? ''),
+      }))()`);
+      try {
+        await waitUntil(async () => (await observationReady()).statusBanners.some(text =>
+          /外控 Agent 正在运行|此会话当前没有活动写入者|An external agent is controlling this session|This session has no active writer/u.test(text)),
+        90_000, 'locked_session_observation_ready');
+      } catch (error) {
+        throw new Error(`locked_session_observation_state:${JSON.stringify(await observationReady())}`, { cause: error });
+      }
+      let appLockFailure;
+      try { await hostCall('session.open', { sessionId, projectRoot: workspace }); }
+      catch (error) { appLockFailure = error; }
+      if (!(appLockFailure instanceof Error) || !appLockFailure.message.startsWith('session_locked:')) {
+        throw new Error(`packaged_host_did_not_report_session_lock:${appLockFailure instanceof Error ? appLockFailure.message : 'opened'}`);
+      }
+      const observed = await devTools.evaluate(`(() => {
+        return {
+          title: document.querySelector('#session-title')?.textContent?.trim() ?? '',
+          mainComposerExists: document.querySelector('footer.composer:not(.external-session-composer) textarea.composer-input') !== null,
+          externalComposerExists: document.querySelector('footer.external-session-composer textarea.composer-input') !== null,
+          statusBanners: [...document.querySelectorAll('.banner[role="status"]')].map(item => item.textContent?.trim() ?? ''),
+        };
+      })()`);
+      if (observed.title !== 'Packaged smoke record' || observed.mainComposerExists || !observed.externalComposerExists) {
+        throw new Error(`packaged_locked_session_not_read_only:${JSON.stringify(observed)}`);
+      }
+      const lockNoticeVisible = observed.statusBanners.some(text =>
+        /先前的宿主仍持有会话写入锁|previous Host still holds the session writer lock/u.test(text));
+      if (!lockNoticeVisible) {
+        throw new Error(`packaged_readonly_lock_notice_missing:${JSON.stringify(observed.statusBanners)}`);
+      }
+      return `Host PID ${oldPid} 已结束；外部 Host PID ${lockHolder.pid} 持有写入锁，Desktop 以只读方式打开并解释占用原因`;
+    } finally {
+      await lockHolder.close();
+    }
   });
 
   if (interruptionMode === undefined) {
