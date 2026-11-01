@@ -5,6 +5,7 @@ packages:
   - desktop/frontend
 
 overrides:
+  qs@6.16.0: 6.16.1
   ip-address@10.7.3: 10.7.4
   zod@4.6.5: 4.6.6
   body-parser@2.3.0: 2.4.0

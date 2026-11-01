@@ -607,6 +607,9 @@ async function runChecks() {
       await enterAndSend('desktop-code-copy-proof');
       await waitForSessionIdle(30_000, 'code_copy_turn_did_not_finish');
       await waitFor(`document.querySelector('.code-copy')`, 10_000, 'code_copy_button_missing');
+      assert.equal(await evaluate(`document.querySelector('.md-code code').textContent`), 'console.log("原始代码🙂 <img src=x onerror=alert(1)>");');
+      assert.equal(await evaluate(`document.querySelector('.md-code code img') === null`), true, 'code_markup_was_interpreted');
+      assert.equal(await evaluate(`document.querySelector('.md-code code span[class^="hljs-"]') !== null`), true, 'code_highlighting_missing');
       const originalLanguage = await evaluate('document.documentElement.lang');
       try {
         for (const language of ['en', 'zh']) {
@@ -629,7 +632,7 @@ async function runChecks() {
           const prefix = language === 'en' ? 'Copied code (' : '已复制代码（';
           await waitFor(`document.querySelector('.code-copy-row .row-note')?.textContent.startsWith(${JSON.stringify(prefix)})`, 5_000, 'code_copy_success_not_localized');
           const clipboardText = await require('electron').clipboard.readText();
-          const expectedCode = 'console.log("原始代码🙂");';
+          const expectedCode = 'console.log("原始代码🙂 <img src=x onerror=alert(1)>");';
           assert.equal(clipboardText === expectedCode, true, 'code_copy_changed_original_text');
         }
         const image = await mainWindow.webContents.capturePage();

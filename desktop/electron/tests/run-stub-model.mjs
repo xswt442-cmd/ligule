@@ -120,7 +120,7 @@ const server = createServer(async (request, response) => {
     response.end();
   };
   if (prompt.includes('desktop-code-copy-proof')) {
-    streamChunk(response, { choices: [{ index: 0, delta: { content: '```js\nconsole.log("原始代码🙂");\n```' } }] });
+    streamChunk(response, { choices: [{ index: 0, delta: { content: '```js\nconsole.log("原始代码🙂 <img src=x onerror=alert(1)>");\n```' } }] });
     finish('stop');
     return;
   }

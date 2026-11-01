@@ -5,6 +5,7 @@ import type { ReactNode } from 'react';
 import { useState } from 'react';
 import { Lexer, type Token, type Tokens } from 'marked';
 import hljs from 'highlight.js/lib/common';
+import DOMPurify from 'dompurify';
 import { useText } from './locale';
 import 'highlight.js/styles/github-dark.min.css';
 
@@ -62,7 +63,7 @@ function CodeBlock({ code }: { code: Tokens.Code }) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const t = useText();
   return <div className="md-code-wrap">
-    <pre className="md-code" data-lang={code.lang ?? ''}><code className="hljs" dangerouslySetInnerHTML={{ __html: highlight(code.text, code.lang) }} /></pre>
+    <pre className="md-code" data-lang={code.lang ?? ''}><code className="hljs" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(highlight(code.text, code.lang), { ALLOWED_TAGS: ['span'], ALLOWED_ATTR: ['class'] }) }} /></pre>
     <p className="code-copy-row">
       <button type="button" className="code-copy" onClick={() => {
         void navigator.clipboard.writeText(code.text).then(
