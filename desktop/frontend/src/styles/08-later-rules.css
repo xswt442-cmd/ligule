@@ -719,18 +719,13 @@ button.pill:hover {
 .permission-panel { z-index: 41; display: grid; gap: 10px; width: min(390px, 92vw); max-height: min(76vh, 680px); overflow: auto; padding: 14px; background: var(--bg-raised); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-pop); font-size: var(--text-sm); }
 .permission-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .permission-note { margin: 0; color: var(--fg-muted); font-size: var(--text-xs); line-height: 1.5; }
-.permission-trust-button { justify-self: start; min-height: 40px; padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-sunk); color: var(--link); font: inherit; font-size: var(--text-sm); }
-.permission-current, .permission-change-state { display: flex; justify-content: space-between; gap: 12px; font-size: var(--text-xs); }
-.permission-current > span, .permission-change-state > span { color: var(--fg-muted); }
-.permission-current > strong, .permission-change-state > strong { text-align: end; font-weight: 600; }
+.permission-change-state { display: flex; justify-content: space-between; gap: 12px; font-size: var(--text-xs); }
+.permission-change-state > span { color: var(--fg-muted); }
+.permission-change-state > strong { text-align: end; font-weight: 600; }
 .permission-fields { display: grid; gap: 9px; }
 .permission-fields label { display: grid; gap: 5px; }
 .permission-fields label > span { color: var(--fg-muted); font-size: var(--text-xs); }
 .permission-fields select { width: 100%; min-width: 0; }
-.permission-summary { display: grid; gap: 4px; padding: 8px 10px; border-block: 1px solid var(--line); color: var(--fg-muted); font-size: var(--text-xs); line-height: 1.4; }
-.permission-summary strong { color: var(--fg); font-weight: 600; }
-.permission-summary [data-tone="ok"] { color: var(--ok); }
-.permission-summary [data-tone="bad"] { color: var(--bad); }
 .permission-details-link { justify-self: start; min-height: 40px; padding: 6px 10px; color: var(--link); font: inherit; font-size: var(--text-sm); }
 .permission-failure { margin: 0; color: var(--bad); font-size: var(--text-xs); line-height: 1.5; overflow-wrap: anywhere; }
 .permission-actions { display: flex; justify-content: flex-end; gap: 8px; }

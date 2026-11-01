@@ -1049,33 +1049,42 @@ async function runChecks() {
       return '可信界面确认准确测试工作区已处于信任状态';
     }
     if (!/未信任|Untrusted/u.test(untrusted)) throw new Error('isolated_workspace_trust_state_unknown');
-    const trustButton = await devTools.evaluate(`(() => {
-      const button = document.querySelector('.permission-trust-button');
+    // P7 之后，信任动作只在“设置 → 权限与安全”里；弹窗里只保留一个跳转链接。
+    const link = await devTools.evaluate(`(() => {
+      const button = document.querySelector('.permission-details-link');
       button?.click();
       return button !== null && button !== undefined;
     })()`);
+    if (link !== true) throw new Error('packaged_permission_details_link_missing');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.sheet') !== null`), 10_000, 'packaged_security_settings_open');
+    const trustButton = await devTools.evaluate(`(() => {
+      const button = [...document.querySelectorAll('.sheet button')]
+        .find(item => /信任此工作区|Trust this workspace/u.test(item.textContent ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
     if (trustButton !== true) throw new Error('packaged_workspace_trust_action_missing');
-    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.confirm .confirm-lead') !== null`), 5_000, 'packaged_workspace_trust_confirmation');
-    const confirmation = await devTools.evaluate(`document.querySelector('.confirm .confirm-lead')?.textContent ?? ''`);
-    if (!/信任此目录中的项目代码|Trust project code/u.test(confirmation)) throw new Error('packaged_workspace_trust_confirmation_mismatch');
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.confirm') !== null`), 5_000, 'packaged_workspace_trust_confirmation');
+    const confirmation = await devTools.evaluate(`document.querySelector('.confirm')?.textContent ?? ''`);
+    if (!/信任以下项目中的脚本|trusts scripts/u.test(confirmation)) throw new Error('packaged_workspace_trust_confirmation_mismatch');
     const trustConfirmed = await devTools.evaluate(`(() => {
-      const button = [...document.querySelectorAll('.confirm-actions button')]
-        .find(item => /信任此工作区|Trust this workspace|Trust workspace/u.test(item.textContent ?? ''));
+      const button = [...document.querySelectorAll('.confirm button')]
+        .find(item => /确认信任|Trust project/u.test(item.textContent ?? ''));
       button?.click();
       return button !== undefined;
     })()`);
     if (trustConfirmed !== true) throw new Error('packaged_workspace_trust_confirm_button_missing');
     await waitUntil(async () => await devTools.evaluate(`document.querySelector('.confirm') === null`), 5_000, 'packaged_workspace_trust_confirmation_close');
-    const permissionPanelOpen = await devTools.evaluate(`document.querySelector('.permission-panel') !== null`);
-    if (!permissionPanelOpen) {
-      await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
-      await waitUntil(async () => await devTools.evaluate(`document.querySelector('.permission-panel') !== null`), 5_000, 'packaged_permission_panel_reopen');
-    }
+    await waitUntil(async () => await devTools.evaluate(`[...document.querySelectorAll('.sheet *')]
+      .some(node => node.children.length === 0 && /^(已信任|Trusted)$/u.test(node.textContent?.trim() ?? ''))`), 10_000, 'packaged_workspace_trust_saved');
+    await devTools.evaluate(`document.querySelector('button[aria-label="关闭设置"], button[aria-label="Close settings"]')?.click(); true`);
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.sheet') === null`), 5_000, 'packaged_settings_close_after_trust');
+    await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
     await waitUntil(async () => await devTools.evaluate(`(() => {
       const row = [...document.querySelectorAll('.permission-change-state')]
         .find(item => /项目代码信任|Project code trust/u.test(item.textContent ?? ''));
       return /已信任|Trusted/u.test(row?.querySelector('strong')?.textContent ?? '');
-    })()`), 10_000, 'packaged_workspace_trust_saved');
+    })()`), 10_000, 'packaged_permission_trust_reflected');
     await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
     return '可信界面显示初始未信任状态，确认后仅将隔离测试工作区标记为可信';
   });
