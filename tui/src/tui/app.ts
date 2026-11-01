@@ -533,6 +533,7 @@ export function contextSegment(usage: ContextUsage | null | undefined, locale: L
 // 空间不足时先截短目录，再隐藏上下文和记录数，并保留取消提示。
 interface StatusLineOptions {
   readonly sessionId: string;
+  readonly name?: string;
   readonly boundary?: string;
   readonly status: TuiStatus | null;
   readonly running: boolean;
@@ -543,9 +544,11 @@ interface StatusLineOptions {
   readonly now?: number;
 }
 
-export function buildStatusLine({ sessionId, boundary, status, running, seconds, expanded, columns, locale = 'zh', now = Date.now() }: StatusLineOptions): string {
+export function buildStatusLine({ sessionId, name, boundary, status, running, seconds, expanded, columns, locale = 'zh', now = Date.now() }: StatusLineOptions): string {
   const t = (zh: string, en: string) => chooseText(locale, zh, en);
-  const id = `${chooseText(locale, '会话', 'session')} ${sessionId.slice(0, 8)}`;
+  // 命名过的会话显示名称；未命名时退回短编号。
+  const titled = name === undefined ? '' : name.trim();
+  const id = `${chooseText(locale, '会话', 'session')} ${titled === '' ? sessionId.slice(0, 8) : titled}`;
   const root = boundary === undefined ? '' : boundary;
   const leaf = root === '' ? '' : root.split(/[\\/]/).filter(Boolean).pop() ?? '';
   let base = `${id}${leaf === '' ? '' : ` · ${leaf}`}`;
@@ -689,6 +692,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const resolvedExternalInteractions = useRef(new Set<string>());
   useEffect(() => { resolvedExternalInteractions.current.clear(); }, [sessionId]);
   useEffect(() => { setMcpTrustPending(null); }, [sessionId]);
+  useEffect(() => { setSessionName(''); }, [sessionId]);
   const pickerRequest = useRef(0);
   const sessionNavigation = useRef({ generation: 0, activeToken: 0 });
   const sessionNavigationMounted = useRef(false);
@@ -746,6 +750,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   // Ctrl+R 反向搜索的查询文本和当前匹配位置；未搜索时为 null。
   const [search, setSearch] = useState<SearchState | null>(null);
   const [status, setStatus] = useState<TuiStatus | null>(null);
+  const [sessionName, setSessionName] = useState('');
   // `Static` 不会重绘已提交行，因此查看单条详情时在动态区重新绘制。
   const [detail, setDetail] = useState<DetailState | null>(null);
   // 斜杠命令候选的当前选择索引；候选内容始终从草稿重新计算。
@@ -888,6 +893,18 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       push({ kind: 'error', text: t(`无法读取状态：${errorCode(error) ?? errorMessage(error) ?? String(error)}`, `Could not read status: ${errorCode(error) ?? errorMessage(error) ?? String(error)}`) });
     }
   }, [client, externalControl, push, sessionId, t]);
+
+  // 会话名称只在打开会话时读一次；改名由 /rename 的返回值直接写回。
+  const refreshLabel = useCallback(async () => {
+    if (!alive.current || externalControl) return;
+    const listed = await client.request('sessions.list', { projectRoot: info.boundary })
+      .catch((error: unknown) => requestFailure(error, 'session_list_failed'));
+    if ('code' in listed || activeSession.current !== sessionId) return;
+    const own = listed.sessions.find((entry) => entry.id === sessionId);
+    if (own !== undefined) setSessionName(own.name ?? '');
+  }, [client, externalControl, info.boundary, sessionId]);
+
+  useEffect(() => { void refreshLabel(); }, [refreshLabel]);
 
   useEffect(() => {
     const resize = () => setGeometry({ columns: stdout?.columns ?? 80, rows: stdout?.rows ?? 24 });
@@ -2305,11 +2322,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
-    if (name === 'name' || name === 'archive' || name === 'unarchive') {
+    if (name === 'rename' || name === 'archive' || name === 'unarchive') {
       // 会话名称和归档状态由 Host 写入记录，TUI 不维护第二份副本。
-      const label = name === 'name' ? { name: argument.trim() } : { archived: name === 'archive' };
-      if (name === 'name' && label.name === '') {
-        push({ kind: 'error', text: t('请输入会话名称：/name <名称>', 'Enter a session name: /name <name>') });
+      const label = name === 'rename' ? { name: argument.trim() } : { archived: name === 'archive' };
+      if (name === 'rename' && label.name === '') {
+        push({ kind: 'error', text: t('请输入会话名称：/rename <名称>', 'Enter a session name: /rename <name>') });
         return;
       }
       void (async () => {
@@ -2318,6 +2335,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t(`无法更新会话：${done.code}`, `Could not update session: ${done.code}`) });
           return;
         }
+        setSessionName(done.name ?? '');
         push({ kind: 'meta', text: t(`${done.name || '未命名会话'} · ${done.archived ? '已归档' : '未归档'}`, `${done.name || 'Untitled session'} · ${done.archived ? 'archived' : 'not archived'}`) });
       })();
       return;
@@ -3509,7 +3527,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       external: externalControl, columns: geometry.columns, locale,
     }) : null,
     showSettings && !running && geometry.rows >= 20 ? h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, buildStatusLine({
-      sessionId, boundary: info.boundary, status, running: false, seconds, expanded, columns: geometry.columns, locale,
+      sessionId, name: sessionName, boundary: info.boundary, status, running: false, seconds, expanded, columns: geometry.columns, locale,
     })) : null,
   );
 }

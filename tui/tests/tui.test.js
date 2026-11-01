@@ -82,6 +82,7 @@ test('a slash line the UI table does not own goes to the host as one message', o
   assert.deepEqual(routeInput('  读一下 note.txt  ', false), { kind: 'run', text: '读一下 note.txt' });
   assert.deepEqual(routeInput('/tools', false), { kind: 'command', name: 'tools', argument: '' });
   assert.deepEqual(routeInput('/browser', false), { kind: 'command', name: 'browser', argument: '' });
+  assert.deepEqual(routeInput('/rename 我的会话', true), { kind: 'command', name: 'rename', argument: '我的会话' });
   assert.deepEqual(routeInput('/browser stop', true), { kind: 'command', name: 'browser', argument: 'stop' });
   assert.deepEqual(routeInput('/browser resume', true), { kind: 'command', name: 'browser', argument: 'resume' });
   assert.deepEqual(routeInput('/MODE now', false), { kind: 'command', name: 'mode', argument: 'now' });
@@ -170,6 +171,19 @@ test('the metadata line keeps the session and its workspace, never budgets or co
   const noWindow = buildStatusLine({ sessionId: 'abcdef0123456789', status: { ...status, usage: undefined }, running: false, seconds: 0, expanded: false });
   assert.doesNotMatch(noWindow, /ctx:/);
   assert.doesNotMatch(noWindow, /minimal|policy|model:/);
+});
+
+test('a named session shows its name on the metadata line instead of the short id', options, () => {
+  const status = { mode: 'minimal', policy: 'ask', tools: [], eventCount: 1 };
+  const named = buildStatusLine({ sessionId: 'abcdef0123456789', name: '整理 P7 的界面', boundary: 'C:\workspace\project', status, running: false, seconds: 0, expanded: false, columns: 120 });
+  assert.match(named, /会话 整理 P7 的界面/);
+  assert.doesNotMatch(named, /abcdef01/);
+  const unnamed = buildStatusLine({ sessionId: 'abcdef0123456789', name: '   ', boundary: 'C:\workspace\project', status, running: false, seconds: 0, expanded: false, columns: 120 });
+  assert.match(unnamed, /会话 abcdef01/);
+  for (const columns of [40, 60, 80]) {
+    const line = buildStatusLine({ sessionId: 'abcdef0123456789', name: '整理 P7 的界面', boundary: 'C:\workspace\project', status, running: true, seconds: 5, expanded: false, columns });
+    assert.ok(displayWidth(line) <= columns, `named status line exceeds ${columns} columns`);
+  }
 });
 
 test('the metadata line identifies the Host phase and elapsed time since actual progress', options, () => {
