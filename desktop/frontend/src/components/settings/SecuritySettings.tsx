@@ -121,11 +121,14 @@ export function SecuritySettings({ client, projectRoot, sessionId, status, onSta
         </>}
     </Group>
     <Group title={t('默认值与审批规则', 'Defaults and approval rules')}>
-      <Row label={t('默认审批档', 'Default approval tier')}>
-        <span>{catalog?.policyDefault ?? t('未知', 'Unknown')}</span>
-        {status !== null && <span className="catalog-tag">{t(`本会话覆盖：${status.policy}`, `Session override: ${status.policy}`)}</span>}
+      <Row label={t('项目默认档', 'Project default tier')}>
+        <span>{catalog?.policyDefault ?? status?.policyDefault ?? t('未知', 'Unknown')}</span>
       </Row>
-      <p className="sheet-note">{t('会话可以单独覆盖上面的默认档；规则逐条覆盖，未被更高层覆盖时继续生效。', 'A session may override the default above; rules apply item by item until a higher layer overrides them.')}</p>
+      <Row label={t('本会话实际', 'This session uses')}>
+        <span>{status === null ? t('未打开会话', 'No conversation') : status.policy}</span>
+        {status !== null && <span className="catalog-tag">{status.policySource === 'session' ? t('本会话覆盖', 'Session override') : t('沿用项目默认', 'Inherited from project')}</span>}
+      </Row>
+      <p className="sheet-note">{t('优先级：本会话设置 > 项目默认 > 内置默认（ask）。规则逐条覆盖，未被更高层覆盖时继续生效。', 'Precedence: this session > project default > built-in default (ask). Rules apply item by item until a higher layer overrides them.')}</p>
       <Row label={t('自定义规则', 'Custom rules')}>
         <details className="catalog-fold">
           <summary>{t('查看与编辑审批规则', 'View and edit approval rules')}</summary>
