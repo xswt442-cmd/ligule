@@ -6,6 +6,7 @@ import { mkdirSync } from 'node:fs';
 import { access, lstat, opendir, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';
+import { SETTLE_GRACE_MS, settleWithin } from '../kernel/settle.js';
 import { createTaskBudget, type TaskBudget } from '../kernel/task-budget.js';
 import { rememberRunSummary } from '../kernel/run-summary.js';
 import {
@@ -1339,7 +1340,11 @@ export function createHost({
     retiringSessions.add(state.id);
     const work = (async () => {
       // 失败或取消结果已经写入记录；收尾只等待轮次结束，不覆盖其结果。
-      await state.operation?.catch(() => undefined);
+      // 关闭时给等待加上限：卡住的工具调用不能拖住 Host 退出，超时后继续释放进程与记录锁。
+      const waited = await settleWithin(state.operation?.catch(() => undefined), SETTLE_GRACE_MS, shutdown
+        ? () => logger?.log?.('session retirement timed out waiting for the run', { sessionId: state.id, severity: 'error' })
+        : undefined);
+      if (!waited && !shutdown) await state.operation?.catch(() => undefined);
       const failures: unknown[] = [];
       const resources = [
         ['managedProcessesClosed', () => state.managedProcesses.close()],
