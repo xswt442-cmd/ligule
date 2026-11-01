@@ -227,7 +227,9 @@ function verdictNote(verdict: Verdict, locale: 'zh' | 'en'): string {
   const t = (zh: string, en: string) => locale === 'zh' ? zh : en;
   if (typeof verdict.decision !== 'string') return '';
   const outcome = verdict.decision === 'deny' ? t('已拒绝', 'Denied') : verdict.via === 'ask' ? t('审批通过', 'Approved') : t('自动允许', 'Allowed automatically');
-  const level = verdict.level === undefined ? '' : ` (${verdict.level}${verdict.forced === true ? '→ask' : ''})`;
+  // 连续拒绝只会收紧到「逐项审批」；none/never 档不受影响，不能显示成档位变化。
+  const escalated = verdict.forced === true && verdict.level !== undefined && verdict.level !== 'none' && verdict.level !== 'never' && verdict.level !== 'ask';
+  const level = verdict.level === undefined ? '' : ` (${verdict.level}${escalated ? '→ask' : ''})`;
   const rule = typeof verdict.rule === 'string' && verdict.rule !== '' ? t(` · 规则：${verdict.rule}`, ` · Rule: ${verdict.rule}`) : '';
   return `${outcome}${level}${rule}`;
 }

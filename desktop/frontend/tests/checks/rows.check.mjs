@@ -118,6 +118,17 @@ assert.equal(refusal.kind, 'refusal');
 assert.equal(refusal.text, '这一条没被允许。');
 assert.deepEqual(refusal.notes, ['已拒绝 (auto→ask)']);
 
+const noneRefusal = projectRecord({
+  kind: 'tool',
+  tool: 'exec',
+  callId: 'c4b',
+  args: { command: 'rm -rf .' },
+  verdict: { decision: 'deny', via: 'ask', capability: 'exec', level: 'none', forced: true },
+  result: { failed: true, kind: 'refusal', code: 'policy_denied', reason: '这一条没被允许。' },
+})[0];
+// 不提示档本来就不问，连续拒绝也不该被写成档位变化。
+assert.deepEqual(noneRefusal.notes, ['已拒绝 (none)']);
+
 const repaired = projectRecord({
   kind: 'tool',
   tool: 'exec',

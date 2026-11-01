@@ -26,7 +26,9 @@ interface RecordedVerdict {
 // 因连续拒绝触发的强制审批单独标记为 `ask(forced)`，区别于配置策略的一般审批。
 function levelOf(verdict: RecordedVerdict): string {
   const level = typeof verdict.level === 'string' ? verdict.level : 'unknown';
-  return verdict.forced === true ? `${level}→ask` : level;
+  // 连续拒绝只会把 auto 收紧到 ask；none/never 本身不审批，ask 也没有被改变。
+  const tightened = level !== 'none' && level !== 'never' && level !== 'ask' && level !== 'unknown';
+  return verdict.forced === true && tightened ? `${level}→ask` : level;
 }
 
 function bump(table: Record<string, number>, key: string): void {
