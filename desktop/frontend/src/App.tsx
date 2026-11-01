@@ -978,6 +978,24 @@ export function App({ transport }: { transport: Transport }) {
         setRows((current) => [...current, metaRow('error', `无法启动后端：${code(error)}`, `Could not start the host: ${code(error)}`)]);
         return;
       }
+      // Host restart invalidates an in-flight preference write. Reload its version and saved values
+      // before restoring the Session so a failed write does not leave the composer read-only.
+      setSettingsReady(false);
+      setPrefsFailure(null);
+      setPrefsDetails('');
+      const refreshedPreferences = loadSettings(client).then(
+        (adopted) => {
+          setSettings(adopted);
+          saveWarned.current = false;
+          setSettingsReady(true);
+        },
+        (error) => {
+          setPrefsFailure(code(error));
+          setPrefsDetails(error instanceof Error ? error.message : String(error));
+        },
+      );
+      prefsSettled.current = refreshedPreferences;
+      await refreshedPreferences;
       if (sessionId !== null) {
         // Host 被强制结束后，记录锁可能要等租约过期；重试预算比租约略长，仍拿不到就明确提示。
         const reopened = await reopenSessionWriter({
