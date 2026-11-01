@@ -88,24 +88,33 @@ export function ApprovalCard({ ask, queued, verbosity, active, onAnswer, onOpen,
       <Fold key={ask.id} text={t(ask.content, ask.english?.content ?? ask.content)} verbosity={verbosity} always label={t('查看完整内容', 'View full content')} onExpand={() => onDetails?.(ask)} />
     </div>
     <div className="approval-actions">
-      {ask.rememberable === true && ask.rememberScopes !== undefined && ask.rememberScopes.length > 0 && <label className="approval-memory">
-        <span>{t('记住到', 'Remember in')}</span>
-        <select value={rememberScope} onChange={(event) => setRememberScope(event.target.value as 'once' | RememberScope)}>
-          <option value="once">{t('仅这一次', 'This time only')}</option>
-          {ask.rememberScopes.map((scope) => <option key={scope} value={scope}>
-            {scope === 'session' ? t('当前会话', 'This session') : scope === 'project' ? t('当前项目', 'This project') : t('所有项目', 'All projects')}
-          </option>)}
-        </select>
-      </label>}
-      {ask.rememberable === true && selectedMemoryScope !== 'once' && (ask.rememberTargetOptions?.length ?? 0) > 1 && <label className="approval-memory">
-        <span>{t('操作范围', 'Action scope')}</span>
-        <select value={selectedMemoryTarget} onChange={(event) => setRememberTarget(event.target.value as 'file' | 'workspace')}>
-          {ask.rememberTargetOptions?.map((target) => <option key={target} value={target}>
-            {target === 'file' ? t('仅此文件', 'This file only') : t('此工作区内此类操作', 'This operation type in this workspace')}
-          </option>)}
-        </select>
-      </label>}
-      {ask.rememberable === true && ask.rememberScopes !== undefined && ask.rememberScopes.length > 0 && <span className="approval-memory-hint">{rememberHint}</span>}
+      <div className="approval-primary">
+        <button type="button" data-tone="allow" onClick={() => onAnswer('allow', selectedMemoryScope === 'once' ? undefined : selectedMemoryScope, selectedMemoryScope === 'once' ? undefined : selectedMemoryTarget)}>
+          {selectedMemoryScope === 'once' ? t('允许一次', 'Allow once') : t('允许并记住', 'Allow and remember')}
+        </button>
+        <button type="button" data-tone="deny" onClick={() => onAnswer('deny')}>{t('拒绝', 'Deny')}</button>
+      </div>
+      {ask.rememberable === true && ask.rememberScopes !== undefined && ask.rememberScopes.length > 0 && <details className="approval-remember">
+        <summary>{t('记住这条规则', 'Remember this rule')}</summary>
+        <label className="approval-memory">
+          <span>{t('记住到', 'Remember in')}</span>
+          <select value={rememberScope} onChange={(event) => setRememberScope(event.target.value as 'once' | RememberScope)}>
+            <option value="once">{t('仅这一次', 'This time only')}</option>
+            {ask.rememberScopes.map((scope) => <option key={scope} value={scope}>
+              {scope === 'session' ? t('当前会话', 'This session') : scope === 'project' ? t('当前项目', 'This project') : t('所有项目', 'All projects')}
+            </option>)}
+          </select>
+        </label>
+        {selectedMemoryScope !== 'once' && (ask.rememberTargetOptions?.length ?? 0) > 1 && <label className="approval-memory">
+          <span>{t('操作范围', 'Action scope')}</span>
+          <select value={selectedMemoryTarget} onChange={(event) => setRememberTarget(event.target.value as 'file' | 'workspace')}>
+            {ask.rememberTargetOptions?.map((target) => <option key={target} value={target}>
+              {target === 'file' ? t('仅此文件', 'This file only') : t('此工作区内此类操作', 'This operation type in this workspace')}
+            </option>)}
+          </select>
+        </label>}
+        {selectedMemoryScope !== 'once' && <span className="approval-memory-hint">{rememberHint}</span>}
+      </details>}
       {ask.detailsLoading === true && <span className="approval-memory-hint">{t('正在读取待审批内容…', 'Loading pending content…')}</span>}
       {ask.detailsError !== undefined && <span className="approval-memory-hint" role="alert">{t(`无法读取完整详情：${ask.detailsError}`, `Could not read full details: ${ask.detailsError}`)}</span>}
       <button type="button" data-tone="allow" onClick={() => onAnswer('allow', selectedMemoryScope === 'once' ? undefined : selectedMemoryScope, selectedMemoryScope === 'once' ? undefined : selectedMemoryTarget)}>
