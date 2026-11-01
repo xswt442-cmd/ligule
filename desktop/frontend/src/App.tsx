@@ -11,6 +11,7 @@ import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
 import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
 import { approvalSession, toApprovalAsk, type ApprovalRequestParams } from './approval-request';
+import { reopenSessionWriter } from './session-reopen';
 import { blockedSessions, type QuitInput, type QuitRow } from './quit';
 import { SessionRail } from './components/SessionRail';
 import type { SearchHit } from './components/rail/types';
@@ -978,16 +979,19 @@ export function App({ transport }: { transport: Transport }) {
         return;
       }
       if (sessionId !== null) {
-        // Host 被强制结束后，记录锁可能要等租约过期。等待锁最多十二秒；超时后提示用户重试。
-        const deadline = Date.now() + 12_000;
-        for (;;) {
-          try {
-            await client.call('session.open', projectRoot === '' ? { sessionId } : { sessionId, projectRoot }, 60_000);
-            break;
-          } catch (error) {
-            if (code(error) !== 'session_locked' || Date.now() >= deadline) break;
-            await new Promise((done) => setTimeout(done, 1_000));
-          }
+        // Host 被强制结束后，记录锁可能要等租约过期；重试预算比租约略长，仍拿不到就明确提示。
+        const reopened = await reopenSessionWriter({
+          open: () => client.call('session.open', projectRoot === '' ? { sessionId } : { sessionId, projectRoot }, 60_000).then(() => undefined),
+          code,
+          isLocked: (failure) => failure === 'session_locked',
+          now: () => Date.now(),
+          sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
+          budgetMs: 15_000,
+        });
+        if (reopened.kind === 'locked') {
+          setRows((current) => [...current, metaRow('error', '会话仍被先前的宿主占用，已以只读方式打开；等锁释放后点「重新连接」可取回写入权。', 'The previous host still holds the session lock, so it opened read-only. Reconnect once the lock clears to regain the writer.')]);
+        } else if (reopened.kind === 'failed') {
+          setRows((current) => [...current, metaRow('error', `无法重新打开会话：${reopened.code}`, `Could not reopen the conversation: ${reopened.code}`)]);
         }
         await openSession(sessionId, undefined, true);
       } else {
