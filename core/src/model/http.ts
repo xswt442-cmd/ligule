@@ -4,6 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { KernelError } from '../kernel/error.js';
 import type { ProviderDiagnostic, ProviderDiagnosticCategory } from '../kernel/error.js';
 import { resolveCredential } from '../kernel/credentials.js';
+import { trimTrailingSeparators } from '../kernel/workspace.js';
 import type { ModelMessage, ToolCall } from '../kernel/loop.js';
 
 export interface RetryPolicy {
@@ -68,8 +69,7 @@ export function apiRoot(baseUrl: unknown): string {
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new KernelError('provider_base_url_invalid', { detail: 'an HTTP(S) root without credentials, query, or fragment' });
   }
-  const base = baseUrl.replace(/\/+$/, '');
-  return base;
+  return trimTrailingSeparators(baseUrl);
 }
 
 // 发送请求时才解析凭据；运行中更新密钥不需要重建提供方，配置快照也不保存密钥值。

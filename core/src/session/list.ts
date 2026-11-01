@@ -88,13 +88,42 @@ function workspaceFolderLabel(identity: string): string {
     const parts = identity.slice(windowsDrive[0].length).split(/[\\/]+/u).filter(Boolean);
     return `${windowsDrive[1].toLowerCase()}--${parts.map(safePathPart).join('-')}`.slice(0, 120);
   }
-  const unc = /^\\\\([^\\]+)[\\/]+(.+)$/u.exec(identity);
-  if (unc !== null) {
-    const parts = [unc[1], ...unc[2].split(/[\\/]+/u)].filter(Boolean);
+  const unc = splitUncIdentity(identity);
+  if (unc !== undefined) {
+    const parts = [unc.host, ...unc.rest.split(/[\\/]+/u)].filter(Boolean);
     return `unc--${parts.map(safePathPart).join('-')}`.slice(0, 120);
   }
   const parts = identity.split(/[\\/]+/u).filter(Boolean);
   return `root-${parts.map(safePathPart).join('-')}`.slice(0, 120);
+}
+
+/**
+ * 把 `\\host\share\x` 拆成 host 与其余部分；不是 UNC 路径时返回 undefined。
+ *
+ * 逐字符扫描而不是用 `/^\\\\([^\\]+)[\\/]+(.+)$/u`：后者两个量词共享分隔符，
+ * 每个字符位置的失败路径都要重扫分隔符串，输入由路径决定会退化成多项式时间
+ * （CodeQL js/polynomial-redos）。这里从右往左找最靠右且可行的切分，等价于
+ * 正则的贪婪回溯顺序，复杂度与路径长度线性相关。
+ */
+function splitUncIdentity(identity: string): { host: string; rest: string } | undefined {
+  if (!identity.startsWith('\\\\')) return undefined;
+  const body = identity.slice(2);
+  const isSeparator = (char: string): boolean => char === '/' || char === '\\';
+  for (let index = body.length - 1; index >= 0; index -= 1) {
+    if (!isSeparator(body[index])) continue;
+    let runStart = index;
+    while (runStart > 0 && isSeparator(body[runStart - 1])) runStart -= 1;
+    let runEnd = index;
+    while (runEnd + 1 < body.length && isSeparator(body[runEnd + 1])) runEnd += 1;
+    const host = body.slice(0, runStart);
+    if (host !== '' && !host.includes('\\')) {
+      for (let cut = runEnd; cut >= runStart; cut -= 1) {
+        if (cut + 1 < body.length) return { host, rest: body.slice(cut + 1) };
+      }
+    }
+    index = runStart;
+  }
+  return undefined;
 }
 
 function safePathPart(part: string): string {

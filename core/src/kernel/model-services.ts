@@ -1,4 +1,5 @@
 import { KernelError } from './error.js';
+import { trimTrailingSeparators } from './workspace.js';
 
 export type ModelService = {
   id: string;
@@ -76,7 +77,7 @@ export function modelServices(value: unknown): ModelService[] {
         return modelSetting;
       });
     }
-    return { id, name, api, baseURL: baseURL.replace(/\/+$/u, ''), apiKeyEnv, models, ...(modelSettings === undefined ? {} : { modelSettings }) };
+    return { id, name, api, baseURL: trimTrailingSeparators(baseURL), apiKeyEnv, models, ...(modelSettings === undefined ? {} : { modelSettings }) };
   });
 }
 
