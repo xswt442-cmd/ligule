@@ -140,7 +140,7 @@ export function parseControlWizardInput(wizard: ControlWizard, raw: string, t: W
     }
     values.allowedMcpTools = allowed;
   } else if (wizard.step === 10) {
-    if (listOf(input).length === 0) values.expiresAt = null;
+    if (input === '' || input.toLowerCase() === 'none') values.expiresAt = null;
     else {
       const expiry = input.length === 10 ? Date.parse(`${input}T23:59:59`) : Date.parse(input);
       if (!Number.isFinite(expiry) || expiry <= Date.now()) {

@@ -74,4 +74,5 @@ const t = (chinese: string) => chinese;
 assert.equal(grantState({ revokedAt: 'x', expiresAt: null } as never, t), '已撤销');
 assert.equal(grantState({ revokedAt: null, expiresAt: '2000-01-01T00:00:00.000Z' } as never, t), '已到期');
 assert.equal(grantState({ revokedAt: null, expiresAt: null } as never, t), '可用');
-assert.equal(sameProjectPath('E:\\codes\\project\\', 'E:\\codes\\project'), sameProjectPath('E:\\codes\\project', 'E:\\codes\\project'));
+assert.equal(sameProjectPath('E:\\codes\\project\\', 'E:\\codes\\project'), true);
+assert.equal(sameProjectPath('/project/one', '/project/two'), false);

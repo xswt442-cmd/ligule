@@ -62,6 +62,18 @@ test('control wizard defers MCP tool listing and aborts when trust is refused', 
   assert.equal(accepted.wizard.values.confirmWorkspaceTrust, true);
 });
 
+test('control wizard only accepts an explicit empty expiry or none for no expiration', () => {
+  for (const input of ['', 'none', 'NONE']) {
+    const result = parseControlWizardInput(wizard(10), input, t);
+    assert.equal(result.kind, 'step');
+    assert.equal(result.wizard.values.expiresAt, null);
+  }
+  for (const input of [',', ' , ', ',,']) {
+    const result = parseControlWizardInput(wizard(10), input, t);
+    assert.equal(result.kind, 'error', `invalid expiry ${JSON.stringify(input)} must not create an unlimited grant`);
+  }
+});
+
 test('control wizard submits and maps values onto the create request', () => {
   const values = {
     name: 'grant',

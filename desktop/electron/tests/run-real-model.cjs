@@ -358,14 +358,17 @@ async function verifyExternalSessionControl() {
       const normalComposer = document.querySelector('footer.composer:not(.external-session-composer)');
       const input = composer?.querySelector('textarea[aria-label="发送消息到外控会话"], textarea[aria-label="Send a message to the external session"]');
       const text = banner?.textContent ?? '';
-      const config = composer?.querySelector('.external-session-config')?.textContent ?? '';
-      const hasModel = config.includes('模型') || config.includes('Model');
+      const configuration = composer?.querySelector('details.external-session-config-details');
+      const summary = configuration?.querySelector('summary')?.textContent ?? '';
+      const config = configuration?.querySelector('.external-session-config')?.textContent ?? '';
+      const hasModel = (summary.includes('会话配置') || summary.includes('Session configuration'))
+        && summary.split(' · ').length >= 3;
       const hasToolMode = config.includes('工具模式') || config.includes('Tool mode');
       const hasPolicy = config.includes('Policy');
       const hasPermission = config.includes('权限') || config.includes('Permission');
       return (text.includes('外控 Agent 正在运行') || text.includes('external agent is controlling'))
         && composer !== null && normalComposer === null && input?.readOnly === false
-        && composer.querySelector('details.external-session-grant') !== null
+        && configuration !== null && composer.querySelector('details.external-session-grant') !== null
         && hasModel && hasToolMode && hasPolicy && hasPermission;
     })()`, 15_000, 'external_session_composer_or_config_missing');
     const sendDisabled = await evaluate(`document.querySelector('button.send')?.disabled === true`);
