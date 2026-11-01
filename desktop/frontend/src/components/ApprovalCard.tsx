@@ -117,10 +117,6 @@ export function ApprovalCard({ ask, queued, verbosity, active, onAnswer, onOpen,
       </details>}
       {ask.detailsLoading === true && <span className="approval-memory-hint">{t('正在读取待审批内容…', 'Loading pending content…')}</span>}
       {ask.detailsError !== undefined && <span className="approval-memory-hint" role="alert">{t(`无法读取完整详情：${ask.detailsError}`, `Could not read full details: ${ask.detailsError}`)}</span>}
-      <button type="button" data-tone="allow" onClick={() => onAnswer('allow', selectedMemoryScope === 'once' ? undefined : selectedMemoryScope, selectedMemoryScope === 'once' ? undefined : selectedMemoryTarget)}>
-        {selectedMemoryScope === 'once' ? t('允许一次', 'Allow once') : t('允许并记住', 'Allow and remember')}
-      </button>
-      <button type="button" data-tone="deny" onClick={() => onAnswer('deny')}>{t('拒绝', 'Deny')}</button>
       <details className="approval-tier">
         <summary>{t('审批依据', 'Approval details')} · {ask.policy === '' ? t('未知档位', 'Unknown tier') : ask.policy} · {tierSource(ask, t)}</summary>
         <p>{tier === undefined ? t('无法读取本次审批档位的说明。', 'The approval tier details are unavailable.') : t(...tier)}</p>
