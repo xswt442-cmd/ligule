@@ -50,8 +50,9 @@ function assertFrameBudget(frame, columns, rows) {
   assert.ok(lines.every((line) => displayWidth(line) <= columns), lines.join('\n'));
 }
 
-test('approval panel renders every decision separately and preserves supplied scope order at 32x14', () => {
-  const layout = buildApprovalLayout(approval(), false, 32, 14, 'zh');
+// 记住规则是第二层，所以这组“每个决定都单独可见”的断言在展开态（第六个参数 true）下检查。
+test('expanded remember level renders every decision separately and preserves supplied scope order at 32x14', () => {
+  const layout = buildApprovalLayout(approval(), false, 32, 14, 'zh', true);
   assert.equal(layout.canApprove, true);
   assert.ok(layout.bodyHeight >= 1);
   assert.ok(layout.targetLines.join('').includes('C:/repo/notes.txt'));
@@ -81,11 +82,11 @@ test('approval panel renders every decision separately and preserves supplied sc
 });
 
 test('approval ranges state file, exact command, MCP identity, and all tool arguments', () => {
-  const file = buildApprovalLayout(approval({ rememberTarget: 'workspace' }), false, 80, 24, 'zh');
+  const file = buildApprovalLayout(approval({ rememberTarget: 'workspace' }), false, 80, 24, 'zh', true);
   assert.ok(file.scopeLines.join('').includes('此工作区内同类文件操作'));
   assert.ok(file.actionLines.join('\n').includes('w 切换文件/工作区范围'));
 
-  const command = buildApprovalLayout(approval({ rememberHintKey: 'command', rememberTargetOptions: ['command'] }), false, 80, 24, 'en');
+  const command = buildApprovalLayout(approval({ rememberHintKey: 'command', rememberTargetOptions: ['command'] }), false, 80, 24, 'en', true);
   assert.ok(command.scopeLines.join('').includes('exact command and argument boundary'));
   assert.ok(!command.actionLines.some((line) => line.startsWith('w ')));
 
@@ -93,11 +94,11 @@ test('approval ranges state file, exact command, MCP identity, and all tool argu
   const mcp = buildApprovalLayout(approval({
     tool: 'mcp.search', detail: 'mcp:docs/search', rememberHintKey: 'mcp',
     rememberTargetOptions: [], identityDigest: digest,
-  }), false, 80, 24, 'en');
+  }), false, 80, 24, 'en', true);
   assert.ok(mcp.scopeLines.join('').includes('same MCP tool, arguments, and server configuration digest 0123456789ab'));
   assert.ok(!mcp.actionLines.some((line) => line.startsWith('w ')));
 
-  const tool = buildApprovalLayout(approval({ rememberHintKey: 'tool', rememberTargetOptions: ['tool'] }), false, 80, 24, 'en');
+  const tool = buildApprovalLayout(approval({ rememberHintKey: 'tool', rememberTargetOptions: ['tool'] }), false, 80, 24, 'en', true);
   assert.ok(tool.scopeLines.join('').includes('all arguments for this tool capability'));
 
   const wide = terminal(80);
@@ -203,4 +204,59 @@ test('expanded approval body is complete and cursor paging exposes later content
   } finally {
     lastInstance.unmount();
   }
+});
+
+test('remember rules stay behind one shortcut and leave the main decisions in one row', () => {
+  const collapsed = buildApprovalLayout(approval(), false, 80, 24, 'zh');
+  assert.equal(collapsed.canApprove, true);
+  assert.deepEqual(collapsed.scopeLines, [], 'the remember range only appears after the user opens it');
+  const collapsedActions = collapsed.actionLines.join('\n');
+  assert.ok(!collapsedActions.includes('记住本会话'), 'rule choices are not offered before the user asks for them');
+  assert.ok(!collapsedActions.includes('w 切换'), 'the scope toggle belongs to the second level');
+  assert.ok(collapsedActions.includes(`${keyHint('approval-remember')} 记住规则…`), 'the shortcut itself stays visible');
+  assert.ok(collapsedActions.includes('1 允许一次'));
+  assert.ok(collapsedActions.includes(`${keyHint('deny')} 拒绝`));
+  assert.ok(collapsedActions.includes(`${keyHint('expand-or-history')} 查看详情`));
+  assert.ok(collapsedActions.includes(`${keyHint('approval-cancel')} 取消本轮`));
+  assert.ok(collapsed.actionLines.length <= 2, `primary decisions share at most two rows: ${collapsedActions}`);
+
+  const open = buildApprovalLayout(approval(), false, 80, 24, 'zh', true);
+  assert.ok(open.scopeLines.join('').includes('仅此文件'));
+  assert.ok(open.actionLines.join('\n').includes(`${keyHint('approval-remember')} 收起记住选项`));
+  assert.ok(open.bodyHeight < collapsed.bodyHeight, 'folding the rules away gives the rows back to the pending change');
+
+  for (const rows of [24, 12]) {
+    const layout = buildApprovalLayout(approval(), false, 80, rows, 'zh');
+    assert.equal(layout.canApprove, true, `collapsed approval stays operable at 80x${rows}`);
+    const tty = terminal(80);
+    const instance = tty.render(layout);
+    try {
+      const frame = tty.output();
+      assert.match(frame, /记住规则/);
+      assert.match(frame, /1 允许一次/);
+      assert.match(frame, /拒绝/);
+      assert.match(frame, /取消本轮/);
+      assertFrameBudget(frame, 80, rows);
+    } finally {
+      instance.unmount();
+    }
+  }
+
+  const narrowOpen = buildApprovalLayout(approval(), false, 80, 12, 'zh', true);
+  assert.equal(narrowOpen.canApprove, true, 'opening the remember level at 80x12 still allows a decision');
+  assert.ok(narrowOpen.actionLines.join('\n').includes('w 切换文件/工作区范围'));
+});
+
+test('an opened remember level that no longer fits keeps deny/cancel and the way back', () => {
+  const layout = buildApprovalLayout(approval(), false, 80, 6, 'zh', true);
+  assert.equal(layout.canApprove, false);
+  assert.ok(layout.warningLines.join('').includes('请放大窗口'));
+  assert.deepEqual(layout.actionLines, [
+    `${keyHint('deny')} 拒绝`,
+    `${keyHint('approval-cancel')} 取消本轮`,
+    `${keyHint('approval-remember')} 收起记住选项`,
+  ]);
+  // 收起之后主操作重新可用，用户不会被第二层卡死。
+  const collapsed = buildApprovalLayout(approval(), false, 80, 12, 'zh');
+  assert.equal(collapsed.canApprove, true);
 });

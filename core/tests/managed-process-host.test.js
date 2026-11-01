@@ -142,8 +142,12 @@ test('Linux bubblewrap Host-managed server survives the tool return and Session 
       }),
     });
     const events = (await client.request('session.read', { sessionId })).events;
-    const started = events.filter((event) => event.kind === 'tool' && event.tool === 'managed_process').at(-1)?.result.content;
-    assert.equal(started.status, 'running');
+    const managedCall = events.filter((event) => event.kind === 'tool' && event.tool === 'managed_process').at(-1);
+    assert.ok(managedCall, 'the Host records the managed_process result');
+    assert.equal(managedCall.result.failed, false,
+      `managed_process start failed: ${managedCall.result.code ?? managedCall.result.reason ?? JSON.stringify(managedCall.result)}`);
+    const started = managedCall.result.content;
+    assert.equal(started?.status, 'running', 'the Host reports the readiness-checked process as running');
     assert.equal(started.port, port);
     assert.equal(await (await fetch(url)).text(), 'linux-managed-ready');
 

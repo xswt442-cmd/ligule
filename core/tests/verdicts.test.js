@@ -72,3 +72,14 @@ test('the verdict stays out of the model view and out of the checkpoint hash', a
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+// 连续拒绝只会把「自动」收紧成「逐项审批」；none/never 本来就不问，不能被显示成档位变化。
+test('a forced ask never rewrites the none or never level', () => {
+  const levels = (level) => summarizeVerdicts([
+    tool(0, 'exec', { capability: 'exec', decision: 'deny', via: 'ask', level, forced: true, answer: 'deny' }, { kind: 'refusal', failed: true, code: 'policy_denied', reason: 'no', content: '' }),
+  ])[0].levels;
+  assert.deepEqual(levels('none'), { none: 1 });
+  assert.deepEqual(levels('never'), { never: 1 });
+  assert.deepEqual(levels('ask'), { ask: 1 });
+  assert.deepEqual(levels('auto'), { 'auto→ask': 1 });
+});

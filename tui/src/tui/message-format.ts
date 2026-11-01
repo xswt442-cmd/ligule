@@ -65,6 +65,36 @@ export interface ToolCallPreview {
   readonly hasDetails: boolean;
 }
 
+// 结果行只需要一个代表性目标（读的哪个文件、跑的哪条命令），不重复整个参数摘要。
+export function toolTarget(serializedArguments: string): string {
+  let value: unknown;
+  try {
+    value = JSON.parse(serializedArguments);
+  } catch {
+    return '';
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return '';
+  const args = value as Record<string, unknown>;
+  for (const key of TARGET_KEYS) {
+    const entry = args[key];
+    if (typeof entry === 'string' && entry !== '') return safeSummaryValue(entry);
+    if (Array.isArray(entry) && entry.length > 0 && entry.every((part) => typeof part === 'string')) return safeSummaryValue(entry.join(', '));
+  }
+  return '';
+}
+
+// 单行摘要按显示宽度截断，宽字形与转义后的控制字符都按实际列数计算。
+export function clipToWidth(value: string, columns: number): string {
+  if (columns < 1) return '';
+  if (displayWidth(value) <= columns) return value;
+  let fitted = '';
+  for (const { segment } of graphemes.segment(value)) {
+    if (displayWidth(fitted + segment + '…') > columns) break;
+    fitted += segment;
+  }
+  return `${fitted}…`;
+}
+
 // The summary names a useful destination while the original serialized arguments remain available in detail view.
 export function toolCallSummary(serializedArguments: string, columns = 80, locale: Locale = 'en'): ToolCallPreview {
   let value: unknown;

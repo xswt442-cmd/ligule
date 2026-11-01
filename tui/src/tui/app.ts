@@ -24,10 +24,11 @@ import { ApprovalPanel, buildApprovalLayout } from './approval-view.js';
 import { TUI_COLORS } from './ui-style.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
 import { CURRENT, ENGLISH_LABELS, ENGLISH_VIEWS, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
-import { displayWidth } from './commands.js';
+import { activeRunBudgetSegment, buildStatusLine, contextSegment } from './status-line.js';
 import { textOf as chooseText, type Locale } from '@ligule/core/kernel/locale.js';
 import { controlPresets } from '@ligule/core/host/control-presets.js';
 import type { TerminalAction } from './keymap.js';
+import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type ControlWizardValues } from './control-wizard.js';
 import type { SessionEvent, SessionHeader } from '@ligule/core/session/format.js';
 import type { SessionSummary } from '@ligule/core/session/list.js';
 import type { AskAnswer, AskQuestion } from '@ligule/core/tools/ask-user.js';
@@ -164,53 +165,6 @@ interface TuiProgress {
   readonly task?: TuiTaskBudget;
 }
 
-function durationLabel(milliseconds: number, locale: Locale): string {
-  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
-  const units: readonly [number, string, string][] = locale === 'en'
-    ? [[86_400, 'd', 'd'], [3_600, 'h', 'h'], [60, 'm', 'm'], [1, 's', 's']]
-    : [[86_400, '天', '天'], [3_600, '小时', '小时'], [60, '分', '分'], [1, '秒', '秒']];
-  let remaining = totalSeconds;
-  const parts: string[] = [];
-  for (const [seconds, short, long] of units) {
-    const count = Math.floor(remaining / seconds);
-    if (count === 0 && parts.length === 0 && seconds !== 1) continue;
-    if (count > 0) {
-      parts.push(locale === 'en' ? `${count}${short}` : `${count}${long}`);
-      remaining -= count * seconds;
-      if (parts.length === 2) break;
-    }
-  }
-  return parts.length === 0 ? (locale === 'en' ? '0s' : '0秒') : parts.join(locale === 'en' ? ' ' : '');
-}
-
-export function activeRunBudgetSegment(status: TuiStatus | null, locale: Locale = 'zh'): string {
-  if (status?.running !== true) return '';
-  const task = status.progress === null || status.progress === undefined ? status.task : status.progress.task;
-  if (task === undefined || task === null) {
-    const calls = status.progress?.modelCalls;
-    const usage = Number.isSafeInteger(calls)
-      ? locale === 'en' ? `model calls ${calls}` : `模型调用 ${calls}`
-      : '';
-    const preparing = locale === 'en' ? 'run budget initializing' : 'Run 预算准备中';
-    return ` · ${[usage, preparing].filter(Boolean).join(' · ')}`;
-  }
-  const values = [task.modelCalls, task.maxModelCalls, task.timeoutMs, task.interactionWaitMs, task.interactionWaitTimeoutMs, task.executionElapsedMs];
-  if (!values.every(Number.isSafeInteger) || values.some(value => value < 0) || task.timeoutMs < 1 || task.maxModelCalls < 1
-    || task.interactionWaitTimeoutMs < 1 || typeof task.executionPaused !== 'boolean') {
-    return locale === 'en' ? ' · run budget details unavailable' : ' · Run 预算信息暂不可用';
-  }
-  const remaining = Math.max(0, task.timeoutMs - task.executionElapsedMs);
-  const calls = locale === 'en' ? `model calls ${task.modelCalls}/${task.maxModelCalls}` : `模型调用 ${task.modelCalls}/${task.maxModelCalls}`;
-  const deadline = locale === 'en'
-    ? `execution ${durationLabel(remaining, locale)} left`
-    : `执行剩余 ${durationLabel(remaining, locale)}`;
-  const interactions = locale === 'en'
-    ? `interaction wait ${durationLabel(task.interactionWaitMs, locale)}/${durationLabel(task.interactionWaitTimeoutMs, locale)}`
-    : `累计交互等待 ${durationLabel(task.interactionWaitMs, locale)}/${durationLabel(task.interactionWaitTimeoutMs, locale)}`;
-  const paused = task.executionPaused ? (locale === 'en' ? ' · deadline paused' : ' · 执行期限已暂停') : '';
-  return ` · Run ${calls} · ${deadline} · ${interactions}${paused}`;
-}
-
 interface DetailState {
   readonly seq: number | null;
   readonly kind: string;
@@ -239,7 +193,6 @@ interface SearchState {
 type PickerKind = 'model' | 'thinking' | 'mode' | 'policy' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network' | 'permission-confirm-partial'
   | 'control' | 'control-action' | 'control-revoke-confirm';
 type PolicyValue = 'ask' | 'auto' | 'none' | 'never';
-type PolicySelection = 'ask' | 'auto' | 'none';
 type AgentGrant = {
   readonly id: string;
   readonly name: string;
@@ -260,23 +213,6 @@ type AgentGrant = {
   readonly revokedAt: string | null;
 };
 type AgentControlSnapshot = { readonly version: string; readonly grants: readonly AgentGrant[] };
-type ControlWizardValues = {
-  name?: string;
-  defaultPermissionProfile?: AgentGrant['defaultPermissionProfile'];
-  maxPermissionProfile?: AgentGrant['maxPermissionProfile'];
-  defaultNetwork?: AgentGrant['defaultNetwork'];
-  maxNetwork?: AgentGrant['maxNetwork'];
-  defaultPolicy?: PolicySelection;
-  allowedPolicies?: PolicySelection[];
-  allowOperator?: boolean;
-  allowedMcpServers?: string[];
-  allowedMcpTools?: string[];
-  expiresAt?: string | null;
-  confirmFullAccess?: boolean;
-  confirmUnrestrictedNetwork?: boolean;
-  confirmPartialWorkspaceWrite?: boolean;
-  confirmWorkspaceTrust?: boolean;
-};
 type McpTrustScope = 'session' | 'project' | 'user';
 type McpServerSummary = {
   readonly name: string;
@@ -296,29 +232,12 @@ type McpTrustPending = {
   readonly version: string;
   readonly identityDigest: string;
 };
-type ControlWizard = {
-  readonly step: number;
-  readonly values: ControlWizardValues;
-  readonly mcpServers: readonly string[];
-  readonly mcpTools: readonly string[];
-};
-
 function agentMcpConfig(grant: AgentGrant): string {
   const args = ['mcp-server', '--project', grant.projectRoot, '--grant', grant.id];
   if (grant.allowOperator) args.push('--operator');
   return JSON.stringify({ mcpServers: { ligule: { command: 'ligule', args } } }, null, 2);
 }
 
-function controlWizardNext(step: number, values: ControlWizardValues): number {
-  if (step === 10) return 11;
-  if (step === 11) return values.maxPermissionProfile !== 'read-only' ? 12
-    : values.maxNetwork === 'unrestricted' ? 14 : -1;
-  if (step === 12) return values.maxPermissionProfile === 'full-access' ? 13
-    : values.maxNetwork === 'unrestricted' ? 14 : -1;
-  if (step === 13) return values.maxNetwork === 'unrestricted' ? 14 : -1;
-  if (step === 14) return -1;
-  return step + 1;
-}
 interface RuntimeChoice extends PanelChoice {
   readonly selection?: ModelSelection;
 }
@@ -507,6 +426,7 @@ interface QuestionState {
 
 // 将命令表和纯函数导出，供测试及其他界面逻辑使用。
 export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
+export { activeRunBudgetSegment, buildStatusLine, contextSegment } from './status-line.js';
 export { KEYMAP, CURRENT, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec, specOf } from './keymap.js';
 export { markdownLines } from './markdown.js';
 
@@ -517,80 +437,7 @@ export { foldText } from './message-format.js';
 export { capabilityOf, projectRecord, resultParts };
 
 // 上下文状态显示当前投影估算、模型窗口和是否超过压力线。窗口未知时隐藏整段状态。
-// Token 数是本地估算值，并使用波浪号标明，避免误认为模型服务返回的精确用量。
-interface ContextUsage {
-  readonly estimated: number;
-  readonly window: number;
-  readonly threshold: number;
-}
 
-export function contextSegment(usage: ContextUsage | null | undefined, locale: Locale = 'zh'): string {
-  if (usage === null || usage === undefined) return '';
-  return `ctx:~${usage.estimated}/${usage.window}${usage.estimated > usage.threshold ? chooseText(locale, ' 超限', ' over limit') : ''}`;
-}
-
-// 元数据行显示会话、目录、上下文和运行状态；模型与控制入口显示在输入框下方。
-// 空间不足时先截短目录，再隐藏上下文和记录数，并保留取消提示。
-interface StatusLineOptions {
-  readonly sessionId: string;
-  readonly boundary?: string;
-  readonly status: TuiStatus | null;
-  readonly running: boolean;
-  readonly seconds: number;
-  readonly expanded: boolean;
-  readonly columns?: number;
-  readonly locale?: Locale;
-  readonly now?: number;
-}
-
-export function buildStatusLine({ sessionId, boundary, status, running, seconds, expanded, columns, locale = 'zh', now = Date.now() }: StatusLineOptions): string {
-  const t = (zh: string, en: string) => chooseText(locale, zh, en);
-  const id = `${chooseText(locale, '会话', 'session')} ${sessionId.slice(0, 8)}`;
-  const root = boundary === undefined ? '' : boundary;
-  let base = `${id}${root === '' ? '' : ` · ${root}`}`;
-  if (status === null) return base;
-  const context = contextSegment(status.usage, locale);
-  const parts: string[] = [];
-  if (context !== '') parts.push(context);
-  if (status.permission !== undefined) {
-    const permission = status.permission;
-    parts.push(`perm: ${permission.profile} · ${permission.network} · ${permission.execution.available ? t('Shell 可用', 'Shell available') : t('Shell 受限', 'Shell restricted')}`);
-  }
-  const progress = status.progress;
-  const phaseHint = progress === undefined || progress === null ? '' : {
-    preparing: t('准备上下文', 'Preparing context'),
-    model_request: t('请求模型', 'Requesting model'),
-    tool_execution: t('执行工具', 'Running tools'),
-    compaction: t('压缩上下文', 'Compacting context'),
-    awaiting_approval: t('等待审批', 'Waiting for approval'),
-    awaiting_input: t('等待用户输入', 'Waiting for your input'),
-    settling: t('正在收尾', 'Finishing'),
-  }[progress.phase];
-  const idleSeconds = progress === undefined || progress === null ? 0 : Math.max(0, Math.floor((now - progress.lastProgressAt) / 1000));
-  const progressHint = running && progress !== undefined && progress !== null
-    ? `${phaseHint} · ${progress.modelCalls} ${t('次模型调用', 'model calls')} · ${progress.toolCalls} ${t('个工具调用', 'tool calls')} · ${idleSeconds}${t('秒无新进展', 's without progress')}${progress.outputTokens === null ? '' : ` · ${progress.outputTokens} ${t('输出token', 'output tokens')}`}`
-    : '';
-  // 空间不足时优先隐藏条数，保留中断和展开提示。
-  const hints = (running ? `${progressHint === '' ? '' : ` · ${progressHint}`}${t(` · ${Math.floor(seconds)} 秒，${keyHint('interrupt')} 打断`, ` · ${Math.floor(seconds)}s, ${keyHint('interrupt')} to stop`)}` : '')
-    + (expanded ? t(` · 已展开（${keyHint('expand-or-history')} 收起）`, ` · expanded (${keyHint('expand-or-history')} to close)`) : '');
-  let tail = `${chooseText(locale, `记录 ${status.eventCount} 条`, `${status.eventCount} events`)}${hints}`;
-  let shown = parts;
-  // 无法读取终端宽度时不截断文本，由终端自行换行。
-  const line = () => [base, ...shown, tail].filter(part => part !== '').join(' · ');
-  const over = () => columns !== undefined && columns > 0 && displayWidth(line()) > columns;
-  const leaf = root === '' ? '' : root.split(/[\\/]/).filter(Boolean).pop() ?? '';
-  if (over()) base = `${id}${leaf === '' ? '' : ` · ${leaf}`}`;
-  if (over()) shown = shown.filter((part) => !part.startsWith('ctx:'));
-  if (over()) shown = shown.filter((part) => !part.startsWith('perm:'));
-  if (over()) base = id;
-  if (over()) tail = hints === '' ? '' : hints.slice(3);
-  if (over() && running && progress !== undefined && progress !== null) {
-    shown = [];
-    tail = `${phaseHint} · ${idleSeconds}${t('秒无新进展', 's without progress')} · ${keyHint('interrupt')} ${t('打断', 'stop')}`;
-    if (over()) base = '';
-  }
-  return line();
-}
 
 // `/show` 使用稳定的事件序号，不使用可能随投影变化的屏幕行号。
 export function findRecord(events: readonly TuiRecord[], argument: string): { readonly code: string } | { readonly record: TuiRecord | null } {
@@ -696,6 +543,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [controlSnapshot, setControlSnapshot] = useState<AgentControlSnapshot | null>(null);
   const [controlTarget, setControlTarget] = useState<string | null>(null);
   const [controlWizard, setControlWizard] = useState<ControlWizard | null>(null);
+  const [controlWizardSubmitting, setControlWizardSubmitting] = useState(false);
+  const controlWizardSubmittingRef = useRef(false);
+  const controlWizardGeneration = useRef(0);
   const [mcpTrustPending, setMcpTrustPending] = useState<McpTrustPending | null>(null);
   const [externalControl, setExternalControl] = useState(false);
   const [externalSnapshot, setExternalSnapshot] = useState<ExternalControlSnapshot | null>(null);
@@ -703,6 +553,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const resolvedExternalInteractions = useRef(new Set<string>());
   useEffect(() => { resolvedExternalInteractions.current.clear(); }, [sessionId]);
   useEffect(() => { setMcpTrustPending(null); }, [sessionId]);
+  useEffect(() => { setSessionName(''); }, [sessionId]);
   const pickerRequest = useRef(0);
   const sessionNavigation = useRef({ generation: 0, activeToken: 0 });
   const sessionNavigationMounted = useRef(false);
@@ -760,6 +611,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   // Ctrl+R 反向搜索的查询文本和当前匹配位置；未搜索时为 null。
   const [search, setSearch] = useState<SearchState | null>(null);
   const [status, setStatus] = useState<TuiStatus | null>(null);
+  const [sessionName, setSessionName] = useState('');
   // `Static` 不会重绘已提交行，因此查看单条详情时在动态区重新绘制。
   const [detail, setDetail] = useState<DetailState | null>(null);
   // 斜杠命令候选的当前选择索引；候选内容始终从草稿重新计算。
@@ -887,6 +739,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [ask, query, sessionId]);
   const [approvalExpanded, setApprovalExpanded] = useState(false);
   const [approvalCursor, setApprovalCursor] = useState(0);
+  // 记住规则属于第二层：默认收起，换一条审批时复位，避免把上一条的展开状态带过去。
+  const [rememberOpen, setRememberOpen] = useState(false);
+  useEffect(() => setRememberOpen(false), [ask?.id]);
   const [questionOffset, setQuestionOffset] = useState(0);
   useEffect(() => setQuestionOffset(0), [query?.id, query?.at]);
 
@@ -902,6 +757,18 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       push({ kind: 'error', text: t(`无法读取状态：${errorCode(error) ?? errorMessage(error) ?? String(error)}`, `Could not read status: ${errorCode(error) ?? errorMessage(error) ?? String(error)}`) });
     }
   }, [client, externalControl, push, sessionId, t]);
+
+  // 会话名称只在打开会话时读一次；改名由 /rename 的返回值直接写回。
+  const refreshLabel = useCallback(async () => {
+    if (!alive.current || externalControl) return;
+    const listed = await client.request('sessions.list', { projectRoot: info.boundary })
+      .catch((error: unknown) => requestFailure(error, 'session_list_failed'));
+    if ('code' in listed || activeSession.current !== sessionId) return;
+    const own = listed.sessions.find((entry) => entry.id === sessionId);
+    if (own !== undefined) setSessionName(own.name ?? '');
+  }, [client, externalControl, info.boundary, sessionId]);
+
+  useEffect(() => { void refreshLabel(); }, [refreshLabel]);
 
   useEffect(() => {
     const resize = () => setGeometry({ columns: stdout?.columns ?? 80, rows: stdout?.rows ?? 24 });
@@ -964,6 +831,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       const args = isRecord(params.args) ? params.args : {};
       setApprovalExpanded(false);
       setApprovalCursor(0);
+      // 新审批从收起态开始：先给主操作，规则选项再按 m 打开。
+      setRememberOpen(false);
       setDetail(null);
       setSessionPicker(null);
       setSearch(null);
@@ -1346,6 +1215,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [app, inputs, info.boundary, sessionId, query?.id, push, t]);
 
   const openPicker = useCallback((kind: PickerKind, requestedControlTarget = controlTarget) => {
+    if (controlWizard === null && (kind === 'model' || kind === 'mode' || kind === 'policy')) {
+      controlWizardGeneration.current += 1;
+    }
     const token = ++pickerRequest.current;
     const own = sessionId;
     setDetail(null);
@@ -1495,7 +1367,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setPanel(null);
       push({ kind: 'error', text: t(`无法读取选项：${errorCode(error) ?? errorMessage(error) ?? 'picker_failed'}`, `Could not load choices: ${errorCode(error) ?? errorMessage(error) ?? 'picker_failed'}`) });
     });
-  }, [client, controlSnapshot, controlTarget, info.boundary, modes, push, sessionId, t]);
+  }, [client, controlSnapshot, controlTarget, controlWizard, info.boundary, modes, push, sessionId, t]);
 
   const beginSessionNavigation = useCallback((owner: string): SessionNavigationLease | undefined => {
     const navigation = sessionNavigation.current;
@@ -1723,9 +1595,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t('当前没有已选择的项目目录。', 'No project directory is selected.') });
           return;
         }
+        const owner = activeSession.current;
+        const generation = ++controlWizardGeneration.current;
+        controlWizardSubmittingRef.current = false;
+        setControlWizardSubmitting(false);
         void (async () => {
           try {
             const trust = await client.request('mcp.trust.list', { projectRoot: info.boundary });
+            if (generation !== controlWizardGeneration.current || activeSession.current !== owner) return;
             const mcpServers = trust.servers.filter((server) =>
               server.trustScopes.project?.trusted === true || server.trustScopes.user?.trusted === true,
             ).map((server) => server.name);
@@ -1736,6 +1613,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
               `Grant setup started. Press Enter after each answer; type cancel to stop. Trusted MCP servers: ${mcpServers.join(', ') || 'none'}`,
             ) });
           } catch (error) {
+            if (generation !== controlWizardGeneration.current || activeSession.current !== owner) return;
             push({ kind: 'error', text: t(`无法读取 MCP Server 信任状态：${errorCode(error) ?? 'mcp_trust_list_failed'}`, `Could not read MCP server trust: ${errorCode(error) ?? 'mcp_trust_list_failed'}`) });
           }
         })();
@@ -2319,11 +2197,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
-    if (name === 'name' || name === 'archive' || name === 'unarchive') {
+    if (name === 'rename' || name === 'archive' || name === 'unarchive') {
       // 会话名称和归档状态由 Host 写入记录，TUI 不维护第二份副本。
-      const label = name === 'name' ? { name: argument.trim() } : { archived: name === 'archive' };
-      if (name === 'name' && label.name === '') {
-        push({ kind: 'error', text: t('请输入会话名称：/name <名称>', 'Enter a session name: /name <name>') });
+      const label = name === 'rename' ? { name: argument.trim() } : { archived: name === 'archive' };
+      if (name === 'rename' && label.name === '') {
+        push({ kind: 'error', text: t('请输入会话名称：/rename <名称>', 'Enter a session name: /rename <name>') });
         return;
       }
       void (async () => {
@@ -2332,6 +2210,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t(`无法更新会话：${done.code}`, `Could not update session: ${done.code}`) });
           return;
         }
+        setSessionName(done.name ?? '');
         push({ kind: 'meta', text: t(`${done.name || '未命名会话'} · ${done.archived ? '已归档' : '未归档'}`, `${done.name || 'Untitled session'} · ${done.archived ? 'archived' : 'not archived'}`) });
       })();
       return;
@@ -2803,161 +2682,89 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const advanceControlWizard = useCallback(async (raw: string) => {
     const wizard = controlWizard;
     if (wizard === null) return false;
-    const input = raw.trim();
-    if (input.toLowerCase() === 'cancel' || input.toLowerCase() === '/cancel') {
+    const outcome = parseControlWizardInput(wizard, raw, t);
+    if (outcome.kind === 'cancelled') {
+      controlWizardGeneration.current += 1;
+      controlWizardSubmittingRef.current = false;
+      setControlWizardSubmitting(false);
       setControlWizard(null);
       resetDraft('');
       push({ kind: 'meta', text: t('已取消外控授权创建。', 'Agent Control grant creation cancelled.') });
       return true;
     }
-    const values: ControlWizardValues = { ...wizard.values };
-    const fail = (message: string) => push({ kind: 'error', text: message });
-    if (wizard.step === 0) {
-      if (input === '' || input.length > 80) { fail(t('名称须为 1 到 80 个字符。', 'Name must contain 1 to 80 characters.')); return true; }
-      values.name = input;
-    } else if (wizard.step === 1 || wizard.step === 2) {
-      if (!['read-only', 'workspace-write', 'full-access'].includes(input)) {
-        fail(t('请输入 read-only、workspace-write 或 full-access。', 'Enter read-only, workspace-write, or full-access.')); return true;
-      }
-      if (wizard.step === 1) values.defaultPermissionProfile = input as AgentGrant['defaultPermissionProfile'];
-      else {
-        const max = input as AgentGrant['maxPermissionProfile'];
-        const rank = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
-        if (values.defaultPermissionProfile !== undefined && rank[max] < rank[values.defaultPermissionProfile]) {
-          fail(t('权限上限不能低于默认权限。', 'The permission ceiling cannot be lower than its default.')); return true;
-        }
-        values.maxPermissionProfile = max;
-      }
-    } else if (wizard.step === 3 || wizard.step === 4) {
-      if (!['disabled', 'policy', 'unrestricted'].includes(input)) {
-        fail(t('请输入 disabled、policy 或 unrestricted。', 'Enter disabled, policy, or unrestricted.')); return true;
-      }
-      if (wizard.step === 3) values.defaultNetwork = input as AgentGrant['defaultNetwork'];
-      else {
-        const max = input as AgentGrant['maxNetwork'];
-        const rank = { disabled: 0, policy: 1, unrestricted: 2 };
-        if (values.defaultNetwork !== undefined && rank[max] < rank[values.defaultNetwork]) {
-          fail(t('网络上限不能低于默认网络范围。', 'The network ceiling cannot be lower than its default.')); return true;
-        }
-        values.maxNetwork = max;
-      }
-    } else if (wizard.step === 5) {
-      if (!['ask', 'auto', 'none'].includes(input)) { fail(t('请输入 ask、auto 或 none。', 'Enter ask, auto, or none.')); return true; }
-      values.defaultPolicy = input as PolicySelection;
-    } else if (wizard.step === 6) {
-      const allowed = input.split(',').map((part) => part.trim()).filter(Boolean);
-      if (allowed.length === 0 || allowed.some((part) => !['ask', 'auto', 'none'].includes(part))
-        || new Set(allowed).size !== allowed.length || !allowed.includes(values.defaultPolicy ?? 'ask')) {
-        fail(t('请输入不重复的 Policy 列表，例如 ask,none，并包含默认 Policy。', 'Enter distinct Policy modes such as ask,none, including the default.')); return true;
-      }
-      values.allowedPolicies = allowed as PolicySelection[];
-    } else if (wizard.step === 7) {
-      if (!['y', 'yes', 'n', 'no'].includes(input.toLowerCase())) { fail(t('请输入 yes 或 no。', 'Enter yes or no.')); return true; }
-      values.allowOperator = ['y', 'yes'].includes(input.toLowerCase());
-    } else if (wizard.step === 8) {
-      const allowed = input === '' || input.toLowerCase() === 'none' ? [] : input.split(',').map((part) => part.trim()).filter(Boolean);
-      if (new Set(allowed).size !== allowed.length || allowed.some((server) => !wizard.mcpServers.includes(server))) {
-        fail(t(`请输入已信任的 Server 名称列表：${wizard.mcpServers.join(', ') || 'none'}。`, `Enter a list of trusted server names: ${wizard.mcpServers.join(', ') || 'none'}.`)); return true;
-      }
-      values.allowedMcpServers = allowed;
+    if (outcome.kind === 'error') {
+      push({ kind: 'error', text: outcome.message });
+      return true;
+    }
+    if (outcome.kind === 'abort') {
+      controlWizardGeneration.current += 1;
+      controlWizardSubmittingRef.current = false;
+      setControlWizardSubmitting(false);
+      setControlWizard(null);
+      resetDraft('');
+      push({ kind: 'error', text: outcome.message });
+      return true;
+    }
+    if (outcome.kind === 'step') {
+      resetDraft('');
+      setControlWizard(outcome.wizard);
+      return true;
+    }
+    if (outcome.kind === 'mcp-servers') {
+      const values = outcome.values;
+      const servers = values.allowedMcpServers ?? [];
+      const owner = activeSession.current;
+      const generation = ++controlWizardGeneration.current;
+      resetDraft('');
       let tools: string[] = [];
-      if (allowed.length > 0) {
+      if (servers.length > 0) {
         try {
-          const listed = await Promise.all(allowed.map((server) => client.request('mcp.trust.tools', {
+          const listed = await Promise.all(servers.map((server) => client.request('mcp.trust.tools', {
             projectRoot: info.boundary ?? '', server,
           })));
-          tools = listed.flatMap((entry) => entry.tools.map((tool) => `mcp:${entry.server}/${tool.name}`));
+          if (generation !== controlWizardGeneration.current || activeSession.current !== owner) return true;
+          tools = listed.flatMap((entry) => entry.tools.map((tool) => 'mcp:' + entry.server + '/' + tool.name));
         } catch (error) {
-          fail(t(`读取 MCP 工具失败：${errorCode(error) ?? 'mcp_tool_list_failed'}`, `Could not list MCP tools: ${errorCode(error) ?? 'mcp_tool_list_failed'}`)); return true;
+          if (generation !== controlWizardGeneration.current || activeSession.current !== owner) return true;
+          push({ kind: 'error', text: t('读取 MCP 工具失败：' + (errorCode(error) ?? 'mcp_tool_list_failed'), 'Could not list MCP tools: ' + (errorCode(error) ?? 'mcp_tool_list_failed')) });
+          return true;
         }
       }
-      values.allowedMcpTools = [];
-      resetDraft('');
       setControlWizard({ step: 9, values, mcpServers: wizard.mcpServers, mcpTools: tools });
       push({ kind: 'meta', text: t(
-        `可授权的 MCP 工具：${tools.join(', ') || '无'}。输入完整能力名列表，或 none。`,
-        `MCP tools available to grant: ${tools.join(', ') || 'none'}. Enter exact capability names or none.`,
+        '可授权的 MCP 工具：' + (tools.join(', ') || '无') + '。输入完整能力名列表，或 none。',
+        'MCP tools available to grant: ' + (tools.join(', ') || 'none') + '. Enter exact capability names or none.',
       ) });
       return true;
-    } else if (wizard.step === 9) {
-      const allowed = input === '' || input.toLowerCase() === 'none' ? [] : input.split(',').map((part) => part.trim()).filter(Boolean);
-      if (new Set(allowed).size !== allowed.length || allowed.some((tool) => !wizard.mcpTools.includes(tool))) {
-        fail(t(`请输入可授权清单中的完整能力名：${wizard.mcpTools.join(', ') || 'none'}。`, `Enter exact capability names from the available list: ${wizard.mcpTools.join(', ') || 'none'}.`)); return true;
-      }
-      values.allowedMcpTools = allowed;
-    } else if (wizard.step === 10) {
-      if (input === '' || input.toLowerCase() === 'none') values.expiresAt = null;
-      else {
-        const expiry = input.length === 10 ? Date.parse(`${input}T23:59:59`) : Date.parse(input);
-        if (!Number.isFinite(expiry) || expiry <= Date.now()) { fail(t('请输入未来的日期/时间或 none。', 'Enter a future date/time or none.')); return true; }
-        values.expiresAt = new Date(expiry).toISOString();
-      }
-    } else if (wizard.step === 11) {
-      if (!['y', 'yes'].includes(input.toLowerCase())) {
-        setControlWizard(null); resetDraft('');
-        fail(t('未确认信任此项目，授权未创建。', 'Project trust was not confirmed; no grant was created.')); return true;
-      }
-      values.confirmWorkspaceTrust = true;
-    } else if (wizard.step === 12) {
-      if (!['y', 'yes'].includes(input.toLowerCase())) {
-        setControlWizard(null); resetDraft('');
-        fail(t('未确认工作区部分隔离限制，授权未创建。', 'Partial workspace-write limits were not confirmed; no grant was created.')); return true;
-      }
-      values.confirmPartialWorkspaceWrite = true;
-    } else if (wizard.step === 13) {
-      if (!['y', 'yes'].includes(input.toLowerCase())) {
-        setControlWizard(null); resetDraft('');
-        fail(t('未确认 full-access，授权未创建。', 'Full-access was not confirmed; no grant was created.')); return true;
-      }
-      values.confirmFullAccess = true;
-    } else if (wizard.step === 14) {
-      if (!['y', 'yes'].includes(input.toLowerCase())) {
-        setControlWizard(null); resetDraft('');
-        fail(t('未确认不受限网络，授权未创建。', 'Unrestricted network was not confirmed; no grant was created.')); return true;
-      }
-      values.confirmUnrestrictedNetwork = true;
     }
+    const values: ControlWizardValues = outcome.values;
+    const generation = ++controlWizardGeneration.current;
+    controlWizardSubmittingRef.current = true;
+    setControlWizardSubmitting(true);
     resetDraft('');
-    const next = controlWizardNext(wizard.step, values);
-    if (next >= 0) {
-      setControlWizard({ step: next, values, mcpServers: wizard.mcpServers, mcpTools: wizard.mcpTools });
-      return true;
-    }
     void (async () => {
       try {
         const projectRoot = info.boundary;
         if (projectRoot === undefined || projectRoot === '') throw new Error('workspace_required');
         const current = await client.request('agent-control.list', {}) as AgentControlSnapshot;
-        const created = await client.request('agent-control.create', {
-          version: current.version,
-          grantName: values.name!,
-          projectRoot,
-          defaultPermissionProfile: values.defaultPermissionProfile!,
-          maxPermissionProfile: values.maxPermissionProfile!,
-          defaultNetwork: values.defaultNetwork!,
-          maxNetwork: values.maxNetwork!,
-          defaultPolicy: values.defaultPolicy!,
-          allowedPolicyAsk: values.allowedPolicies!.includes('ask'),
-          allowedPolicyAuto: values.allowedPolicies!.includes('auto'),
-          allowedPolicyNone: values.allowedPolicies!.includes('none'),
-          allowOperator: values.allowOperator!,
-          allowedMcpServers: values.allowedMcpServers ?? [],
-          allowedMcpTools: values.allowedMcpTools ?? [],
-          confirmFullAccess: values.confirmFullAccess === true,
-          confirmUnrestrictedNetwork: values.confirmUnrestrictedNetwork === true,
-          confirmPartialWorkspaceWrite: values.confirmPartialWorkspaceWrite === true,
-          confirmWorkspaceTrust: values.confirmWorkspaceTrust === true,
-          expiresAt: values.expiresAt ?? '',
-        }) as AgentControlSnapshot;
+        const created = await client.request('agent-control.create', controlGrantRequest(values, projectRoot, current.version)) as AgentControlSnapshot;
         setControlSnapshot(created);
         const grant = created.grants.at(-1);
-        setControlWizard(null);
+        if (generation === controlWizardGeneration.current) {
+          controlWizardSubmittingRef.current = false;
+          setControlWizardSubmitting(false);
+          setControlWizard(null);
+        }
         push({ kind: 'meta', text: grant === undefined
           ? t('外控授权已创建。', 'Agent Control grant created.')
-          : t(`外控授权 ${grant.name} 已创建：${grant.id} · /control copy ${grant.id.slice(0, 8)} 可复制 MCP 配置`, `Grant ${grant.name} created: ${grant.id} · use /control copy ${grant.id.slice(0, 8)} to copy the MCP config`) });
+          : t('外控授权 ' + grant.name + ' 已创建：' + grant.id + ' · /control copy ' + grant.id.slice(0, 8) + ' 可复制 MCP 配置', 'Grant ' + grant.name + ' created: ' + grant.id + ' · use /control copy ' + grant.id.slice(0, 8) + ' to copy the MCP config') });
       } catch (error) {
-        setControlWizard(null);
-        push({ kind: 'error', text: t(`外控授权创建失败：${errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed'}`, `Could not create Agent Control grant: ${errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed'}`) });
+        if (generation === controlWizardGeneration.current) {
+          controlWizardSubmittingRef.current = false;
+          setControlWizardSubmitting(false);
+          setControlWizard(null);
+        }
+        push({ kind: 'error', text: t('外控授权创建失败：' + (errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed'), 'Could not create Agent Control grant: ' + (errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed')) });
       }
     })();
     return true;
@@ -2966,8 +2773,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const send = useCallback((text: string) => {
     const route = routeInput(text, running);
     const answering = query !== null && !text.trim().startsWith('/');
+    // New input supersedes an unfinished grant-wizard setup before the wizard itself appears.
+    if (controlWizard === null && text.trim() !== '') controlWizardGeneration.current += 1;
     if (sessionNavigation.current.activeToken !== 0 && !answering && !(route.kind === 'command' && route.name === 'quit')) {
       push({ kind: 'meta', text: t('会话切换完成前不会提交输入，草稿已保留。', 'Input is held until the session switch completes; the draft is preserved.') });
+      return;
+    }
+    if (controlWizardSubmittingRef.current && query === null) {
+      push({ kind: 'meta', text: t('授权请求已提交，正在等待 Host 返回；此时不能取消或重复提交。', 'The grant request is submitted; wait for the Host result before continuing.') });
       return;
     }
     if (controlWizard !== null && query === null) { advanceControlWizard(text); return; }
@@ -3035,7 +2848,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const view = viewportPosition(detail?.cursor ?? 0, viewLines.length, viewHeight, detail?.offset ?? 0);
   const selection = detail?.anchor === undefined || detail.anchor === null ? [view.cursor, view.cursor] : [Math.min(detail.anchor, view.cursor), Math.max(detail.anchor, view.cursor)];
   const approvalLayout = useMemo(() => ask === null ? null : buildApprovalLayout(ask, approvalExpanded,
-    geometry.columns, Math.max(1, geometry.rows - 1), locale), [ask, approvalExpanded, geometry.columns, geometry.rows, locale]);
+    geometry.columns, Math.max(1, geometry.rows - 1), locale, rememberOpen), [ask, approvalExpanded, rememberOpen, geometry.columns, geometry.rows, locale]);
   const approvalLines = approvalLayout?.bodyLines ?? [];
   const approvalHeight = approvalLayout?.bodyHeight ?? 0;
   const approvalView = viewportPosition(approvalCursor, approvalLines.length, approvalHeight);
@@ -3057,6 +2870,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const questionHeight = Math.max(1, geometry.rows - composerHeight - 6);
   const questionStart = Math.max(0, Math.min(questionOffset, Math.max(0, questionLines.length - questionHeight)));
   const controlPrompt = controlWizard === null ? null
+    : controlWizardSubmitting
+      ? t('授权请求已提交，正在等待 Host 返回结果。', 'Grant request submitted; waiting for the Host result.')
     : controlWizard.step === 8
       ? t(`允许外控启动哪些已信任的 MCP Server？逗号分隔：${controlWizard.mcpServers.join(', ') || '无'}；输入 none 表示不允许。`, `Which trusted MCP servers may the controller start? Comma-separated: ${controlWizard.mcpServers.join(', ') || 'none'}; type none for no servers.`)
       : controlWizard.step === 9
@@ -3126,12 +2941,16 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           : hit('approval-up', input, key) ? approvalView.cursor - 1 : hit('approval-down', input, key) ? approvalView.cursor + 1 : null;
       if (target !== null) { setApprovalCursor(target); return; }
     }
+    if (ask !== null && hit('approval-remember', input, key)) {
+      if (ask.rememberable) setRememberOpen(!rememberOpen);
+      return;
+    }
     if (ask !== null) {
-      if (ask.rememberable && ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace') && input.toLowerCase() === 'w') {
+      if (rememberOpen && ask.rememberable && ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace') && input.toLowerCase() === 'w') {
         setAsk({ ...ask, rememberTarget: ask.rememberTarget === 'workspace' ? 'file' : 'workspace' });
         return;
       }
-      const option = /^\d$/u.test(input) ? Number(input) - 2 : -1;
+      const option = rememberOpen && /^\d$/u.test(input) ? Number(input) - 2 : -1;
       const rememberScope = ask.rememberable && option >= 0 ? ask.rememberScopes[option] : undefined;
       if (hit('approve', input, key) || ask.rememberable && input === '1' || rememberScope !== undefined) {
         if (approvalLayout?.canApprove !== true) return;
@@ -3504,13 +3323,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     controlWizard === null || !showComposer || query !== null ? null : h(PanelFrame, { tone: 'warning', width: geometry.columns },
       h(Text, { bold: true }, t('创建外控授权', 'Create Agent Control grant')),
       h(Text, { wrap: 'wrap' }, controlPrompt),
-      h(Text, { dimColor: true }, t('Enter 提交当前项 · 输入 cancel 取消', 'Enter submits this value · type cancel to stop'))),
+      h(Text, { dimColor: true }, controlWizardSubmitting
+        ? t('请求已提交，不能取消或重复提交', 'The request is submitted and cannot be canceled or repeated')
+        : t('Enter 提交当前项 · 输入 cancel 取消', 'Enter submits this value · type cancel to stop'))),
     externalControl ? h(Text, { color: running ? 'yellow' : 'cyan', wrap: 'truncate-end' }, externalControlLabel) : null,
     running && showSettings ? h(ProgressLine, { progress: status?.progress, seconds, marker: SPINNER[tick % SPINNER.length], columns: geometry.columns, locale }) : null,
     showComposer ? h(DraftInput, {
       draft, caret, columns: geometry.columns, height: composerHeight,
       placeholder: query !== null ? t('输入回答', 'Type your answer')
-        : controlWizard !== null ? t('输入授权设置答案', 'Enter the grant setting')
+        : controlWizard !== null ? controlWizardSubmitting ? t('等待授权保存', 'Waiting for grant creation') : t('输入授权设置答案', 'Enter the grant setting')
           : externalControl ? t('给外控 Agent 发消息 · /takeover 接管', 'Message the external agent · /takeover to take over')
             : t('描述任务 · / 命令 · @ 文件', 'Describe a task · / commands · @ files')
               + (geometry.columns >= 72 ? t(` · ${keyHint('newline')} 换行`, ` · ${keyHint('newline')} new line`) : ''),
@@ -3519,10 +3340,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       model: `${shownModel ?? t('未配置', 'not configured')}${status?.pendingModel ? `→${status.pendingModel}` : ''}`,
       mode: `${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''}`,
       policy: status?.policy ?? 'ask', thinking: status?.thinking?.pending ?? status?.thinking?.effective,
+      permission: status?.permission?.profile,
       external: externalControl, columns: geometry.columns, locale,
     }) : null,
     showSettings && !running && geometry.rows >= 20 ? h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, buildStatusLine({
-      sessionId, boundary: info.boundary, status, running: false, seconds, expanded, columns: geometry.columns, locale,
+      sessionId, name: sessionName, boundary: info.boundary, status, running: false, seconds, expanded, columns: geometry.columns, locale,
     })) : null,
   );
 }

@@ -72,14 +72,20 @@ export function ToolsSettings({ client, projectRoot, sessionId }: { client: Clie
               ? <CatalogToolList tools={included} sourceText={sourceText} empty={t('此模式未声明普通工具。', 'This mode declares no standard tools.')} />
               : <ul className="catalog-list catalog-tools">{chosen.tools.map((name) => {
                 const tool = tools?.find((item) => item.name === name);
-                return <li key={name}>
-                  <strong><code>{name}</code></strong>
-                  <span>{tool === undefined ? t('当前未登记', 'Not registered in this session') : `${sourceText(tool.source)} · ${tool.access}`}</span>
-                  {tool !== undefined && <small>{tool.description}</small>}
-                  {tool !== undefined && <div className="catalog-tags">
-                    <span className="catalog-tag">{t('模式包含', 'In inspected mode')}</span>
-                    <AvailabilityTag available={tool.currentlyAvailable} />
-                  </div>}
+                return <li key={name} className="tool-row">
+                  <div className="tool-line">
+                    <code>{name}</code>
+                    <span className="tool-access">{tool === undefined ? t('未登记', 'Not registered') : tool.access}</span>
+                    {tool !== undefined && <span className="tool-source">{sourceText(tool.source)}</span>}
+                  </div>
+                  {tool !== undefined && <details className="tool-details">
+                    <summary>{t('详情', 'Details')}</summary>
+                    {tool.description !== '' && <small>{tool.description}</small>}
+                    <div className="catalog-tags">
+                      <span className="catalog-tag">{t('模式包含', 'In inspected mode')}</span>
+                      <AvailabilityTag available={tool.currentlyAvailable} />
+                    </div>
+                  </details>}
                 </li>;
               })}</ul>}
           <p className="sheet-note">{t('此处显示模式声明。当前会话的实际工具还会受权限、Policy、平台能力和 MCP 信任约束。', 'This is the mode declaration. The current conversation’s actual tools also depend on permissions, Policy, platform capabilities, and MCP trust.')}</p>
@@ -137,15 +143,22 @@ function CatalogToolList({ tools, sourceText, empty }: {
 }) {
   const t = useText();
   if (tools.length === 0) return <p className="stub">{empty}</p>;
-  return <ul className="catalog-list catalog-tools">{tools.map((tool) => <li key={tool.name}>
-    <strong><code>{tool.name}</code></strong><span>{sourceText(tool.source)} · {tool.access}</span>
-    {tool.description !== '' && <small>{tool.description}</small>}
-    <div className="catalog-tags">
-    {tool.disclosure
-      ? <span className="catalog-tag">{t('固定披露入口', 'Fixed disclosure')}</span>
-      : <span className="catalog-tag">{tool.includedInMode ? t('模式包含', 'In inspected mode') : t('模式未选中', 'Outside inspected mode')}</span>}
-      <AvailabilityTag available={tool.currentlyAvailable} />
+  return <ul className="catalog-list catalog-tools">{tools.map((tool) => <li key={tool.name} className="tool-row">
+    <div className="tool-line">
+      <code>{tool.name}</code>
+      <span className="tool-access">{tool.access}</span>
+      <span className="tool-source">{sourceText(tool.source)}</span>
     </div>
+    <details className="tool-details">
+      <summary>{t('详情', 'Details')}</summary>
+      {tool.description !== '' && <small>{tool.description}</small>}
+      <div className="catalog-tags">
+      {tool.disclosure
+        ? <span className="catalog-tag">{t('固定披露入口', 'Fixed disclosure')}</span>
+        : <span className="catalog-tag">{tool.includedInMode ? t('模式包含', 'In inspected mode') : t('模式未选中', 'Outside inspected mode')}</span>}
+        <AvailabilityTag available={tool.currentlyAvailable} />
+      </div>
+    </details>
   </li>)}</ul>;
 }
 

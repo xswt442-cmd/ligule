@@ -41,8 +41,9 @@ export type Client = {
   call: (method: string, params: Record<string, unknown>, timeoutMs?: number) => Promise<unknown>;
   reply: (id: string, result: unknown) => void;
   receive: (text: string) => { kind: string; message?: Frame };
-  onNotification: (handle: (message: Frame) => void) => void;
-  onRequest: (handle: (message: Frame) => void) => void;
+  // 退订函数让界面在重建订阅时能摘掉旧回调，避免同一条通知被处理两次。
+  onNotification: (handle: (message: Frame) => void) => () => void;
+  onRequest: (handle: (message: Frame) => void) => () => void;
   waiting: () => number;
   counts: () => { sent: number; received: number };
   // Host 进程重启后无法答复旧请求；以稳定错误码结束这些等待，并返回已结束请求数量。
@@ -139,9 +140,17 @@ export function createClient(transport: Transport): Client {
     receive,
     onNotification: (handle) => {
       notifications.push(handle);
+      return () => {
+        const index = notifications.indexOf(handle);
+        if (index >= 0) notifications.splice(index, 1);
+      };
     },
     onRequest: (handle) => {
       requests.push(handle);
+      return () => {
+        const index = requests.indexOf(handle);
+        if (index >= 0) requests.splice(index, 1);
+      };
     },
     waiting: () => pending.size,
     counts: () => ({ ...counts }),

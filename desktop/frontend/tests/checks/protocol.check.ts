@@ -56,10 +56,20 @@ assert.equal(client.counts().received, receivedBeforeLateReply + 1, '迟到的�
 
 // 通知没有请求 ID，不应结束任何等待中的调用。
 let seen: string | undefined = '';
-client.onNotification((message) => {
+const stopSeen = client.onNotification((message) => {
   seen = message.notify;
 });
 reply({ notify: 'delta', sessionId: 's1', event: { type: 'text', text: 'x' } });
 assert.equal(seen, 'delta');
 assert.equal(client.waiting(), 0);
+// 界面重建订阅时必须能摘掉旧回调，否则同一条通知会被处理两次。
+stopSeen();
+seen = '';
+reply({ notify: 'delta', sessionId: 's1', event: { type: 'text', text: 'y' } });
+assert.equal(seen, '', '退订后不再收到通知');
+const stopAgain = client.onNotification(() => { seen = 'second'; });
+stopAgain();
+reply({ notify: 'delta', sessionId: 's1', event: { type: 'text', text: 'z' } });
+assert.equal(seen, '', '重复退订不会复活回调');
+
 console.log('桌面前端的协议检查通过');

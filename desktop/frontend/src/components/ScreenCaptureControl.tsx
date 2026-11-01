@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { code, type Client } from '../protocol';
 import { useText } from '../locale';
 import type { Status } from '../status';
+import { Icon } from './Icon';
 import { Modal } from './ui';
 
 export function ScreenCaptureControl({ client, sessionId, status, disabled, running, onStatus }: {
@@ -35,11 +36,18 @@ export function ScreenCaptureControl({ client, sessionId, status, disabled, runn
     finally { if (alive.current) setBusy(false); }
   };
 
+  const label = needsRefresh
+    ? t('截图状态待确认，点此刷新', 'Capture status unknown; click to refresh')
+    : enabled
+      ? t('截图已授权，点此撤销', 'Screen capture allowed; click to revoke')
+      : t('授权本会话截图', 'Allow screen capture for this session');
+
   return <>
-    <button type="button" className="chip" disabled={disabled || busy || needsRefresh || status.screenCapture.changeAllowed !== true || (!enabled && running)}
-      aria-label={enabled ? t('撤销本会话截图授权', 'Revoke Session screen capture') : t('授权本会话截图', 'Authorize Session screen capture')}
+    <button type="button" className={`icon-button capture-button${enabled ? ' is-on' : ''}${needsRefresh ? ' is-warn' : ''}`}
+      title={label} aria-label={label}
+      disabled={disabled || busy || needsRefresh || status.screenCapture.changeAllowed !== true || (!enabled && running)}
       onClick={() => { if (enabled) void setPermission(false); else { setConfirmed(false); setFailure(null); setConfirming(true); } }}>
-      {needsRefresh ? t('截图状态待确认', 'Capture status unknown') : enabled ? t('截图已授权', 'Capture allowed') : t('截图关闭', 'Capture disabled')}
+      <Icon name="screen" size={16} />
     </button>
     {failure !== null && !confirming && <span role="status">{failure}<button type="button" className="mini chip" disabled={busy} onClick={() => { void refresh().then(() => { if (alive.current) { setFailure(null); setNeedsRefresh(false); } }, error => { if (alive.current) setFailure(code(error)); }); }}>{t('刷新状态', 'Refresh status')}</button></span>}
     {confirming && <Modal title={t('允许屏幕截图？', 'Allow screen capture?')} className="confirm" onClose={() => { if (!busy) setConfirming(false); }}>

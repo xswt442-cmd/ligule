@@ -82,6 +82,7 @@ test('a slash line the UI table does not own goes to the host as one message', o
   assert.deepEqual(routeInput('  读一下 note.txt  ', false), { kind: 'run', text: '读一下 note.txt' });
   assert.deepEqual(routeInput('/tools', false), { kind: 'command', name: 'tools', argument: '' });
   assert.deepEqual(routeInput('/browser', false), { kind: 'command', name: 'browser', argument: '' });
+  assert.deepEqual(routeInput('/rename 我的会话', true), { kind: 'command', name: 'rename', argument: '我的会话' });
   assert.deepEqual(routeInput('/browser stop', true), { kind: 'command', name: 'browser', argument: 'stop' });
   assert.deepEqual(routeInput('/browser resume', true), { kind: 'command', name: 'browser', argument: 'resume' });
   assert.deepEqual(routeInput('/MODE now', false), { kind: 'command', name: 'mode', argument: 'now' });
@@ -153,16 +154,15 @@ test('the app paints the session line and the input hint onto the terminal', opt
   assert.match(painted, /\/ 命令/);
 }));
 
-test('the metadata line contains session, context, record and runtime hints', options, () => {
+test('the metadata line keeps the session and its workspace, never budgets or counts', options, () => {
   const status = {
     mode: 'minimal', pendingMode: null, policy: 'ask', tools: ['read', 'find'], eventCount: 3,
     usage: { window: 200_000, threshold: 160_000, estimated: 42_000 },
   };
   const line = buildStatusLine({ sessionId: 'abcdef0123456789', boundary: 'C:\\workspace\\project', status, running: true, seconds: 12.7, expanded: true, columns: 180 });
   assert.match(line, /会话 abcdef01/);
-  assert.match(line, /C:\\workspace\\project/);
-  assert.match(line, /ctx:~42000\/200000/);
-  assert.match(line, /记录 3 条/);
+  assert.match(line, /project/);
+  assert.doesNotMatch(line, /ctx:|记录 3 条|次模型调用|输出token/);
   assert.match(line, /12 秒.*Esc.*打断/);
   assert.match(line, /已展开.*收起/);
   assert.doesNotMatch(line, /minimal|policy|test-model|model:/);
@@ -171,6 +171,19 @@ test('the metadata line contains session, context, record and runtime hints', op
   const noWindow = buildStatusLine({ sessionId: 'abcdef0123456789', status: { ...status, usage: undefined }, running: false, seconds: 0, expanded: false });
   assert.doesNotMatch(noWindow, /ctx:/);
   assert.doesNotMatch(noWindow, /minimal|policy|model:/);
+});
+
+test('a named session shows its name on the metadata line instead of the short id', options, () => {
+  const status = { mode: 'minimal', policy: 'ask', tools: [], eventCount: 1 };
+  const named = buildStatusLine({ sessionId: 'abcdef0123456789', name: '整理 P7 的界面', boundary: 'C:\workspace\project', status, running: false, seconds: 0, expanded: false, columns: 120 });
+  assert.match(named, /会话 整理 P7 的界面/);
+  assert.doesNotMatch(named, /abcdef01/);
+  const unnamed = buildStatusLine({ sessionId: 'abcdef0123456789', name: '   ', boundary: 'C:\workspace\project', status, running: false, seconds: 0, expanded: false, columns: 120 });
+  assert.match(unnamed, /会话 abcdef01/);
+  for (const columns of [40, 60, 80]) {
+    const line = buildStatusLine({ sessionId: 'abcdef0123456789', name: '整理 P7 的界面', boundary: 'C:\workspace\project', status, running: true, seconds: 5, expanded: false, columns });
+    assert.ok(displayWidth(line) <= columns, `named status line exceeds ${columns} columns`);
+  }
 });
 
 test('the metadata line identifies the Host phase and elapsed time since actual progress', options, () => {
@@ -183,9 +196,8 @@ test('the metadata line identifies the Host phase and elapsed time since actual 
   };
   const line = buildStatusLine({ sessionId: 'session-id', status, running: true, seconds: 6, expanded: false, now: 11_000 });
   assert.match(line, /请求模型/);
-  assert.match(line, /2 次模型调用/);
-  assert.match(line, /1 个工具调用/);
-  assert.match(line, /7秒无新进展/);
+  assert.match(line, /7 秒无新进展/);
+  assert.doesNotMatch(line, /2 次模型调用|1 个工具调用|16384/);
   const english = buildStatusLine({ sessionId: 'session-id', status, running: true, seconds: 6, expanded: false, locale: 'en', now: 11_000 });
   assert.match(english, /Requesting model/);
   assert.match(english, /7s without progress/);
@@ -310,6 +322,9 @@ test('the TUI remembers a session-scoped approval and applies it after the next 
     });
     try {
       const first = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'read', args: { path: 'note.txt' } }) });
+      // 记住规则收在第二层：先看到入口，按 m 展开后才出现规则选项。
+      await waitFor(() => painted.includes('记住规则'), { read: () => painted });
+      stdin.write('m');
       await waitFor(() => painted.includes('2 记住本会话'), { read: () => painted });
       stdin.write('2');
       await first;
@@ -503,6 +518,11 @@ test('an MCP call shows the capability it actually used', options, () => {
   assert.equal(call.tool, 'mcp:fs/read_file');
   const [done] = projectRecord({ kind: 'tool', tool: 'mcp.call', args: { server: 'fs', tool: 'read_file' }, result: { kind: 'result', failed: false, content: { text: 'a body', effectiveCapability: 'mcp:fs/read_file' } } });
   assert.deepEqual([done.tool, done.text], ['mcp:fs/read_file', 'a body']);
+  const [nestedTarget] = projectRecord({
+    kind: 'tool', tool: 'mcp.call', args: { server: 'fs', tool: 'read_file', arguments: '{"path":"docs/guide.md"}' },
+    result: { kind: 'result', failed: false, content: { text: 'a body', effectiveCapability: 'mcp:fs/read_file' } },
+  });
+  assert.deepEqual([nestedTarget.tool, nestedTarget.target], ['mcp:fs/read_file', 'docs/guide.md']);
 });
 
 // 命令结果的标题行应显示退出码，以区分成功和失败。
@@ -619,8 +639,8 @@ test('input typed while a round runs queues up and flushes in order', options, a
   }
 }, { delayMs: 1_800 }));
 
-// 未提供上下文窗口时，状态行不显示上下文占用信息。
-test('the metadata line reports context pressure only when a window is written', options, () => {
+// 上下文占用属于预算细节：常驻行不显示，只在 /status 里出现。
+test('the metadata line never carries context pressure', options, () => {
   assert.equal(contextSegment(null), '');
   assert.equal(contextSegment(undefined), '');
   assert.equal(contextSegment({ window: 200_000, threshold: 160_000, estimated: 42_000 }), 'ctx:~42000/200000');
@@ -631,8 +651,8 @@ test('the metadata line reports context pressure only when a window is written',
     denials: { consecutive: 0, total: 0 }, usage: { window: 200_000, threshold: 160_000, estimated: 42_000 },
   };
   const draw = (columns) => buildStatusLine({ sessionId: 'x', status, running: false, seconds: 0, expanded: false, columns });
-  assert.match(draw(200), /ctx:~42000\/200000/);
-  assert.match(draw(64), /ctx:~/);
+  assert.doesNotMatch(draw(200), /ctx:/);
+  assert.doesNotMatch(draw(64), /ctx:/);
   assert.doesNotMatch(draw(200), /mode:|policy:|tools:/);
   assert.ok(UI_COMMANDS.some((command) => command.name === 'compact'), '/compact 在命令表里');
 });
@@ -698,9 +718,10 @@ test('the metadata line shortens the workspace path and keeps the interrupt hint
   const idle = { running: false, expanded: false };
   const busy = { running: true, expanded: false };
   const draw = (columns, extra) => buildStatusLine({ ...args, ...extra, columns });
-  assert.match(draw(180, idle), /C:\\Users\\20411\\AppData\\Local\\Temp\\ligule-tui-7Rm2Qx\\project/);
-  assert.match(draw(60, idle), / · project · /);
-  assert.doesNotMatch(draw(60, idle), /Temp\\/);
+  // 完整路径只进 /status；常驻行到最窄仍保留会话与工作区叶子名。
+  assert.ok(draw(180, idle).endsWith(' · project'), '宽终端也只显示工作区叶子名');
+  assert.doesNotMatch(draw(180, idle), /Temp\\/);
+  assert.match(draw(60, idle), / · project/);
   assert.match(draw(30, busy), /Esc.*打断/);
   assert.doesNotMatch(draw(180, idle), /minimal|policy|model:|tools:/);
 });
@@ -1505,6 +1526,320 @@ test('/control creates a project-bound grant through the interactive wizard', op
   }
 }, { permissionControl: true }));
 
+test('cancelling the grant wizard while it lists trusted MCP tools keeps it closed', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  const serverTrust = await client.request('mcp.trust.list', { projectRoot: projectDirectory });
+  const server = serverTrust.servers.find((item) => item.name === 'probe');
+  assert.ok(server, 'the project config exposes the real local MCP fixture');
+  await client.request('mcp.trust.set', {
+    projectRoot: projectDirectory,
+    server: server.name,
+    identityDigest: server.identityDigest,
+    scope: 'project',
+    trusted: true,
+    confirmTrust: true,
+    confirmExternalAccess: true,
+    version: serverTrust.version,
+  });
+
+  let toolsRequestStarted = false;
+  let toolsRequestSettled = false;
+  let toolsRequestFailure;
+  let toolsRequestResult;
+  const request = client.request.bind(client);
+  client.request = (method, params) => {
+    const pending = request(method, params);
+    if (method !== 'mcp.trust.tools') return pending;
+    toolsRequestStarted = true;
+    return pending.then((result) => {
+      toolsRequestResult = result;
+      toolsRequestSettled = true;
+      return result;
+    }, (error) => {
+      toolsRequestFailure = error;
+      toolsRequestSettled = true;
+      throw error;
+    });
+  };
+
+  const toolsStartedPath = join(projectDirectory, 'mcp-started.pid');
+  const toolsReturnedPath = join(projectDirectory, 'mcp-tools-returned');
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const lastFrame = () => completeFrame(painted);
+  const answer = async (value, nextPrompt) => {
+    stdin.write(value);
+    await waitFor(() => lastFrame().includes(`› ${value}`), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+    if (nextPrompt !== undefined) await waitFor(() => lastFrame().includes(nextPrompt), { read: lastFrame });
+  };
+
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    await answer('/control create', '授权名称');
+    await answer('pending grant', '默认权限');
+    await answer('read-only', '最大权限');
+    await answer('read-only', '默认网络');
+    await answer('disabled', '网络上限');
+    await answer('disabled', '默认 Policy');
+    await answer('ask', '允许的 Policy');
+    await answer('ask', '允许 --operator');
+    await answer('no', '允许外控启动哪些已信任的 MCP Server');
+    await answer('probe');
+    await waitFor(() => toolsRequestStarted && requests.some((item) => item.method === 'mcp.trust.tools'), {
+      within: 5_000,
+      read: () => lastFrame(),
+    });
+    await waitFor(() => access(toolsStartedPath).then(() => true, () => false), { within: 5_000, read: lastFrame });
+
+    await answer('cancel');
+    await waitFor(() => lastFrame().includes('已取消外控授权创建'), { read: lastFrame });
+    await waitFor(() => access(toolsReturnedPath).then(() => true, () => false), { within: 5_000, read: lastFrame });
+    await waitFor(() => toolsRequestSettled, { within: 5_000, read: lastFrame });
+    stdin.write('after-cancel');
+    await waitFor(() => lastFrame().includes('› after-cancel'), { within: 5_000, read: lastFrame });
+
+    assert.equal(toolsRequestFailure, undefined);
+    assert.deepEqual(toolsRequestResult.tools.map((tool) => tool.name), ['echo']);
+    assert.match(plainOutput(painted), /已取消外控授权创建/);
+    assert.doesNotMatch(lastFrame(), /允许外控调用哪些工具|可授权的 MCP 工具|Which tools may the controller call/u);
+  } finally {
+    instance.unmount();
+  }
+}, {
+  config: { mcp: { servers: { probe: { command: process.execPath, args: [mcpServerFixture, 'mcp-schema.json', 'mcp-started.pid', '1500', 'mcp-tools-returned'] } } } },
+  setup: async ({ projectDirectory }) => {
+    await writeFile(join(projectDirectory, 'mcp-schema.json'), JSON.stringify({ type: 'object', properties: { value: { type: 'string' } } }));
+    await mkdir(join(projectDirectory, '.ligule'), { recursive: true });
+    await writeFile(join(projectDirectory, '.ligule', 'config.toml'), [
+      '[mcp.servers.probe]',
+      'command = ' + JSON.stringify(process.execPath),
+      'args = [' + [mcpServerFixture, 'mcp-schema.json', 'mcp-started.pid', '1500', 'mcp-tools-returned'].map((value) => JSON.stringify(value)).join(', ') + ']',
+      '',
+    ].join('\n'));
+  },
+}));
+
+test('a submitted grant cannot be canceled or submitted again while the Host response is pending', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  let releaseCreateResponse = () => {};
+  const createResponseGate = new Promise((resolve) => { releaseCreateResponse = resolve; });
+  let createResponseReceived = false;
+  const originalRequest = client.request.bind(client);
+  client.request = (method, params) => {
+    const pending = originalRequest(method, params);
+    if (method !== 'agent-control.create') return pending;
+    return pending.then(async (result) => {
+      createResponseReceived = true;
+      await createResponseGate;
+      return result;
+    });
+  };
+
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const lastFrame = () => completeFrame(painted);
+  const inputLine = () => lastFrame().split(/\r?\n/u).map((line) => line.trim()).find((line) => line.startsWith('›')) ?? '';
+  const answer = async (value, nextPrompt) => {
+    stdin.write(value);
+    await waitFor(() => lastFrame().includes(`› ${value}`), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+    if (nextPrompt !== undefined) await waitFor(() => lastFrame().includes(nextPrompt), { read: lastFrame });
+  };
+  const createRequests = () => requests.filter((item) => item.method === 'agent-control.create');
+
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    await answer('/control create', '授权名称');
+    await answer('pending grant', '默认权限');
+    await answer('read-only', '最大权限');
+    await answer('read-only', '默认网络');
+    await answer('disabled', '网络上限');
+    await answer('disabled', '默认 Policy');
+    await answer('ask', '允许的 Policy');
+    await answer('ask', '允许 --operator');
+    await answer('no', '允许外控启动哪些已信任的 MCP Server');
+    await answer('none', '允许外控调用哪些工具');
+    await answer('none', '到期时间');
+    await answer('none', '确认信任此项目');
+    await answer('yes');
+    await waitFor(() => createRequests().length === 1, { within: 5_000, read: lastFrame });
+    await waitFor(() => createResponseReceived, { within: 5_000, read: lastFrame });
+
+    await answer('cancel');
+    await waitFor(() => lastFrame().includes('授权请求已提交') && inputLine() === '› cancel', { read: lastFrame });
+    assert.doesNotMatch(plainOutput(painted), /已取消外控授权创建/u, 'a submitted Host request is not reported as canceled');
+    assert.match(lastFrame(), /授权请求已提交|请求已提交/u, 'the UI reports that the Host is saving the grant');
+    assert.equal(inputLine(), '› cancel', 'the input entered during submission is preserved as a draft');
+    for (let length = 'cancel'.length - 1; length >= 0; length -= 1) {
+      stdin.write('\x7f');
+      const expected = length === 0 ? '› 等待授权保存' : `› ${'cancel'.slice(0, length)}`;
+      await waitFor(() => inputLine() === expected, { within: 1_000, read: lastFrame });
+    }
+
+    await answer('yes');
+    await waitFor(() => lastFrame().includes('授权请求已提交') && lastFrame().includes('› yes'), { read: lastFrame });
+    assert.equal(createRequests().length, 1, 'a pending grant submission cannot create another request');
+
+    releaseCreateResponse();
+    await waitFor(() => lastFrame().includes('外控授权 pending grant 已创建'), { within: 5_000, read: lastFrame });
+    const saved = await originalRequest('agent-control.list', {});
+    assert.equal(saved.grants.length, 1);
+    assert.equal(saved.grants[0].name, 'pending grant');
+  } finally {
+    releaseCreateResponse();
+    instance.unmount();
+  }
+}));
+
+test('a pending grant setup does not open after the user starts a new conversation', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  let releaseTrustResponse = () => {};
+  const trustResponseGate = new Promise((resolve) => { releaseTrustResponse = resolve; });
+  let trustResponseReceived = false;
+  let trustResponseDelivered = false;
+  const originalRequest = client.request.bind(client);
+  client.request = (method, params) => {
+    const pending = originalRequest(method, params);
+    if (method !== 'mcp.trust.list') return pending;
+    return pending.then(async (result) => {
+      trustResponseReceived = true;
+      await trustResponseGate;
+      trustResponseDelivered = true;
+      return result;
+    });
+  };
+
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const lastFrame = () => completeFrame(painted);
+
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    const sessionCreations = requests.filter((item) => item.method === 'session.create').length;
+
+    stdin.write('/control create');
+    await waitFor(() => lastFrame().includes('› /control create'), { within: 5_000, read: lastFrame });
+    stdin.write('\r');
+    await waitFor(() => trustResponseReceived && requests.some((item) => item.method === 'mcp.trust.list'), {
+      within: 5_000,
+      read: lastFrame,
+    });
+
+    stdin.write('/new');
+    await waitFor(() => lastFrame().includes('› /new'), { within: 5_000, read: lastFrame });
+    stdin.write('\r');
+    await waitFor(() => requests.filter((item) => item.method === 'session.create').length > sessionCreations, {
+      within: 5_000,
+      read: lastFrame,
+    });
+    await waitFor(() => plainOutput(painted).includes('新会话 '), { within: 5_000, read: lastFrame });
+    releaseTrustResponse();
+    await waitFor(() => trustResponseDelivered, { within: 5_000, read: lastFrame });
+    stdin.write('after-new');
+    await waitFor(() => lastFrame().includes('› after-new'), { within: 5_000, read: lastFrame });
+
+    assert.doesNotMatch(lastFrame(), /创建外控授权|授权名称|默认权限|Grant name|Default permission/u);
+    assert.doesNotMatch(plainOutput(painted), /开始创建授权/u);
+  } finally {
+    releaseTrustResponse();
+    instance.unmount();
+  }
+}));
+
+test('opening a settings picker supersedes a pending grant setup request', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  let releaseTrustResponse = () => {};
+  const trustResponseGate = new Promise((resolve) => { releaseTrustResponse = resolve; });
+  let trustResponseReceived = false;
+  let trustResponseDelivered = false;
+  const originalRequest = client.request.bind(client);
+  client.request = (method, params) => {
+    const pending = originalRequest(method, params);
+    if (method !== 'mcp.trust.list') return pending;
+    return pending.then(async (result) => {
+      trustResponseReceived = true;
+      await trustResponseGate;
+      trustResponseDelivered = true;
+      return result;
+    });
+  };
+
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const lastFrame = () => completeFrame(painted);
+
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    stdin.write('/control create');
+    await waitFor(() => lastFrame().includes('› /control create'), { within: 5_000, read: lastFrame });
+    stdin.write('\r');
+    await waitFor(() => trustResponseReceived, { within: 5_000, read: lastFrame });
+
+    stdin.write('\u0010');
+    await waitFor(() => lastFrame().includes('Alpha / first-model'), { within: 5_000, read: lastFrame });
+    releaseTrustResponse();
+    await waitFor(() => trustResponseDelivered, { within: 5_000, read: lastFrame });
+    stdin.write('\u001b[B');
+    await waitFor(() => lastFrame().includes('› Alpha / second-model'), { within: 5_000, read: lastFrame });
+
+    assert.match(lastFrame(), /Alpha \/ second-model/u);
+    assert.doesNotMatch(lastFrame(), /创建外控授权/u);
+    assert.doesNotMatch(plainOutput(painted), /开始创建授权/u);
+  } finally {
+    releaseTrustResponse();
+    instance.unmount();
+  }
+}, {
+  config: { model: {
+    services: [{
+      id: 'alpha', name: 'Alpha', api: 'chat-completions', baseURL: 'http://127.0.0.1',
+      apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY', models: ['first-model', 'second-model'],
+    }],
+    selection: { provider: 'alpha', model: 'first-model' },
+  } },
+}));
+
 // `/think` 只列出模型声明的档位；应用后状态行显示覆盖值，恢复默认后隐藏。
 test('/think applies a thinking level the model declares and resets to the model default', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
   const { createElement } = await import('react');
@@ -1593,3 +1928,37 @@ test('/think explains when the selected model declares no thinking levels', opti
     instance.unmount();
   }
 }));
+
+test('a narrow terminal keeps a pending approval operable when the settings line is already covered', options, async (t) => {
+  const permission = await measuredPermissionContext('full-access', 'unrestricted');
+  if (permission.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');
+  await withTuiHost(async ({ client, sessionId }) => {
+    const { createElement } = await import('react');
+    const { render } = await import('ink');
+    const { PassThrough } = await import('node:stream');
+    const { App } = await import('../dist/tui/app.js');
+
+    const stdout = new PassThrough();
+    // 80x12 比 80x24 更紧：设置行与欢迎区都放不下，审批卡必须自己撑住可用性。
+    stdout.columns = 80;
+    stdout.rows = 12;
+    stdout.isTTY = true;
+    let painted = '';
+    stdout.on('data', (chunk) => { painted += chunk; });
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+    const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+    let decision;
+    try {
+      const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'git --version' } }) });
+      await waitFor(() => /允许执行 exec？/.test(painted), { read: () => painted });
+      stdin.write('1');
+      decision = await run;
+    } finally {
+      instance.unmount();
+    }
+    assert.match(painted, /允许执行 exec？/);
+    assert.match(painted, /git --version/);
+    // 允许一次后命令应真的执行：decision.text 是工具结果，而不是取消标记。
+    assert.match(decision.text, /git version/);
+  }, { permission });
+});

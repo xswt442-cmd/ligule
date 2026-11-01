@@ -583,3 +583,27 @@ test('product manifests carry independent release versions while Core stays priv
   assert.equal(desktop.scripts.build, 'node ./build.mjs');
   assert.equal(core.dependencies['@vscode/ripgrep'], '1.18.0');
 });
+
+// 诊断文案是 Desktop/TUI/Host 共用的一份，分类、校验和一行摘要都在这里钉住。
+test('provider diagnostics share one category table and one summary', async () => {
+  const { parseProviderDiagnostic, providerDiagnosticText, PROVIDER_DIAGNOSTIC_CATEGORIES } = await import('../dist/kernel/error.js');
+  assert.deepEqual(PROVIDER_DIAGNOSTIC_CATEGORIES.server, ['服务端故障', 'server failure']);
+
+  const parsed = parseProviderDiagnostic({
+    category: 'server', status: 503, attempts: 3, responseReceived: true, streamReceived: false, recoverable: true,
+  });
+  assert.deepEqual(parsed, {
+    category: 'server', status: 503, attempts: 3, responseReceived: true, streamReceived: false, recoverable: true,
+  });
+  assert.deepEqual(providerDiagnosticText(parsed), {
+    zh: 'HTTP 503 · 服务端故障 · 尝试 3 次 · 收到响应 · 未收到响应流 · 可恢复',
+    en: 'HTTP 503 · server failure · 3 attempts · response received · no stream data · recoverable',
+  });
+
+  assert.equal(parseProviderDiagnostic({ category: 'unknown', attempts: 1, responseReceived: true, streamReceived: true, recoverable: true }), undefined);
+  assert.equal(parseProviderDiagnostic({ category: 'server', status: 99, attempts: 1, responseReceived: true, streamReceived: true, recoverable: true }), undefined);
+  assert.equal(parseProviderDiagnostic(null), undefined);
+
+  const withoutStatus = parseProviderDiagnostic({ category: 'transport', attempts: 1, responseReceived: false, streamReceived: false, recoverable: false });
+  assert.equal(providerDiagnosticText(withoutStatus).zh, 'HTTP 状态未知 · 传输故障 · 尝试 1 次 · 未收到响应 · 未收到响应流 · 不可安全重试');
+});

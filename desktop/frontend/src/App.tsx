@@ -10,6 +10,8 @@ import { BranchPanel } from './components/BranchPanel';
 import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
 import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
+import { approvalSession, toApprovalAsk, type ApprovalRequestParams } from './approval-request';
+import { reopenSessionWriter } from './session-reopen';
 import { blockedSessions, type QuitInput, type QuitRow } from './quit';
 import { SessionRail } from './components/SessionRail';
 import type { SearchHit } from './components/rail/types';
@@ -28,7 +30,7 @@ import { insertMention, mentionToken } from './mentions';
 import type { ModelSelection } from './model-catalog';
 import { thinkingRequest } from './thinking-request';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
-import { appendProjectedRecords, capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
+import { appendProjectedRecords, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import { taskSummaryLabelOf, taskSummaryOf, type Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, type Settings } from './settings';
 import { LocaleProvider, localeOf } from './locale';
@@ -225,7 +227,9 @@ export function App({ transport }: { transport: Transport }) {
   // 当前草稿所属的会话。打开会话时，需等恢复请求完成后再保存草稿，避免把旧草稿写入新会话。
   const [inputOwner, setInputOwner] = useState<string | null>(null);
   const [readOnlySessionId, setReadOnlySessionId] = useState<string | null>(null);
-  const [externalWriterActive, setExternalWriterActive] = useState(false);
+  const [writerLockNoticeSessionId, setWriterLockNoticeSessionId] = useState<string | null>(null);
+  const [sessionWriterActive, setSessionWriterActive] = useState(false);
+  const [externalControlSessionId, setExternalControlSessionId] = useState<string | null>(null);
   const saveWarned = useRef(false);
   // Host 重连期间暂停发送队列，也不触发轮次结束后的自动发送。
   const reconnecting = useRef(false);
@@ -336,6 +340,10 @@ export function App({ transport }: { transport: Transport }) {
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   // 当前前台会话 ID，与会话打开状态同步更新；后台会话的响应不得覆盖前台状态。
   const active = useRef<string | null>(null);
+  const updateExternalControlAvailability = useCallback((owner: string, available: boolean) => {
+    if (active.current !== owner) return;
+    setExternalControlSessionId(available ? owner : null);
+  }, []);
   // 阅读位置在底部时自动跟随新内容；用户向上滚动后暂停跟随，并显示返回最新内容的按钮。
   const list = useRef<VirtuosoHandle | null>(null);
   const [pinned, setPinned] = useState(true);
@@ -424,9 +432,10 @@ export function App({ transport }: { transport: Transport }) {
   // Host 进程的启动和重启由 Electron 壳负责。
   const beat = useCallback(async (timeoutMs = 5_000) => {
     if (sessionId === null) return;
-    if (readOnlySessionId === sessionId) { setLink(null); return; }
     try {
-      await client.call('status.get', { sessionId }, timeoutMs);
+      if (readOnlySessionId === sessionId) {
+        await client.call('session.observe', { projectRoot, sessionId, limit: 1 }, timeoutMs);
+      } else await client.call('status.get', { sessionId }, timeoutMs);
       connectionLost.current = false;
       setLink(null);
     } catch (error) {
@@ -434,7 +443,7 @@ export function App({ transport }: { transport: Transport }) {
       connectionLost.current = true;
       setLink(code(error));
     }
-  }, [client, notify, readOnlySessionId, sessionId]);
+  }, [client, notify, projectRoot, readOnlySessionId, sessionId]);
 
   useEffect(() => {
     const removeFault = transport.onFault?.((reason) => {
@@ -582,7 +591,7 @@ export function App({ transport }: { transport: Transport }) {
   }, [patch, settings.sidebar]);
 
   useEffect(() => {
-    client.onNotification((message) => {
+    const stopNotifications = client.onNotification((message) => {
       if (message.notify === 'fault') {
         setRows((current) => [...current, metaRow('error', `连接错误：${message.code} ${message.detail ?? ''}`, `Connection error: ${message.code} ${message.detail ?? ''}`)]);
         return;
@@ -637,7 +646,7 @@ export function App({ transport }: { transport: Transport }) {
       }
     });
 
-    client.onRequest((message) => {
+    const stopRequests = client.onRequest((message) => {
       // 用户提问一次可以包含多道题，答复按题目编号关联；此流程与审批分开处理。
       if (message.method === 'question.request') {
         const asked = message.params as { sessionId?: string; projectRoot?: string; questions?: QuestionAsk['questions'] };
@@ -652,60 +661,21 @@ export function App({ transport }: { transport: Transport }) {
       }
       // Host 发出的交互请求分为审批和用户提问。
       if (message.method !== 'approval.request') return;
-      const params = message.params as { sessionId?: string; projectRoot?: string; tool?: string; command?: string; args?: Record<string, unknown>; reason?: string; shell?: string; executable?: string; policy?: string; policySource?: string; policyForced?: boolean; detailsRef?: string; argumentBytes?: number; argumentSha256?: string; identityDigest?: string; contentBytes?: number; contentSha256?: string; rememberable?: boolean; rememberScopes?: ('session' | 'project' | 'user')[]; rememberHintKey?: 'file' | 'tool' | 'command' | 'mcp'; rememberTargetOptions?: ('file' | 'workspace' | 'tool' | 'command')[]; scriptBinding?: { path?: string; sha256?: string; interpreter?: string; workspaceRoot?: string; permission?: { profile?: string; network?: string; capabilities?: Record<string, string> } } };
+      const params = message.params as ApprovalRequestParams | undefined;
       // 请求属于发起它的会话；即使会话在后台等待，也必须显示并允许答复。
-      const asked = params?.sessionId;
-      if (typeof asked !== 'string' || asked === '') return;
-      const tool = params.tool ?? '';
+      const asked = approvalSession(params);
+      if (asked === null || params === undefined) return;
       notify('approval', asked, params.projectRoot ?? '');
-      const args = params.args ?? {};
-      // 审批摘要说明实际操作对象，例如命令、路径、目标地址或 MCP 工具。
-      const detail = String(params.command ?? args.path ?? args.url ?? capabilityOf(tool, args));
-      // 展开审批详情时显示具体操作和变更内容；无可展示内容的调用不显示展开入口。
-      const change = changeOf(tool, args);
-      const content = changeBody(change, args);
-      const englishChange = changeOf(tool, args, 'en');
-      const detailsSuffix = params.scriptBinding === undefined ? { chinese: '', english: '' } : {
-        chinese: `\n\n${t('脚本审批绑定', 'Script approval binding')}:\n${t('路径', 'Path')}: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\n${t('解释器', 'Interpreter')}: ${params.scriptBinding.interpreter ?? ''}\n${t('工作区', 'Workspace')}: ${params.scriptBinding.workspaceRoot ?? ''}\n${t('权限', 'Permission')}: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
-        english: `\n\nScript approval binding:\nPath: ${params.scriptBinding.path ?? ''}\nSHA-256: ${params.scriptBinding.sha256 ?? ''}\nInterpreter: ${params.scriptBinding.interpreter ?? ''}\nWorkspace: ${params.scriptBinding.workspaceRoot ?? ''}\nPermission: ${params.scriptBinding.permission?.profile ?? ''} / ${params.scriptBinding.permission?.network ?? ''}\n${JSON.stringify(params.scriptBinding.permission?.capabilities ?? {})}`,
-      };
-      const summary = typeof params.contentBytes === 'number' && typeof params.contentSha256 === 'string'
-        ? `${t(`内容 ${params.contentBytes} 字节 · SHA-256 ${params.contentSha256}`, `Content ${params.contentBytes} bytes · SHA-256 ${params.contentSha256}`)}\n\n`
-        : typeof params.argumentSha256 === 'string'
-          ? `${t(`参数 ${params.argumentBytes ?? 0} 字节 · SHA-256 ${params.argumentSha256}`, `Arguments ${params.argumentBytes ?? 0} bytes · SHA-256 ${params.argumentSha256}`)}\n\n`
-          : '';
-      setAsks((current) => [...current, {
-        id: message.id ?? '',
-        sessionId: asked,
-        project: params.projectRoot ?? '',
-        tool,
-        detail,
-        change: change.summary,
-        reason: params.reason ?? '',
-        // 显示权限判定使用的命令语法和实际执行文件。
-        backend: params.shell === undefined ? '' : `${params.shell} · ${params.executable ?? ''}`,
-        // 同时显示本次审批使用的策略、策略来源和是否因连续拒绝而收紧。
-        policy: params.policy ?? '',
-        policySource: params.policySource ?? '',
-        policyForced: params.policyForced === true,
-        rememberable: params.rememberable === true,
-        rememberScopes: params.rememberScopes ?? [],
-        ...(params.rememberHintKey === undefined ? {} : { rememberHintKey: params.rememberHintKey }),
-        ...(Array.isArray(params.rememberTargetOptions) ? { rememberTargetOptions: params.rememberTargetOptions } : {}),
-        ...(typeof params.detailsRef === 'string' ? { detailsRef: params.detailsRef } : {}),
-        ...(typeof params.argumentBytes === 'number' ? { argumentBytes: params.argumentBytes } : {}),
-        ...(typeof params.argumentSha256 === 'string' ? { argumentSha256: params.argumentSha256 } : {}),
-        ...(typeof params.identityDigest === 'string' ? { identityDigest: params.identityDigest } : {}),
-        detailsLoaded: false,
-        detailsLoading: false,
-        detailsSuffix,
-        content: `${summary}${content}${detailsSuffix.chinese}`,
-        english: { change: englishChange.summary, content: `${summary}${changeBody(englishChange, args, 'en')}${detailsSuffix.english}` },
-      }]);
+      const ask = toApprovalAsk(message.id ?? '', params);
+      setAsks((current) => [...current, ask]);
     });
 
     // 显示 Host 进程的标准错误输出；它不属于协议帧。
     transport.onLog((line) => setDiagnosticLogs((current) => [...current, line].slice(-50)));
+    return () => {
+      stopNotifications();
+      stopRequests();
+    };
   }, [client, notify, transport]);
 
   const refreshStatus = useCallback(async (id: string) => {
@@ -770,11 +740,13 @@ export function App({ transport }: { transport: Transport }) {
     setWanted(null);
     setInputOwner(null);
     setReadOnlySessionId(null);
-    setExternalWriterActive(false);
+    setSessionWriterActive(false);
+    setExternalControlSessionId(null);
     setStatus(null);
     dispatchAt.current.clear();
     setReading(true);
     let observing = false;
+    let writerLockHeld = false;
     let newest: {
       events: Record_[];
       hasMore: boolean;
@@ -792,6 +764,7 @@ export function App({ transport }: { transport: Transport }) {
         newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 60_000) as typeof newest;
       } catch (error) {
         if (code(error) !== 'session_locked') throw error;
+        writerLockHeld = true;
         newest = await client.call('session.observe', {
           projectRoot: requestedRoot, sessionId: id, limit: RENDER_WINDOW, fullResults: true,
         }, 60_000) as typeof newest;
@@ -821,7 +794,7 @@ export function App({ transport }: { transport: Transport }) {
         patchQueue(id, () => ({ items: restored, paused: restored.length > 0 }));
       }
       setReadOnlySessionId(observing ? id : null);
-      setExternalWriterActive(observing && newest.writerActive === true);
+      setSessionWriterActive(observing && newest.writerActive === true);
       setInputOwner(observing ? null : id);
       setSettings((current) => ({ ...current, lastSession: { id, projectRoot: root } }));
       let events = newest.events;
@@ -837,10 +810,17 @@ export function App({ transport }: { transport: Transport }) {
         events = [...older.events, ...events];
         hasMore = older.hasMore;
       }
+      if (openRequest.current !== request) return;
+      setWriterLockNoticeSessionId(writerLockHeld && reclaimQueue ? id : null);
       // 将后台会话中已关闭问题卡片的题目和答案写入该会话记录。
       const kept = pendingEchoes.current.get(id) ?? [];
       pendingEchoes.current.delete(id);
-      setRows([...events.flatMap((record) => projectRecord(record)), ...kept.map((line) => metaRow('meta', line.zh, line.en))]);
+      setRows([
+        ...events.flatMap((record) => projectRecord(record)),
+        ...kept.map((line) => metaRow('meta', line.zh, line.en)),
+      ]);
+      connectionLost.current = false;
+      setLink(null);
       setPage({ before: Number(events[0]?.seq ?? 1), hasMore });
       // 如果保存的阅读位置仍在已加载页面中就恢复该位置；否则停在末尾，不改变展示档或自动加载更多页面。
       const back = savedAnchor !== undefined && savedAnchor > Number(events[0]?.seq) && savedAnchor < Number(events.at(-1)?.seq)
@@ -870,7 +850,8 @@ export function App({ transport }: { transport: Transport }) {
       limit: RENDER_WINDOW,
       isCurrent: () => openRequest.current === request && active.current === sessionId,
       onSnapshot: (snapshot) => {
-        setExternalWriterActive(snapshot.writerActive);
+        setSessionWriterActive(snapshot.writerActive);
+        if (!snapshot.writerActive) setExternalControlSessionId(null);
         setRows((current) => appendProjectedRecords(current, snapshot.events));
       },
     });
@@ -1015,18 +996,37 @@ export function App({ transport }: { transport: Transport }) {
         setRows((current) => [...current, metaRow('error', `无法启动后端：${code(error)}`, `Could not start the host: ${code(error)}`)]);
         return;
       }
+      // Host restart invalidates an in-flight preference write. Reload its version and saved values
+      // before restoring the Session so a failed write does not leave the composer read-only.
+      setSettingsReady(false);
+      setPrefsFailure(null);
+      setPrefsDetails('');
+      const refreshedPreferences = loadSettings(client).then(
+        (adopted) => {
+          setSettings(adopted);
+          saveWarned.current = false;
+          setSettingsReady(true);
+        },
+        (error) => {
+          setPrefsFailure(code(error));
+          setPrefsDetails(error instanceof Error ? error.message : String(error));
+        },
+      );
+      prefsSettled.current = refreshedPreferences;
+      await refreshedPreferences;
       if (sessionId !== null) {
-        // Host 被强制结束后，记录锁可能要等租约过期。等待锁最多十二秒；超时后提示用户重试。
-        const deadline = Date.now() + 12_000;
-        for (;;) {
-          try {
-            await client.call('session.open', projectRoot === '' ? { sessionId } : { sessionId, projectRoot }, 60_000);
-            break;
-          } catch (error) {
-            if (code(error) !== 'session_locked' || Date.now() >= deadline) break;
-            await new Promise((done) => setTimeout(done, 1_000));
-          }
-        }
+        if (active.current !== sessionId) return;
+        // Host 被强制结束后，记录锁可能要等租约过期；重试预算比租约略长，仍拿不到就明确提示。
+        await reopenSessionWriter({
+          open: () => client.call('session.open', projectRoot === '' ? { sessionId } : { sessionId, projectRoot }, 60_000).then(() => undefined),
+          code,
+          isLocked: (failure) => failure === 'session_locked',
+          now: () => Date.now(),
+          sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
+          budgetMs: 15_000,
+          isCurrent: () => active.current === sessionId,
+        });
+        if (active.current !== sessionId) return;
         await openSession(sessionId, undefined, true);
       } else {
         try {
@@ -1410,7 +1410,6 @@ export function App({ transport }: { transport: Transport }) {
     // 答案回显只写入发起请求的会话转录。
     if (head.sessionId === sessionId) {
       // 先更新本地转录再发送答复，因为 Host 收到答复后可能立即返回工具结果。
-      setRows((current) => [...current, metaRow('meta', `${decision === 'allow' ? '已允许' : '已拒绝'} ${head.tool}${head.detail === '' ? '' : `：${head.detail.slice(0, 60)}`}`, `${decision === 'allow' ? 'Allowed' : 'Refused'} ${head.tool}${head.detail === '' ? '' : `: ${head.detail.slice(0, 60)}`}`)]);
     }
     client.reply(head.id, { decision, ...(rememberScope === undefined ? {} : { rememberScope }), ...(rememberTarget === undefined ? {} : { rememberTarget }) });
     // 答复后移走按钮焦点，避免下一次 Enter 重复提交。
@@ -1676,7 +1675,7 @@ export function App({ transport }: { transport: Transport }) {
         {collapsed && <button type="button" className="icon-button" aria-label={t('展开侧栏', 'Show sidebar')} onClick={() => patch({ collapsed: false })}><Icon name="sidebar" /></button>}
         <div className="title">
           <strong id="session-title">{sessionId === null ? t('新会话', 'New conversation') : sessionLabel.name || t('未命名会话', 'Untitled conversation')}</strong>
-          <span className="muted" id="session-note" title={projectRoot}>{projectRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? t('默认工作区', 'Default workspace')}</span>
+          <span className="muted title-workspace" id="session-note" title={projectRoot}>{projectRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? t('默认工作区', 'Default workspace')}</span>
         </div>
         {running && <span className="running-label" aria-live="polite" title={progressLabel}><span className="status-dot" /><span className="running-detail">{progressLabel}</span></span>}
         {status?.usage && <UsageMeter usage={status.usage} running={running} seconds={seconds} />}
@@ -1695,11 +1694,17 @@ export function App({ transport }: { transport: Transport }) {
 
       {observingExternalSession && <div className="banner" role="status">
         <Icon name="warn" size={15} />
-        <span>{externalWriterActive
-          ? t('外控 Agent 正在运行。下方可以查看进度、补充消息、处理待决问题或接管会话。', 'An external agent is controlling this session. Use the panel below to follow progress, send guidance, answer requests, or take over.')
-          : t('此会话当前没有活动写入者。刷新会话可重新打开并取得控制权。', 'This session has no active writer. Refresh to reopen it and take control.')}</span>
+        <span>{sessionWriterActive
+          ? externalControlSessionId === sessionId
+            ? t('外控 Agent 正在运行。下方可以查看进度、补充消息、处理待决问题或接管会话。', 'An external agent is controlling this session. Use the panel below to follow progress, send guidance, answer requests, or take over.')
+            : t('另一个 Host 正在写入此会话。当前为只读观察；锁释放后可重新打开会话。', 'Another Host is writing to this conversation. This view is read-only; reopen it after the lock clears.')
+          : t('此会话当前没有活动写入者。刷新会话可重新打开并取得控制权。', 'This session has no active writer. Refresh to reopen it and take control.')}
+          {writerLockNoticeSessionId === sessionId && <> {t(
+            '先前的宿主仍持有会话写入锁；锁释放后重新打开会话即可恢复写入。',
+            'The previous Host still holds the session writer lock. Reopen the conversation after it clears to regain write access.',
+          )}</>}</span>
         <button type="button" onClick={() => { if (sessionId !== null) void openSession(sessionId, undefined, false, projectRoot); }}>
-          {externalWriterActive ? t('刷新观察', 'Refresh view') : t('重新打开', 'Reopen session')}
+          {sessionWriterActive ? t('刷新观察', 'Refresh view') : t('重新打开', 'Reopen session')}
         </button>
       </div>}
 
@@ -1749,12 +1754,13 @@ export function App({ transport }: { transport: Transport }) {
         onDetails={(ask) => void loadApprovalDetails(ask)}
       />}
 
-      {observingExternalSession && externalWriterActive && sessionId !== null && <ExternalSessionControlPanel
+      {observingExternalSession && sessionWriterActive && sessionId !== null && <ExternalSessionControlPanel
         key={sessionId}
         client={client}
         sessionId={sessionId}
         projectRoot={projectRoot}
         verbosity={verbosity}
+        onRuntimeAvailability={updateExternalControlAvailability}
         onDelta={acceptExternalDelta}
         onSessionEvent={settleExternalEvent}
         onTakeover={() => { void openSession(sessionId, undefined, false, projectRoot); }}
@@ -1774,7 +1780,7 @@ export function App({ transport }: { transport: Transport }) {
         <button type="button" className="icon-button" aria-label={t('关闭提示', 'Dismiss')} onClick={() => setNotificationProblem(null)}><Icon name="close" size={14} /></button>
       </div>}
 
-      {observingExternalSession && externalWriterActive && sessionId !== null
+      {observingExternalSession && sessionWriterActive && externalControlSessionId === sessionId && sessionId !== null
         ? <ExternalSessionComposer client={client} sessionId={sessionId} projectRoot={projectRoot} />
         : <Composer
         client={client}
@@ -1850,7 +1856,7 @@ export function App({ transport }: { transport: Transport }) {
       keyNotice={keyNotice}
       link={link}
       logs={diagnosticLogs}
-      onStatus={setStatus}
+      onStatus={(next) => { if (active.current === next.sessionId) { setStatus(next); setTaskSnapshotAt(Date.now()); } }}
       counts={panelProps.counts}
       waiting={panelProps.waiting}
       onReconnect={() => void reconnect()}

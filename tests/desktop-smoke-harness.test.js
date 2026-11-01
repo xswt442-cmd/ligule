@@ -27,7 +27,7 @@ test('packaged launch uses the credential-safe launcher and closes standard logs
   const runBody = packagedSource.slice(runStart, runEnd);
 
   assert.match(runBody, /await startApplication\(\)/u);
-  assert.match(runBody, /setTimeout\(\(\) => \{ timedOut = true; applicationProcess\.kill\(\); \}, 150_000\)/u);
+  assert.match(runBody, /setTimeout\(\(\) => \{ timedOut = true; applicationProcess\.kill\(\); \}, 300_000\)/u);
   assert.match(runBody, /await Promise\.all\(\[stdout, stderr\][\s\S]*?finished\(stream\)/u);
   assert.match(packagedSource, /const stdout = interruptionMode === undefined \? createWriteStream/u);
   assert.match(packagedSource, /const stderr = interruptionMode === undefined \? createWriteStream/u);

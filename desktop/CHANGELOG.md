@@ -6,7 +6,19 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-01
+
 ### 简体中文
+
+- 桌面输入区把模型、工具模式、权限、审批固定在同一顺序；截图授权收为右侧次级图标按钮，状态保留在按钮与授权确认中。
+- 权限弹窗只保留当前会话的权限档与必要确认；网络访问、隔离细节与项目信任集中到「设置 → 权限与安全」。工具目录改为一行一个工具并折叠详情；模型服务列表只显示模型数量与首个模型；外控面板的会话配置折叠进详情。
+- 消息区的工具调用只显示一次工具名，不再逐行重复「完成」。
+- 工具模式菜单直接列出 minimal / full 的一句话区别并可点选，自定义模式移到「其他模式」；会话搜索结果先显示会话名，再用浅色标注命中位置；折叠区恢复 ▸ / ▾ 标记。
+- 失败行先用一句话说明发生了什么和下一步，原始错误码与英文正文收进「原始信息」。
+- 外控授权的到期时间必须晚于当前时间；已过期或当前到期的值不能提交。
+- 审批摘要与脚本绑定说明分别生成中文和英文内容，切换界面语言时保持一致。
+- 会话写入锁仍由其他 Host 持有时，桌面以只读方式打开并保留占用说明。
+- 只读观察区分普通 Host 写入与可用的外控 Agent runtime；仅在 runtime 可用时显示外控面板与指导输入。断连提示会保留到 Host 的只读观察或会话恢复成功。
 
 - `run.wait` 必须明确指定 `origin`，但该字段不授予权限。可信本地 UI 可读取本 Session 的所有回执；经过认证的 Agent Control 桥接受限于 human 与当前 Grant scope；其他 Host 只能读取自己的 controller scope。Host 按持久 Run 归属与调用方上下文授权。跨 scope 的 `requestKey` 多重匹配返回 `run_request_key_ambiguous`，应使用 `runId`。
 - POSIX MCP Server 使用独立进程组；撤销、取消或 Host 关闭时有界地发送终止信号并清理仍存活的所属子进程，失败保留为可重试错误。主动通过 `setpgid` 移入其他进程组或通过 `setsid` 创建新会话的后代不在原进程组边界内。
@@ -34,6 +46,16 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - 运行结果提供已知的任务预算、部分输出和文件交付元数据；`full` 的 `present` 记录工作区文件类型、大小与摘要。仍被 Session 引用的图片超过 30 天也保持可用。
 
 ### English
+
+- The desktop composer keeps model, tool mode, permissions, and approvals in one fixed order; screen capture becomes a secondary icon button on the right, with its state kept in the button and the consent dialog.
+- The permission popover now only holds the active session's profile and its confirmations; network access, isolation details, and project trust move to Settings → Permissions and security. The tool catalog lists one tool per row with folded details, model services show a model count and the first model, and Agent Control folds the session configuration into details.
+- Tool calls in the message stream name the tool once instead of repeating a "Done" badge on every row.
+- The tool-mode menu explains and selects `minimal` or `full`, moves custom modes under “Other modes”, shows session names before matching search text, and restores the `▸` / `▾` fold markers.
+- Failure rows lead with a short explanation and next step; the raw error code and English details are folded under “Raw information”.
+- Agent Control grant expirations must be in the future; expired and current-time values cannot be submitted.
+- Approval summaries and script-binding details keep separate Chinese and English text across interface-language changes.
+- If another Host still holds a session writer lock, Desktop opens the conversation read-only and keeps the lock explanation visible.
+- Read-only observation distinguishes an ordinary Host writer from an available Agent Control runtime, showing control panels and guidance input only when that runtime responds. Disconnect notices remain until a read-only Host observation or session reopen succeeds.
 
 - `run.wait` requires an explicit `origin`, but that field does not grant access. A trusted local UI can read all Receipts in its Session; an authenticated Agent Control bridge is limited to human and its active Grant scopes; other Hosts can read only their controller scope. The Host authorizes access from the persisted Run owner and caller context. An ambiguous `requestKey` across visible scopes returns `run_request_key_ambiguous`; use `runId` to select one.
 - POSIX MCP servers use dedicated process groups. Revoke, cancellation, and Host shutdown send bounded termination signals and clean up surviving owned descendants; failures remain retryable. Descendants that move to another group with `setpgid` or start a new session with `setsid` are outside the original process-group boundary.

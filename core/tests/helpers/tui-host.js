@@ -200,7 +200,9 @@ export async function withTuiHost(run, { delayMs = 0, beforeResponse, setup, con
         if (previousEnv[key] === undefined) delete process.env[key];
         else process.env[key] = previousEnv[key];
       }
-      await rm(absoluteDirectory, { recursive: true, force: true });
+      // A just-released lock entry can briefly race recursive removal on Linux; keep
+      // retrying cleanup bounded, and let a persistent filesystem error fail the test.
+      await rm(absoluteDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   }
 }

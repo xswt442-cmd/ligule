@@ -308,7 +308,7 @@ test('session filtering stays out of the draft and resumes the selected Host ses
       await wait(() => frame().includes('西藏 · 1/2'));
       stdin.write('\r');
       await wait(() => context.requests.some(request => request.method === 'session.open' && request.params.sessionId === other.sessionId)
-        && frame().includes(`会话 ${other.sessionId.slice(0, 8)}`));
+        && frame().includes('会话 西藏行程 · project'));
       assert.ok(context.requests.some(request => request.method === 'session.close' && request.params.sessionId === context.sessionId));
       assert.equal(context.providerRequests.length, 0);
     });

@@ -182,3 +182,16 @@
   border-radius: 14px;
   box-shadow: 0 3px 18px rgb(0 0 0 / 4%);
 }
+
+.approval-primary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.approval-remember > summary {
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}

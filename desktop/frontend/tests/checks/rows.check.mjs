@@ -1,6 +1,6 @@
 // 检查 Host 事件如何转换为桌面端转录行和状态提示。
 import assert from 'node:assert/strict';
-import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn } from '../../src/rows.ts';
+import { capabilityOf, callRowFoldLabel, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn } from '../../src/rows.ts';
 
 const call = projectRecord({
   kind: 'assistant',
@@ -10,6 +10,8 @@ const call = projectRecord({
 assert.equal(call.tool, 'mcp:demo/lookup');
 assert.equal(call.summary, '{"input":{"key":"x"}}');
 assert.match(call.text, /"server": "demo"/);
+assert.equal(callRowFoldLabel(call.text, (_chinese, english) => english), 'View arguments');
+assert.equal(callRowFoldLabel(call.text, (chinese) => chinese), '看参数');
 
 const questionCall = projectRecord({
   kind: 'assistant',
@@ -117,6 +119,17 @@ const refusal = projectRecord({
 assert.equal(refusal.kind, 'refusal');
 assert.equal(refusal.text, '这一条没被允许。');
 assert.deepEqual(refusal.notes, ['已拒绝 (auto→ask)']);
+
+const noneRefusal = projectRecord({
+  kind: 'tool',
+  tool: 'exec',
+  callId: 'c4b',
+  args: { command: 'rm -rf .' },
+  verdict: { decision: 'deny', via: 'ask', capability: 'exec', level: 'none', forced: true },
+  result: { failed: true, kind: 'refusal', code: 'policy_denied', reason: '这一条没被允许。' },
+})[0];
+// 不提示档本来就不问，连续拒绝也不该被写成档位变化。
+assert.deepEqual(noneRefusal.notes, ['已拒绝 (none)']);
 
 const repaired = projectRecord({
   kind: 'tool',

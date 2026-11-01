@@ -6,73 +6,12 @@ import { Group, Modal, Row } from './ui';
 import { GrantOverview } from './GrantOverview';
 import { applyGrantPreset, grantPreset, grantPresets, type GrantPresetId } from '../agent-control-presets';
 import type { Grant, NetworkLimit, PermissionProfile, PolicySelection } from './agent-control-types';
+import { createGrantRequest, emptyGrantDraft, grantDraftFlags, grantReady, grantState, limitsReady, sameProjectPath, type GrantDraft } from '../agent-control-draft';
 type Snapshot = { version: string; grants: Grant[] };
 type WorkspaceRoster = { default: string | null; workspaces: { identity: string; directory: string; name: string }[] };
 type McpTool = { name: string; description: string; digest: string };
 type McpServer = { name: string; identityDigest: string; trust: { scope: string; trusted: boolean } | null };
 type McpTools = { identityDigest: string; tools: McpTool[] };
-type Draft = {
-  name: string;
-  defaultPermissionProfile: PermissionProfile;
-  maxPermissionProfile: PermissionProfile;
-  defaultNetwork: NetworkLimit;
-  maxNetwork: NetworkLimit;
-  defaultPolicy: PolicySelection;
-  allowedPolicies: PolicySelection[];
-  allowOperator: boolean;
-  allowScreenCapture: boolean;
-  confirmScreenCapture: boolean;
-  allowedMcpServers: string[];
-  allowedMcpTools: string[];
-  confirmFullAccess: boolean;
-  confirmUnrestrictedNetwork: boolean;
-  confirmPartialWorkspaceWrite: boolean;
-  confirmWorkspaceTrust: boolean;
-  expiresAt: string;
-};
-
-function emptyDraft(): Draft {
-  const expiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  const localExpiry = new Date(expiry.getTime() - expiry.getTimezoneOffset() * 60_000);
-  return {
-    name: '',
-    defaultPermissionProfile: 'read-only',
-    maxPermissionProfile: 'read-only',
-    defaultNetwork: 'disabled',
-    maxNetwork: 'disabled',
-    defaultPolicy: 'ask',
-    allowedPolicies: ['ask'],
-    allowOperator: false,
-    allowScreenCapture: false,
-    confirmScreenCapture: false,
-    allowedMcpServers: [],
-    allowedMcpTools: [],
-    confirmFullAccess: false,
-    confirmUnrestrictedNetwork: false,
-    confirmPartialWorkspaceWrite: false,
-    confirmWorkspaceTrust: false,
-    expiresAt: localExpiry.toISOString().slice(0, 16),
-  };
-}
-
-const PROFILE_RANK: Record<PermissionProfile, number> = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
-const NETWORK_RANK: Record<NetworkLimit, number> = { disabled: 0, policy: 1, unrestricted: 2 };
-
-function sameProjectPath(left: string, right: string): boolean {
-  const clean = (value: string) => value.replace(/[\\/]+$/u, '');
-  const first = clean(left);
-  const second = clean(right);
-  return typeof navigator !== 'undefined' && /Windows/u.test(navigator.userAgent)
-    ? first.toLowerCase() === second.toLowerCase()
-    : first === second;
-}
-
-function grantState(grant: Grant, t: (chinese: string, english: string) => string): string {
-  if (grant.revokedAt !== null) return t('已撤销', 'Revoked');
-  if (grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now()) return t('已到期', 'Expired');
-  return t('可用', 'Available');
-}
-
 export function AgentControlPanel({ client, projectRoot, onEdit }: {
   client: Client;
   projectRoot: string;
@@ -83,37 +22,23 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [mcpTools, setMcpTools] = useState<Record<string, McpTools>>({});
   const [mcpLoading, setMcpLoading] = useState<string | null>(null);
-  const [draft, setDraft] = useState<Draft>(emptyDraft);
+  const [draft, setDraft] = useState<GrantDraft>(emptyGrantDraft);
   const [grantStep, setGrantStep] = useState<0 | 1 | 2>(0);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ text: string; code?: string; bad: boolean } | null>(null);
   const [confirmingRevoke, setConfirmingRevoke] = useState<Grant | null>(null);
   const [copied, setCopied] = useState('');
+  const [policyDetailsOpen, setPolicyDetailsOpen] = useState(false);
+  const [screenCaptureDetailsOpen, setScreenCaptureDetailsOpen] = useState(false);
+  const [mcpDetailsOpen, setMcpDetailsOpen] = useState(false);
   const [workspaceRoster, setWorkspaceRoster] = useState<WorkspaceRoster>({ default: null, workspaces: [] });
   const [selectedProject, setSelectedProject] = useState(projectRoot.trim());
   const [selectedGrantId, setSelectedGrantId] = useState('');
   const project = selectedProject.trim();
-  const profileExceeds = PROFILE_RANK[draft.defaultPermissionProfile] > PROFILE_RANK[draft.maxPermissionProfile];
-  const networkExceeds = NETWORK_RANK[draft.defaultNetwork] > NETWORK_RANK[draft.maxNetwork];
-  const policyMissing = !draft.allowedPolicies.includes(draft.defaultPolicy);
-  const mcpLimitInvalid = draft.allowedMcpTools.some((capability) => {
-    const server = capability.startsWith('mcp:') ? capability.slice(4).split('/')[0] : '';
-    return !draft.allowedMcpServers.includes(server);
-  });
-  const invalidExpiry = draft.expiresAt !== '' && !Number.isFinite(Date.parse(draft.expiresAt));
-  const canSave = !busy && snapshot !== null && project !== '' && draft.name.trim() !== ''
-    && !profileExceeds && !networkExceeds && !policyMissing && !mcpLimitInvalid && !invalidExpiry
-    && (!draft.allowScreenCapture || draft.confirmScreenCapture)
-    && (draft.maxPermissionProfile !== 'full-access' || draft.confirmFullAccess)
-    && (draft.maxPermissionProfile === 'read-only' || draft.confirmPartialWorkspaceWrite)
-    && draft.confirmWorkspaceTrust
-    && (draft.maxNetwork !== 'unrestricted' || draft.confirmUnrestrictedNetwork);
-  const canContinueLimits = !busy && !profileExceeds && !networkExceeds && !policyMissing && !mcpLimitInvalid
-    && (!draft.allowScreenCapture || draft.confirmScreenCapture)
-    && (draft.maxPermissionProfile !== 'full-access' || draft.confirmFullAccess)
-    && (draft.maxPermissionProfile === 'read-only' || draft.confirmPartialWorkspaceWrite)
-    && (draft.maxNetwork !== 'unrestricted' || draft.confirmUnrestrictedNetwork);
+  const { profileExceeds, networkExceeds, policyMissing, mcpLimitInvalid, invalidExpiry } = grantDraftFlags(draft);
+  const canSave = !busy && snapshot !== null && grantReady(draft, project);
+  const canContinueLimits = !busy && limitsReady(draft);
   const held = busy && dirty
     ? t('外部控制授权正在保存。', 'The Agent Control grant is being saved.')
     : dirty
@@ -129,6 +54,12 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
   useEffect(() => {
     setSelectedProject((current) => current === '' ? projectRoot.trim() : current);
   }, [projectRoot]);
+
+  const resetAdvancedDetails = () => {
+    setPolicyDetailsOpen(false);
+    setScreenCaptureDetailsOpen(false);
+    setMcpDetailsOpen(false);
+  };
 
   const load = useCallback(async (keepNote = false) => {
     try {
@@ -163,7 +94,7 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
 
   useEffect(() => { void load(); }, [load]);
 
-  const update = <K extends keyof Draft>(key: K, value: Draft[K]) => {
+  const update = <K extends keyof GrantDraft>(key: K, value: GrantDraft[K]) => {
     setDirty(true);
     setDraft(current => ({ ...current, [key]: value }));
     setNote(null);
@@ -206,36 +137,14 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
     setBusy(true);
     setNote(null);
     try {
-      const expiration = draft.expiresAt === '' ? '' : new Date(draft.expiresAt).toISOString();
-      const result = await client.call('agent-control.create', {
-        version: snapshot.version,
-        grantName: draft.name,
-        projectRoot: project,
-        defaultPermissionProfile: draft.defaultPermissionProfile,
-        maxPermissionProfile: draft.maxPermissionProfile,
-        defaultNetwork: draft.defaultNetwork,
-        maxNetwork: draft.maxNetwork,
-        defaultPolicy: draft.defaultPolicy,
-        allowedPolicyAsk: draft.allowedPolicies.includes('ask'),
-        allowedPolicyAuto: draft.allowedPolicies.includes('auto'),
-        allowedPolicyNone: draft.allowedPolicies.includes('none'),
-        allowOperator: draft.allowOperator,
-        allowScreenCapture: draft.allowScreenCapture,
-        confirmScreenCapture: draft.confirmScreenCapture,
-        allowedMcpServers: draft.allowedMcpServers,
-        allowedMcpTools: draft.allowedMcpTools,
-        confirmFullAccess: draft.confirmFullAccess,
-        confirmUnrestrictedNetwork: draft.confirmUnrestrictedNetwork,
-        confirmPartialWorkspaceWrite: draft.confirmPartialWorkspaceWrite,
-        confirmWorkspaceTrust: draft.confirmWorkspaceTrust,
-        expiresAt: expiration,
-      }, 30_000) as Snapshot;
+      const result = await client.call('agent-control.create', createGrantRequest(draft, project, snapshot.version), 30_000) as Snapshot;
       setSnapshot(result);
       const created = result.grants.find((grant) => !snapshot.grants.some((previous) => previous.id === grant.id));
       if (created !== undefined) setSelectedGrantId(created.id);
-      setDraft(emptyDraft());
+      setDraft(emptyGrantDraft());
       setDirty(false);
       setGrantStep(0);
+      resetAdvancedDetails();
       setNote({ text: t('授权已保存。请将授权 ID 放入本地 MCP 配置。', 'Grant saved. Use its ID in your local MCP configuration.'), bad: false });
     } catch (error) {
       setNote({ text: t('授权保存失败。', 'Could not save the grant.'), code: code(error), bad: true });
@@ -290,18 +199,23 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
   }, [projectRoot, project, workspaceRoster]);
   const applyPreset = (id: GrantPresetId) => {
     const preset = grantPreset(id);
-    setDraft((current) => ({
-      ...applyGrantPreset(current, id),
-      name: current.name.trim() === '' ? t(preset.name.zh, preset.name.en) : current.name,
-    }));
+    const nextDraft = {
+      ...applyGrantPreset(draft, id),
+      name: draft.name.trim() === '' ? t(preset.name.zh, preset.name.en) : draft.name,
+    };
+    setDraft(nextDraft);
+    setPolicyDetailsOpen(nextDraft.allowOperator || nextDraft.defaultPolicy !== 'ask' || nextDraft.allowedPolicies.length > 1);
+    setScreenCaptureDetailsOpen(nextDraft.allowScreenCapture);
+    setMcpDetailsOpen(nextDraft.allowedMcpServers.length > 0 || nextDraft.allowedMcpTools.length > 0);
     setDirty(true);
     setGrantStep(1);
     setNote(null);
   };
   const clearDraft = () => {
-    setDraft(emptyDraft());
+    setDraft(emptyGrantDraft());
     setDirty(false);
     setGrantStep(0);
+    resetAdvancedDetails();
     setNote(null);
   };
 
@@ -445,7 +359,9 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
           </label>}
         </section>
 
-        <section className="grant-config-card">
+        <details className="grant-config-card grant-advanced" open={policyDetailsOpen || policyMissing}
+          onToggle={(event) => setPolicyDetailsOpen(event.currentTarget.open)}>
+          <summary>{t('高级：审批方式与 Operator', 'Advanced: approval and operator')}</summary>
           <h4>{t('审批方式', 'Approval behavior')}</h4>
           <label className="grant-field">
             <span>{t('默认 Policy', 'Default Policy')}</span>
@@ -469,10 +385,11 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
             <input type="checkbox" checked={draft.allowOperator} onChange={(event) => update('allowOperator', event.target.checked)} />
             <span>{t('允许 MCP 使用者通过 --operator 处理普通审批。', 'Allow the MCP client to handle ordinary approvals with --operator.')}</span>
           </label>
-        </section>
+        </details>
 
-        <section className="grant-config-card">
-          <h4>{t('屏幕观察（Windows）', 'Screen capture (Windows)')}</h4>
+        <details className="grant-config-card grant-advanced" open={screenCaptureDetailsOpen}
+          onToggle={(event) => setScreenCaptureDetailsOpen(event.currentTarget.open)}>
+          <summary>{t('高级：屏幕观察（Windows）', 'Advanced: screen capture (Windows)')}</summary>
           <label className="grant-confirmation">
             <input type="checkbox" checked={draft.allowScreenCapture} onChange={event => {
               update('allowScreenCapture', event.target.checked);
@@ -484,9 +401,11 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
             <input type="checkbox" checked={draft.confirmScreenCapture} onChange={event => update('confirmScreenCapture', event.target.checked)} />
             <span>{t('确认屏幕可能含其他应用或项目的信息，截图将发送给当前图像模型。此授权不允许移动窗口、抢焦点、鼠标或键盘控制。', 'Confirm that the screen may include other applications or projects and captures will be sent to the selected image model. This permission does not allow moving windows, changing focus, or mouse and keyboard control.')}</span>
           </label>}
-        </section>
+        </details>
 
-        <section className="grant-config-card grant-mcp-limits">
+        <details className="grant-config-card grant-advanced grant-mcp-limits" open={mcpDetailsOpen || mcpLimitInvalid}
+          onToggle={(event) => setMcpDetailsOpen(event.currentTarget.open)}>
+          <summary>{t('高级：MCP Server 与工具', 'Advanced: MCP servers and tools')}</summary>
           <h4>{t('MCP Server 与工具', 'MCP servers and tools')}</h4>
           <p className="session-note">{t('此授权只能使用已在 MCP 信任设置中批准的 Server。先选允许启动的 Server，再加载工具清单并逐项选择。未选工具时，外部 Agent 不能调用该 Server 的工具。', 'This grant can use only servers approved in MCP trust settings. Select servers it may start, load their tool lists, then choose tools individually. Tools not selected here cannot be called by the external agent.')}</p>
           {mcpServers.length === 0 ? <p className="stub">{t('当前项目没有配置 MCP Server。', 'No MCP servers are configured for this project.')}</p>
@@ -518,7 +437,7 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
               </div>;
             })}
           {mcpLimitInvalid && <p className="grant-validation">{t('每个 MCP 工具都必须属于本授权允许启动的 Server。', 'Each MCP tool must belong to a server this grant can start.')}</p>}
-        </section>
+        </details>
 
       </div>
       <div className="grant-actions">

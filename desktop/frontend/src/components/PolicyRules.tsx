@@ -196,7 +196,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
       {note.code !== undefined && <details><summary>{t('错误代码', 'Error code')}</summary><code>{note.code}</code></details>}
     </div>}
     {shown === null ? <p className="stub">{t('正在读取规则表…', 'Loading approval rules…')}</p> : <>
-      <p className="sheet-note">{t('规则按工具能力名和完全相同的匹配条件逐条覆盖；未被高层覆盖的规则继续生效。下面的编辑列表只操作选中的配置文件。规则与默认档按当前会话所属项目读取；选择另一项目后随之切换。没有打开的会话时使用 Host 启动项目。', 'Rules override one another only when the tool capability and match condition are identical; unmatched lower-layer rules remain active. The editor below changes only the selected configuration file. Rules and the default tier use the current session’s project. With no open session, the Host startup project is used.')} {rulesFrom()}</p>
+      <details className="sheet-details"><summary>{t('规则如何生效', 'How rules apply')}</summary><p className="sheet-note">{t('规则按工具能力名和完全相同的匹配条件逐条覆盖；未被高层覆盖的规则继续生效。下面的编辑列表只操作选中的配置文件。规则与默认档按当前会话所属项目读取；选择另一项目后随之切换。没有打开的会话时使用 Host 启动项目。', 'Rules override one another only when the tool capability and match condition are identical; unmatched lower-layer rules remain active. The editor below changes only the selected configuration file. Rules and the default tier use the current session’s project. With no open session, the Host startup project is used.')} {rulesFrom()}</p></details>
       <Row label={t('写入位置', 'Save to')}>
         <select value={layer} disabled={saving} onChange={(event) => setLayer(event.target.value)}>
           {WRITABLE_LAYERS.map(([id]) => <option key={id} value={id}>{layerText(id, t)}</option>)}
@@ -219,7 +219,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
       {shown.policyMode === 'none' && <p className="session-note">{t('普通权限内工具调用不等待逐项批准；工作区边界、拒绝规则、系统硬拒绝和独立信任要求仍生效。', 'Ordinary in-bound tool calls do not wait for per-action approval. Workspace boundaries, deny rules, system hard denials, and separate trust requirements remain active.')}</p>}
 
       <h3 className="group-label">{t(`生效规则（${effectiveRules.length} 条）`, `Effective rules (${effectiveRules.length})`)}</h3>
-      <p className="sheet-note">{t('在逐次询问模式下，复合命令的每一段都要被同一条放行规则覆盖，才会跳过询问。禁止规则作用于整条命令及各段，放行规则不能覆盖它。', 'In ask mode, one allow rule must cover every part of a compound command to skip approval. A deny rule applies to the full command and each part; an allow rule cannot override it.')}</p>
+      <details className="sheet-details"><summary>{t('复合命令的放行条件', 'Compound commands')}</summary><p className="sheet-note">{t('在逐次询问模式下，复合命令的每一段都要被同一条放行规则覆盖，才会跳过询问。禁止规则作用于整条命令及各段，放行规则不能覆盖它。', 'In ask mode, one allow rule must cover every part of a compound command to skip approval. A deny rule applies to the full command and each part; an allow rule cannot override it.')}</p></details>
       {effectiveRules.length === 0 && <p className="stub">{shown.rules === undefined
         ? t('此 Host 不提供配置读写，无法读取规则表。', 'This Host does not provide configuration access, so the rules table is unavailable.')
         : t('当前没有审批规则。添加一条规则即可开始。', 'There are no approval rules. Add a rule to get started.')}</p>}

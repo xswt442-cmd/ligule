@@ -40,6 +40,26 @@ function providerDiagnosticText(value: unknown): [string, string] | undefined {
   ];
 }
 
+// 失败行同样用稳定错误码解释原因：已知码用上表，未知但明显是传输/HTTP 层的码补一句人话，原始信息留给详情。
+export type FailureExplanation = { explanation: [string, string]; original: boolean };
+
+export function failureExplanation(code: string, detail?: string): FailureExplanation {
+  const known = turnFailure(code);
+  const status = typeof detail === 'string' ? /HTTP\s+(\d{3})/iu.exec(detail)?.[1] : undefined;
+  if (code !== '' && /http_error$/iu.test(code)) {
+    return {
+      explanation: status === undefined
+        ? ['模型服务返回错误。请检查密钥、模型访问权限及服务状态。', 'The model service returned an error. Check the API key, model access, and service status.']
+        : [`模型服务返回 HTTP ${status}。请检查密钥、模型访问权限及服务状态。`, `The model service returned HTTP ${status}. Check the API key, model access, and service status.`],
+      original: true,
+    };
+  }
+  if (known.explanation[0].startsWith('本轮未能完成') || known.explanation[1].startsWith('The turn could not complete')) {
+    return { explanation: known.explanation, original: true };
+  }
+  return { explanation: known.explanation, original: false };
+}
+
 // 轮次记录只保存稳定错误码；界面解释已知原因，未知错误保留通用提示与原码。
 export function turnFailure(code: string, diagnostics?: unknown): TurnFailure {
   const diagnostic = providerDiagnosticText(diagnostics);

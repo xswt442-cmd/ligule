@@ -201,6 +201,22 @@
   font-size: var(--text-sm);
 }
 
+.settings-advanced > summary::before,
+.about-fold > summary::before,
+.catalog-fold > summary::before {
+  content: '▸';
+  margin-inline-end: 8px;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.settings-advanced[open] > summary::before,
+.about-fold[open] > summary::before,
+.catalog-fold[open] > summary::before {
+  content: '▾';
+  color: var(--accent);
+}
+
 .settings-advanced[open] > summary,
 .about-fold[open] > summary { color: var(--fg); }
 
@@ -472,4 +488,44 @@ button.mini.chip b {
 .usage-row b {
   font-weight: 500;
   text-align: end;
+}
+
+/* P7: tool rows stay one line; description and tags fold away. */
+.catalog-list.catalog-tools > li.tool-row {
+  display: block;
+  padding: 4px 0;
+}
+
+.tool-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tool-line code {
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+
+.tool-access {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.tool-source {
+  margin-inline-start: auto;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.tool-details > summary {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.tool-details[open] {
+  padding-block-start: 4px;
 }
