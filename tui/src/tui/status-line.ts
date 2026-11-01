@@ -3,6 +3,19 @@ import { displayWidth } from './commands.js';
 import { keyHint } from './keymap.js';
 import { textOf as chooseText, type Locale } from '@ligule/core/kernel/locale.js';
 
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+function fitLine(text: string, columns: number): string {
+  if (columns <= 0) return '';
+  if (displayWidth(text) <= columns) return text;
+  let shown = '';
+  for (const { segment } of graphemes.segment(text)) {
+    if (displayWidth(`${shown}${segment}…`) > columns) break;
+    shown += segment;
+  }
+  return `${shown}…`;
+}
+
 export interface TaskBudget {
   readonly modelCalls: number;
   readonly maxModelCalls: number;
@@ -126,14 +139,14 @@ export function buildStatusLine({ sessionId, name, boundary, status, running, se
     : '')
     + (expanded ? `${running ? ' · ' : ''}${t('已展开（', 'expanded (')}${keyHint('expand-or-history')}${t(' 收起）', ' to close)')}` : '');
   let tail = hints;
-  const line = () => [base, ...(running && progress !== undefined && progress !== null ? [`${idleSeconds}${t(' 秒无新进展', 's without progress')}`] : []), tail].filter(part => part !== '').join(' · ');
+  let showIdle = true;
+  const line = () => [base, ...(showIdle && running && progress !== undefined && progress !== null ? [`${idleSeconds}${t(' 秒无新进展', 's without progress')}`] : []), tail].filter(part => part !== '').join(' · ');
   const over = () => columns !== undefined && columns > 0 && displayWidth(line()) > columns;
-  if (over()) base = `${id}${leaf === '' ? '' : ` · ${leaf}`}`;
   if (over()) base = id;
-  if (over()) tail = hints === '' ? '' : hints;
-  if (over() && running) {
-    tail = `${phaseHint} · ${keyHint('interrupt')} ${t('打断', 'stop')}`;
-    if (over()) base = '';
-  }
-  return line();
+  if (over()) base = '';
+  if (over()) showIdle = false;
+  if (over() && running) tail = `${phaseHint} · ${keyHint('interrupt')} ${t('打断', 'stop')}`;
+  if (over() && running) tail = `${keyHint('interrupt')} ${t('打断', 'stop')}`;
+  if (over() && running) tail = keyHint('interrupt');
+  return columns === undefined ? line() : fitLine(line(), columns);
 }

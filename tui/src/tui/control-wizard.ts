@@ -115,7 +115,7 @@ export function parseControlWizardInput(wizard: ControlWizard, raw: string, t: W
     }
     values.defaultPolicy = input as ControlPolicyMode;
   } else if (wizard.step === 6) {
-    const allowed = listOf(input);
+    const allowed = input.split(',').map((part) => part.trim()).filter(Boolean);
     if (allowed.length === 0 || allowed.some((part) => !POLICY_MODES.includes(part as ControlPolicyMode))
       || !distinct(allowed) || !allowed.includes(values.defaultPolicy ?? 'ask')) {
       return fail(t('请输入不重复的 Policy 列表，例如 ask,none，并包含默认 Policy。', 'Enter distinct Policy modes such as ask,none, including the default.'));

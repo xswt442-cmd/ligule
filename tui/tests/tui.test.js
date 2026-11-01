@@ -518,6 +518,11 @@ test('an MCP call shows the capability it actually used', options, () => {
   assert.equal(call.tool, 'mcp:fs/read_file');
   const [done] = projectRecord({ kind: 'tool', tool: 'mcp.call', args: { server: 'fs', tool: 'read_file' }, result: { kind: 'result', failed: false, content: { text: 'a body', effectiveCapability: 'mcp:fs/read_file' } } });
   assert.deepEqual([done.tool, done.text], ['mcp:fs/read_file', 'a body']);
+  const [nestedTarget] = projectRecord({
+    kind: 'tool', tool: 'mcp.call', args: { server: 'fs', tool: 'read_file', arguments: '{"path":"docs/guide.md"}' },
+    result: { kind: 'result', failed: false, content: { text: 'a body', effectiveCapability: 'mcp:fs/read_file' } },
+  });
+  assert.deepEqual([nestedTarget.tool, nestedTarget.target], ['mcp:fs/read_file', 'docs/guide.md']);
 });
 
 // 命令结果的标题行应显示退出码，以区分成功和失败。

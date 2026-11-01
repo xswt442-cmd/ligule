@@ -42,6 +42,9 @@ test('control wizard keeps policy lists distinct and inclusive of the default', 
   const ok = parseControlWizardInput(wizard(6, { defaultPolicy: 'ask' }), 'ask,none', t);
   assert.equal(ok.kind, 'step');
   assert.deepEqual(ok.wizard.values.allowedPolicies, ['ask', 'none']);
+  const onlyNoPrompts = parseControlWizardInput(wizard(6, { defaultPolicy: 'none' }), 'none', t);
+  assert.equal(onlyNoPrompts.kind, 'step');
+  assert.deepEqual(onlyNoPrompts.wizard.values.allowedPolicies, ['none']);
 });
 
 test('control wizard defers MCP tool listing and aborts when trust is refused', () => {

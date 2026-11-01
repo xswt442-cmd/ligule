@@ -27,6 +27,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const textOf = (value: unknown): string => (typeof value === 'string' ? value : JSON.stringify(value ?? '', null, 2));
 
+function targetOf(tool: string, args: Record<string, unknown> | undefined): string {
+  if (tool === 'mcp.call') {
+    const nested = args?.arguments;
+    if (typeof nested === 'string') return toolTarget(nested);
+    if (isRecord(nested)) return toolTarget(JSON.stringify(nested));
+  }
+  return toolTarget(JSON.stringify(args ?? {}));
+}
+
 interface TuiToolResult {
   readonly content?: unknown;
   readonly reason?: unknown;
@@ -67,7 +76,10 @@ export function projectRecord(record: TuiRecord, locale: Locale = 'zh'): Transcr
   if (record.kind === 'assistant') {
     const rows: TranscriptItem[] = typeof record.text !== 'string' || record.text === '' ? [] : [{ kind: 'answer', text: record.text }];
     const calls = Array.isArray(record.toolCalls) ? record.toolCalls.filter((call): call is Record<string, unknown> => isRecord(call) && typeof call.name === 'string') : [];
-    for (const call of calls) rows.push({ kind: 'call', tool: capabilityOf(String(call.name), isRecord(call.args) ? call.args : undefined), text: JSON.stringify(call.args ?? {}) });
+    for (const call of calls) {
+      const args = isRecord(call.args) ? call.args : undefined;
+      rows.push({ kind: 'call', tool: capabilityOf(String(call.name), args), text: JSON.stringify(call.args ?? {}) });
+    }
     return rows;
   }
   if (record.kind === 'tool') {
@@ -75,7 +87,7 @@ export function projectRecord(record: TuiRecord, locale: Locale = 'zh'): Transcr
     const kind = result.failed !== true ? 'result' : result.kind === 'refusal' ? 'refusal' : 'failure';
     const parts = resultParts(result);
     const row: TranscriptItem = { kind, tool: typeof parts.capability === 'string' ? parts.capability : capabilityOf(typeof record.tool === 'string' ? record.tool : '', isRecord(record.args) ? record.args : undefined), text: parts.text };
-    const target = toolTarget(JSON.stringify(isRecord(record.args) ? record.args : {}));
+    const target = targetOf(typeof record.tool === 'string' ? record.tool : '', isRecord(record.args) ? record.args : undefined);
     if (target !== '') row.target = target;
     if (typeof result.code === 'string') row.code = result.code;
     if (typeof parts.exitCode === 'number') row.exitCode = parts.exitCode;

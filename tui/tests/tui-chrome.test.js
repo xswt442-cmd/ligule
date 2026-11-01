@@ -49,6 +49,16 @@ test('the configuration line keeps a two-column safety margin at console edges',
   }
 });
 
+test('a narrow configuration line keeps the approval value readable', () => {
+  for (const locale of ['zh', 'en']) {
+    for (const columns of [8, 10, 12, 16, 20]) {
+      const line = configurationText({ model: 'long-model-name', mode: 'full', policy: 'ask', permission: 'read-only', columns, locale });
+      assert.ok(displayWidth(line) <= Math.max(8, columns - 2), `${locale}/${columns}: ${line}`);
+      assert.ok(line.includes(locale === 'zh' ? '逐次审批' : 'ask'), `${locale}/${columns}: ${line}`);
+    }
+  }
+});
+
 test('welcome uses a left-aligned compact block with useful commands', async () => {
   const frame = await paint(createElement(Welcome, { version: '0.0.7', boundary: 'C:/workspace/project', columns: 80, locale: 'zh' }), 80);
   assert.match(frame, /^ ❧ ligule/m);

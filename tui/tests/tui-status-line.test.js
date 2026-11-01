@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { activeRunBudgetSegment, buildStatusLine, contextSegment } from '../dist/tui/status-line.js';
+import { displayWidth } from '../dist/tui/commands.js';
 
 const task = {
   modelCalls: 2,
@@ -74,4 +75,22 @@ test('status line prefers the session name, then shortens for narrow terminals',
   assert.match(narrow, /等待审批/u);
   assert.match(narrow, /打断/u);
   assert.ok(narrow.length > 0);
+});
+
+test('a narrow running status keeps its interrupt hint within the terminal width', () => {
+  for (const columns of [8, 10, 12, 16, 20, 24]) {
+    const line = buildStatusLine({
+      sessionId: 'abcdef1234567890',
+      name: 'a very long session name',
+      status: { running: true, progress: { phase: 'awaiting_approval', lastProgressAt: 0, modelCalls: 1 } },
+      running: true,
+      seconds: 123,
+      expanded: false,
+      columns,
+      locale: 'en',
+      now: 20_000,
+    });
+    assert.ok(displayWidth(line) <= columns, `${columns}: ${displayWidth(line)} columns: ${line}`);
+    assert.match(line, /Esc/u, `${columns}: ${line}`);
+  }
 });

@@ -85,7 +85,11 @@ export function configurationText({ model, mode, policy, thinking, permission, e
   for (const { line } of joined) {
     if (displayWidth(line) <= available) return line;
   }
-  return fit([permissionText, policyText].filter(part => part !== '').join(sep), available);
+  const compactApproval = policy === 'never' ? textOf(locale, '旧never', 'legacy')
+    : policy === 'none' ? textOf(locale, '无审批', 'none')
+      : policy === 'auto' ? textOf(locale, '自动', 'auto') : approval;
+  if (displayWidth(policyText) <= available) return policyText;
+  return fit(compactApproval, available);
 }
 
 export function ConfigurationLine(props: ConfigurationProps): ReactElement {
