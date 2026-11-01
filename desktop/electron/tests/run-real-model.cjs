@@ -21,9 +21,11 @@ let sessionId;
 let sequence = 0;
 let failed = false;
 let phase = 'load_application';
+const hostRequests = [];
 // 真实模型验收和本地 stub 回归共用窗口驱动程序；提供方标签只用于报告。
 const providerLabel = process.env.LIGULE_MODEL_PROVIDER_LABEL ?? '真实模型';
 const evidenceName = process.env.LIGULE_MODEL_EVIDENCE_NAME ?? 'real-model';
+const hostResponses = [];
 
 if ([workspaceRoot, evidenceRoot, userDataRoot, isolatedHome].some(value => typeof value !== 'string' || value.length === 0)) {
   throw new Error('real_model_harness_paths_missing');
@@ -166,10 +168,33 @@ async function createApplication() {
     hostEntry: runtime.hostEntry,
     entry: join(desktopRoot, 'electron', 'dist', 'host-entry.js'),
     onFrame: frame => {
+      try {
+        const response = JSON.parse(frame);
+        if (typeof response.id === 'string') {
+          hostResponses.push({ id: response.id, errorCode: typeof response.error?.code === 'string' ? response.error.code : undefined, receivedAt: Date.now() });
+        }
+      } catch {}
       if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.webContents.send('ligule:host-frame', frame);
     },
     onFault: () => {},
   });
+  const sendHostFrame = host.send.bind(host);
+  host.send = frame => {
+    try {
+      const request = JSON.parse(frame);
+      if (['session.open', 'session.read', 'session.observe', 'prefs.read', 'prefs.write', 'status.get'].includes(request.method)) {
+        hostRequests.push({
+          id: request.id,
+          method: request.method,
+          sessionId: request.params?.sessionId,
+          projectMatchesWorkspace: request.params?.projectRoot === undefined || request.params.projectRoot === workspaceRoot,
+          hostPid: host.pid,
+          sentAt: Date.now(),
+        });
+      }
+    } catch {}
+    return sendHostFrame(frame);
+  };
   phase = 'register_production_ipc';
   detachIpc = ipc.registerDesktopIpc(mainWindow, security.APP_PAGE, host, nativeServices, async () => {});
   phase = 'start_node_host';
@@ -528,6 +553,36 @@ async function enterAndSend(text) {
   await evaluate(`document.querySelector('button.send').click(); true`);
 }
 
+async function enterUnsentDraft(text) {
+  await waitFor(`document.querySelector('textarea.composer-input') && !document.querySelector('textarea.composer-input').readOnly`, 20_000, 'composer_locked');
+  const escaped = JSON.stringify(text);
+  await evaluate(`(() => {
+    const input = document.querySelector('textarea.composer-input');
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+    input.focus();
+    setter.call(input, ${escaped});
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${escaped} }));
+    return true;
+  })()`);
+  await waitFor(`document.querySelector('textarea.composer-input')?.value === ${escaped}`, 8_000, 'composer_draft_not_adopted');
+}
+
+async function waitForSavedSessionInput(projectRoot, id, draft, queued, timeoutMs = 10_000) {
+  const path = join(isolatedHome, 'desktop.json');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const settings = JSON.parse(await require('node:fs/promises').readFile(path, 'utf8'));
+      if (settings.drafts?.[projectRoot]?.[id] === draft
+        && settings.queued?.[projectRoot]?.[id]?.includes(queued) === true) return;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 100));
+  }
+  throw Object.assign(new Error('crash_recovery_inputs_not_persisted'), { code: 'crash_recovery_inputs_not_persisted' });
+}
+
 async function recordReport(exitCode) {
   const report = {
     platform: process.platform,
@@ -730,6 +785,13 @@ async function runChecks() {
         await new Promise(resolvePromise => setTimeout(resolvePromise, 200));
       }
       assert.equal(received > before, true, 'model_request_not_received');
+      const crashRequestStart = hostRequests.length;
+      const queuedText = 'desktop-crash-recovery-queued';
+      await enterAndSend(queuedText);
+      await waitFor(`document.querySelector('.queue-item .queue-text')?.textContent === ${JSON.stringify(queuedText)}`, 8_000, 'crash_recovery_queue_not_visible');
+      const unsentDraft = 'desktop-crash-recovery-unsent-draft';
+      await enterUnsentDraft(unsentDraft);
+      await waitForSavedSessionInput(workspaceRoot, sessionId, unsentDraft, queuedText);
       const killedPid = host.pid;
       assert.equal(typeof killedPid, 'number', 'host_pid_unavailable');
       process.kill(killedPid);
@@ -737,6 +799,7 @@ async function runChecks() {
       const reconnectButton = `[...document.querySelectorAll('.banner[role="alert"] button')].find((button) => /重新连接|Reconnect/u.test(button.textContent ?? '')) ?? null`;
       await waitFor(`${reconnectButton} !== null`, 30_000, 'disconnected_banner_missing');
       const clickAt = Date.now();
+      const reopenRequestStart = hostRequests.length;
       await evaluate(`{ const button = (${reconnectButton}); button.click(); button.click(); } true`);
       let cleared = false;
       while (Date.now() < clickAt + 45_000) {
@@ -747,30 +810,84 @@ async function runChecks() {
       if (await evaluate(`/无法启动后端|Could not start the host/u.test(document.body.innerText)`)) {
         throw Object.assign(new Error('repeated_reconnect_started_another_lifecycle'), { code: 'repeated_reconnect_started_another_lifecycle' });
       }
-      // 断连提示消失只表示新 Host 已启动；等待它重新打开原会话后再读取会话状态。
-      const reopenDeadline = Date.now() + 25_000;
+      // 断连提示消失只表示新 Host 已启动；等待应用自己的 session.read 成功，避免探测请求与恢复竞态。
+      const reopenDeadline = clickAt + 45_000;
       let reopened = false;
       while (Date.now() < reopenDeadline) {
-        try {
-          await requestHost('session.read', { sessionId, fullResults: false });
-          reopened = true;
-          break;
-        } catch (error) {
-          if (stableErrorCode(error) !== 'session_not_open') throw error;
+        const uiRead = hostRequests.slice(reopenRequestStart).findLast(request =>
+          request.method === 'session.read' && request.sessionId === sessionId && !String(request.id).startsWith('real-model-rpc-'));
+        if (uiRead !== undefined) {
+          assert.equal(uiRead.projectMatchesWorkspace, true, 'reconnect_session_read_project_mismatch');
+          assert.notEqual(uiRead.hostPid, killedPid, 'reconnect_session_read_used_old_host');
+          const response = hostResponses.find(item => item.id === uiRead.id);
+          if (response !== undefined) {
+            if (response.errorCode === undefined) {
+              reopened = true;
+              break;
+            }
+            if (response.errorCode !== 'session_not_open' && response.errorCode !== 'session_locked') {
+              throw Object.assign(new Error(response.errorCode), { code: response.errorCode });
+            }
+          }
         }
-        await new Promise(resolvePromise => setTimeout(resolvePromise, 500));
+        await new Promise(resolvePromise => setTimeout(resolvePromise, 100));
       }
       if (!reopened) {
-        console.log(`CRASH-DIAG post=${JSON.stringify(await evaluate(`document.body.innerText.replace(/\\s+/gu, ' ').slice(0, 700)`))}`);
+        const requests = hostRequests.slice(reopenRequestStart).map(request => {
+          const response = hostResponses.find(item => item.id === request.id);
+          return {
+            ...request,
+            result: response === undefined ? 'pending' : response.errorCode ?? 'ok',
+            elapsedMs: response === undefined ? undefined : response.receivedAt - request.sentAt,
+          };
+        });
+        const visible = await evaluate(`(() => ({
+          activeSession: document.querySelector('.session-item.active')?.title ?? null,
+          composerReadOnly: document.querySelector('textarea.composer-input')?.readOnly ?? true,
+          prefsFailure: document.querySelector('.banner[role="alert"]')?.textContent ?? '',
+          page: document.body.innerText.replace(/\\s+/gu, ' ').slice(0, 700),
+        }))()`);
+        console.log(`CRASH-DIAG trace=${JSON.stringify({ requests, visible })}`);
         throw Object.assign(new Error('session_reopen_timeout'), { code: 'session_reopen_timeout' });
       }
       const summary = await waitForSessionIdle(30_000, 'recovered_session_not_idle');
+      const restoredInput = await evaluate(`(() => ({
+        draft: document.querySelector('textarea.composer-input')?.value ?? '',
+        queued: [...document.querySelectorAll('.queue-item .queue-text')].map(item => item.textContent ?? ''),
+        readOnly: document.querySelector('textarea.composer-input')?.readOnly ?? true,
+        prefsFailure: document.querySelector('.banner[role="alert"]')?.textContent ?? '',
+      }))()`);
+      const reopenCalls = hostRequests.slice(reopenRequestStart).map(request => {
+        const response = hostResponses.find(item => item.id === request.id);
+        return {
+          method: request.method,
+          projectMatchesWorkspace: request.projectMatchesWorkspace,
+          hostPid: request.hostPid,
+          result: response === undefined ? 'pending' : response.errorCode ?? 'ok',
+          elapsedMs: response === undefined ? undefined : response.receivedAt - request.sentAt,
+        };
+      });
+      console.log(`CRASH-RECOVERY-DIAG ${JSON.stringify({ reopenCalls, restoredInput })}`);
+      assert.equal(restoredInput.readOnly, false, 'recovered_composer_remained_locked');
+      assert.equal(restoredInput.draft.includes(unsentDraft), true, 'crash_recovery_lost_unsent_draft');
+      assert.equal(restoredInput.draft.includes(queuedText), true, 'crash_recovery_lost_queued_message');
+      assert.deepEqual(restoredInput.queued, [], 'crash_recovery_left_queue_armed');
       const after = (await control('/state')).requests;
       await control('/hang', { hang: false });
       assert.equal(after, received, 'reconnect_replayed_the_request');
       const last = summary.turns.at(-1) ?? {};
       assert.notEqual(last.status, 'running', 'pending_turn_not_settled');
-      return `硬杀 Host（PID ${killedPid}）后界面出现断连横幅并重连成功；未决那一轮终态 ${last.status ?? '无'}${last.code === undefined ? '' : `/${last.code}`}，重连没有重发模型请求`;
+      const requestSummary = hostRequests.slice(crashRequestStart).flatMap(request => {
+        if (!['session.open', 'session.read', 'session.observe', 'prefs.read', 'prefs.write'].includes(request.method)) return [];
+        const response = hostResponses.find(item => item.id === request.id);
+        return [{
+          method: request.method,
+          projectMatchesWorkspace: request.projectMatchesWorkspace,
+          result: response === undefined ? 'pending' : response.errorCode ?? 'ok',
+          elapsedMs: response === undefined ? null : response.receivedAt - request.sentAt,
+        }];
+      });
+      return `硬杀 Host（PID ${killedPid}）后界面恢复会话与草稿/队列；未决那一轮终态 ${last.status ?? '无'}${last.code === undefined ? '' : `/${last.code}`}，模型请求数未增加。RPC 阶段：${JSON.stringify(requestSummary)}`;
     });
   }
 
