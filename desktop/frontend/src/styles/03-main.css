@@ -166,7 +166,7 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg-raised);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-2) var(--space-3);
 }
 
 .row.question {
@@ -219,10 +219,16 @@ button:disabled {
   font-size: var(--text-md);
 }
 
+/* 工具调用与结果不再是卡片：一条左边线足够分隔，正文更紧凑。 */
 .row.call,
 .row.result {
   font-family: var(--mono);
   font-size: var(--text-sm);
+  padding: var(--space-2) 0 var(--space-2) var(--space-3);
+  background: transparent;
+  border: 0;
+  border-inline-start: 2px solid var(--line);
+  border-radius: 0;
 }
 
 .state-ok {

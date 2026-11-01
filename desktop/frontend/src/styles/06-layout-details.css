@@ -42,7 +42,7 @@ button.icon-button:hover:not(:disabled) {
 .stream-row {
   inline-size: min(calc(100% - 48px), var(--stream));
   margin-inline: auto;
-  padding: var(--space-1) 0;
+  padding: 2px 0;
 }
 
 /* 转录视口的顶部状态条显示历史加载状态，空状态提示居中显示。 */
