@@ -806,8 +806,9 @@ export function createHost({
   const environments = new Map<string, ProjectEnvironment>([[defaultEnvironment.projectRoot, defaultEnvironment]]);
   const sessionConfigurationTails = new Map<string, Promise<void>>();
   const controlTrust: ControlTrust = { permissionControl, agentControl };
-  // “权限可改”与执行判定共用同一张能力表，但必须按发起请求的通道计算：
-  // 同一条 Host 上，桥连接允许修改，普通控制面客户端不允许；展示值不得把两者混用。
+  // 展示的“权限可改”与本机执行判定调用同一个函数，避免两处各维护一套条件。
+  // 可信 UI 的 Host 对所有连接可信（它只承载本机 TUI/桌面自身），桥连接按自身通道放行；
+  // 普通 MCP 客户端两条路径都不成立，因此展示值必须走这里而不是 Host 级的 permissionControl。
   const mayChangePermission = (bridge: boolean): boolean => maySetPermission(controlTrust, bridge);
   let knownGrant: DelegationGrant | undefined;
 
