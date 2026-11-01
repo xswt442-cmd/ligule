@@ -51,18 +51,70 @@ export function requestedVersionAtRoot(repositoryRoot, product, requestedVersion
   return resolveVersion(currentVersion, requestedVersion);
 }
 
+function skipJsonString(source, start) {
+  for (let index = start + 1; index < source.length; index += 1) {
+    if (source[index] === '\\') index += 1;
+    else if (source[index] === '"') return index + 1;
+  }
+  throw new Error('invalid JSON string');
+}
+
+function skipJsonValue(source, start) {
+  if (source[start] === '"') return skipJsonString(source, start);
+  if (source[start] === '{' || source[start] === '[') {
+    const closing = [source[start] === '{' ? '}' : ']'];
+    for (let index = start + 1; index < source.length; index += 1) {
+      const character = source[index];
+      if (character === '"') index = skipJsonString(source, index) - 1;
+      else if (character === '{' || character === '[') closing.push(character === '{' ? '}' : ']');
+      else if (character === closing.at(-1)) {
+        closing.pop();
+        if (closing.length === 0) return index + 1;
+      }
+    }
+    throw new Error('invalid JSON container');
+  }
+  let index = start;
+  while (index < source.length && !/[\s,}\]]/.test(source[index])) index += 1;
+  return index;
+}
+
+function topLevelVersionValue(source) {
+  const whitespace = (index) => {
+    while (/\s/.test(source[index] ?? '')) index += 1;
+    return index;
+  };
+  let index = whitespace(0);
+  if (source[index] !== '{') throw new Error('JSON manifest must be an object');
+  index += 1;
+  while ((index = whitespace(index)) < source.length && source[index] !== '}') {
+    const keyStart = index;
+    if (source[index] !== '"') throw new Error('invalid JSON object key');
+    index = skipJsonString(source, index);
+    const key = JSON.parse(source.slice(keyStart, index));
+    index = whitespace(index);
+    if (source[index] !== ':') throw new Error('invalid JSON object separator');
+    const valueStart = whitespace(index + 1);
+    const valueEnd = skipJsonValue(source, valueStart);
+    if (key === 'version') return { start: valueStart, end: valueEnd };
+    index = whitespace(valueEnd);
+    if (source[index] === ',') index += 1;
+    else if (source[index] !== '}') throw new Error('invalid JSON object ending');
+  }
+  return null;
+}
+
 function updateJsonFile(path, expectedVersion, nextVersion) {
   const source = readFileSync(path, 'utf8');
   const document = JSON.parse(source);
   if (document.version !== expectedVersion) {
     throw new Error(`${path} version is ${document.version}, expected ${expectedVersion}`);
   }
-  const versionEntry = /^([ \t]*)("version"\s*:\s*)"([^"]+)"(,?)$/m;
-  const match = versionEntry.exec(source);
-  if (match === null || match[3] !== expectedVersion) {
+  const value = topLevelVersionValue(source);
+  if (value === null || JSON.parse(source.slice(value.start, value.end)) !== expectedVersion) {
     throw new Error(`${path} top-level version entry is missing or does not match ${expectedVersion}`);
   }
-  return source.replace(versionEntry, (_line, indentation, key, _version, comma) => `${indentation}${key}${JSON.stringify(nextVersion)}${comma}`);
+  return `${source.slice(0, value.start)}${JSON.stringify(nextVersion)}${source.slice(value.end)}`;
 }
 
 function updateSourceVersion(path, expectedVersion, nextVersion) {
@@ -95,7 +147,7 @@ export function changelogWithRelease(changelog, version, date = new Date().toISO
       throw new Error(`changelog [Unreleased] section needs content under ${language}`);
     }
   }
-  lines.splice(index, 1, '## [Unreleased]', '', '### 简体中文', '', '### English', '', `${releaseHeading} - ${date}`);
+  lines.splice(index, 1, '## [Unreleased]', '', `${releaseHeading} - ${date}`);
   return `${lines.join('\n').replace(/\n*$/, '\n')}`;
 }
 

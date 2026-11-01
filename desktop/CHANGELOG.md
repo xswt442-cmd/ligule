@@ -6,10 +6,6 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ## [Unreleased]
 
-### 简体中文
-
-### English
-
 ## [0.1.1] - 2026-11-01
 
 ### 简体中文
@@ -54,6 +50,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - The desktop composer keeps model, tool mode, permissions, and approvals in one fixed order; screen capture becomes a secondary icon button on the right, with its state kept in the button and the consent dialog.
 - The permission popover now only holds the active session's profile and its confirmations; network access, isolation details, and project trust move to Settings → Permissions and security. The tool catalog lists one tool per row with folded details, model services show a model count and the first model, and Agent Control folds the session configuration into details.
 - Tool calls in the message stream name the tool once instead of repeating a "Done" badge on every row.
+- The tool-mode menu explains and selects `minimal` or `full`, moves custom modes under “Other modes”, shows session names before matching search text, and restores the `▸` / `▾` fold markers.
+- Failure rows lead with a short explanation and next step; the raw error code and English details are folded under “Raw information”.
 - Agent Control grant expirations must be in the future; expired and current-time values cannot be submitted.
 - Approval summaries and script-binding details keep separate Chinese and English text across interface-language changes.
 - If another Host still holds a session writer lock, Desktop opens the conversation read-only and keeps the lock explanation visible.

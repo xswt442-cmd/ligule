@@ -96,7 +96,28 @@ test('CLI preparation changes only CLI files and leaves Desktop files byte-for-b
     assert.equal(await readFile(join(directory, 'pnpm-lock.yaml'), 'utf8'), "lockfileVersion: '9.0'\n\nimporters:\n  .: {}\n  tui: {}\n  desktop: {}\n  desktop/frontend: {}\n");
     assert.match(await readFile(join(directory, 'tui', 'src', 'version.ts'), 'utf8'), /Keep this comment/);
     assert.match(await readFile(join(directory, 'tui', 'src', 'version.ts'), 'utf8'), /VERSION = '0\.0\.2'/);
-    assert.match(await readFile(join(directory, 'tui', 'CHANGELOG.md'), 'utf8'), /修复待发布的缺陷/);
+    const changelog = await readFile(join(directory, 'tui', 'CHANGELOG.md'), 'utf8');
+    assert.match(changelog, /## \[Unreleased\]\n\n## \[0\.0\.2\]/);
+    assert.match(changelog, /## \[0\.0\.2\][\s\S]*### 简体中文[\s\S]*修复待发布的缺陷[\s\S]*### English[\s\S]*Fixed an unreleased bug/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('release preparation updates the root version when nested manifests also have a version', async () => {
+  const directory = await fixture();
+  try {
+    const manifestPath = join(directory, 'tui', 'package.json');
+    const manifest = await readFile(manifestPath, 'utf8');
+    const nestedFirst = manifest.replace(
+      /\{\n  "name": "ligule",\n  "version": "0\.0\.1",/,
+      '{\n  "metadata": { "version": "9.8.7" },\n  "name": "ligule",\n  "version": "0.0.1",',
+    );
+    await writeFile(manifestPath, nestedFirst, 'utf8');
+    prepareRelease(directory, 'cli', 'patch');
+    const updated = await readFile(manifestPath, 'utf8');
+    assert.deepEqual(JSON.parse(updated), { ...JSON.parse(nestedFirst), version: '0.0.2' });
+    assert.match(updated, /"metadata": \{ "version": "9\.8\.7" \}/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
