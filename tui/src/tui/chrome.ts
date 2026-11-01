@@ -80,10 +80,12 @@ export function configurationText({ model, mode, policy, thinking, permission, e
   const joined = candidates.map((candidate, index) => ({
     line: candidate.filter(part => part !== '').join(index === 0 || index === 6 ? sep : narrowSep),
   }));
+  // 控制台最后两列容易被窗口边缘吞掉（写入末列还会触发换行），按 columns-2 排版更稳。
+  const available = Math.max(8, columns - 2);
   for (const { line } of joined) {
-    if (displayWidth(line) <= columns) return line;
+    if (displayWidth(line) <= available) return line;
   }
-  return fit([permissionText, policyText].filter(part => part !== '').join(sep), columns);
+  return fit([permissionText, policyText].filter(part => part !== '').join(sep), available);
 }
 
 export function ConfigurationLine(props: ConfigurationProps): ReactElement {
