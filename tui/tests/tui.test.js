@@ -1521,6 +1521,320 @@ test('/control creates a project-bound grant through the interactive wizard', op
   }
 }, { permissionControl: true }));
 
+test('cancelling the grant wizard while it lists trusted MCP tools keeps it closed', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  const serverTrust = await client.request('mcp.trust.list', { projectRoot: projectDirectory });
+  const server = serverTrust.servers.find((item) => item.name === 'probe');
+  assert.ok(server, 'the project config exposes the real local MCP fixture');
+  await client.request('mcp.trust.set', {
+    projectRoot: projectDirectory,
+    server: server.name,
+    identityDigest: server.identityDigest,
+    scope: 'project',
+    trusted: true,
+    confirmTrust: true,
+    confirmExternalAccess: true,
+    version: serverTrust.version,
+  });
+
+  let toolsRequestStarted = false;
+  let toolsRequestSettled = false;
+  let toolsRequestFailure;
+  let toolsRequestResult;
+  const request = client.request.bind(client);
+  client.request = (method, params) => {
+    const pending = request(method, params);
+    if (method !== 'mcp.trust.tools') return pending;
+    toolsRequestStarted = true;
+    return pending.then((result) => {
+      toolsRequestResult = result;
+      toolsRequestSettled = true;
+      return result;
+    }, (error) => {
+      toolsRequestFailure = error;
+      toolsRequestSettled = true;
+      throw error;
+    });
+  };
+
+  const toolsStartedPath = join(projectDirectory, 'mcp-started.pid');
+  const toolsReturnedPath = join(projectDirectory, 'mcp-tools-returned');
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const lastFrame = () => completeFrame(painted);
+  const answer = async (value, nextPrompt) => {
+    stdin.write(value);
+    await waitFor(() => lastFrame().includes(`› ${value}`), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+    if (nextPrompt !== undefined) await waitFor(() => lastFrame().includes(nextPrompt), { read: lastFrame });
+  };
+
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    await answer('/control create', '授权名称');
+    await answer('pending grant', '默认权限');
+    await answer('read-only', '最大权限');
+    await answer('read-only', '默认网络');
+    await answer('disabled', '网络上限');
+    await answer('disabled', '默认 Policy');
+    await answer('ask', '允许的 Policy');
+    await answer('ask', '允许 --operator');
+    await answer('no', '允许外控启动哪些已信任的 MCP Server');
+    await answer('probe');
+    await waitFor(() => toolsRequestStarted && requests.some((item) => item.method === 'mcp.trust.tools'), {
+      within: 5_000,
+      read: () => lastFrame(),
+    });
+    await waitFor(() => access(toolsStartedPath).then(() => true, () => false), { within: 5_000, read: lastFrame });
+
+    await answer('cancel');
+    await waitFor(() => lastFrame().includes('已取消外控授权创建'), { read: lastFrame });
+    await waitFor(() => access(toolsReturnedPath).then(() => true, () => false), { within: 5_000, read: lastFrame });
+    await waitFor(() => toolsRequestSettled, { within: 5_000, read: lastFrame });
+    stdin.write('after-cancel');
+    await waitFor(() => lastFrame().includes('› after-cancel'), { within: 5_000, read: lastFrame });
+
+    assert.equal(toolsRequestFailure, undefined);
+    assert.deepEqual(toolsRequestResult.tools.map((tool) => tool.name), ['echo']);
+    assert.match(plainOutput(painted), /已取消外控授权创建/);
+    assert.doesNotMatch(lastFrame(), /允许外控调用哪些工具|可授权的 MCP 工具|Which tools may the controller call/u);
+  } finally {
+    instance.unmount();
+  }
+}, {
+  config: { mcp: { servers: { probe: { command: process.execPath, args: [mcpServerFixture, 'mcp-schema.json', 'mcp-started.pid', '1500', 'mcp-tools-returned'] } } } },
+  setup: async ({ projectDirectory }) => {
+    await writeFile(join(projectDirectory, 'mcp-schema.json'), JSON.stringify({ type: 'object', properties: { value: { type: 'string' } } }));
+    await mkdir(join(projectDirectory, '.ligule'), { recursive: true });
+    await writeFile(join(projectDirectory, '.ligule', 'config.toml'), [
+      '[mcp.servers.probe]',
+      'command = ' + JSON.stringify(process.execPath),
+      'args = [' + [mcpServerFixture, 'mcp-schema.json', 'mcp-started.pid', '1500', 'mcp-tools-returned'].map((value) => JSON.stringify(value)).join(', ') + ']',
+      '',
+    ].join('\n'));
+  },
+}));
+
+test('a submitted grant cannot be canceled or submitted again while the Host response is pending', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  let releaseCreateResponse = () => {};
+  const createResponseGate = new Promise((resolve) => { releaseCreateResponse = resolve; });
+  let createResponseReceived = false;
+  const originalRequest = client.request.bind(client);
+  client.request = (method, params) => {
+    const pending = originalRequest(method, params);
+    if (method !== 'agent-control.create') return pending;
+    return pending.then(async (result) => {
+      createResponseReceived = true;
+      await createResponseGate;
+      return result;
+    });
+  };
+
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const lastFrame = () => completeFrame(painted);
+  const inputLine = () => lastFrame().split(/\r?\n/u).map((line) => line.trim()).find((line) => line.startsWith('›')) ?? '';
+  const answer = async (value, nextPrompt) => {
+    stdin.write(value);
+    await waitFor(() => lastFrame().includes(`› ${value}`), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+    if (nextPrompt !== undefined) await waitFor(() => lastFrame().includes(nextPrompt), { read: lastFrame });
+  };
+  const createRequests = () => requests.filter((item) => item.method === 'agent-control.create');
+
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    await answer('/control create', '授权名称');
+    await answer('pending grant', '默认权限');
+    await answer('read-only', '最大权限');
+    await answer('read-only', '默认网络');
+    await answer('disabled', '网络上限');
+    await answer('disabled', '默认 Policy');
+    await answer('ask', '允许的 Policy');
+    await answer('ask', '允许 --operator');
+    await answer('no', '允许外控启动哪些已信任的 MCP Server');
+    await answer('none', '允许外控调用哪些工具');
+    await answer('none', '到期时间');
+    await answer('none', '确认信任此项目');
+    await answer('yes');
+    await waitFor(() => createRequests().length === 1, { within: 5_000, read: lastFrame });
+    await waitFor(() => createResponseReceived, { within: 5_000, read: lastFrame });
+
+    await answer('cancel');
+    await waitFor(() => lastFrame().includes('授权请求已提交') && inputLine() === '› cancel', { read: lastFrame });
+    assert.doesNotMatch(plainOutput(painted), /已取消外控授权创建/u, 'a submitted Host request is not reported as canceled');
+    assert.match(lastFrame(), /授权请求已提交|请求已提交/u, 'the UI reports that the Host is saving the grant');
+    assert.equal(inputLine(), '› cancel', 'the input entered during submission is preserved as a draft');
+    for (let length = 'cancel'.length - 1; length >= 0; length -= 1) {
+      stdin.write('\x7f');
+      const expected = length === 0 ? '› 等待授权保存' : `› ${'cancel'.slice(0, length)}`;
+      await waitFor(() => inputLine() === expected, { within: 1_000, read: lastFrame });
+    }
+
+    await answer('yes');
+    await waitFor(() => lastFrame().includes('授权请求已提交') && lastFrame().includes('› yes'), { read: lastFrame });
+    assert.equal(createRequests().length, 1, 'a pending grant submission cannot create another request');
+
+    releaseCreateResponse();
+    await waitFor(() => lastFrame().includes('外控授权 pending grant 已创建'), { within: 5_000, read: lastFrame });
+    const saved = await originalRequest('agent-control.list', {});
+    assert.equal(saved.grants.length, 1);
+    assert.equal(saved.grants[0].name, 'pending grant');
+  } finally {
+    releaseCreateResponse();
+    instance.unmount();
+  }
+}));
+
+test('a pending grant setup does not open after the user starts a new conversation', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  let releaseTrustResponse = () => {};
+  const trustResponseGate = new Promise((resolve) => { releaseTrustResponse = resolve; });
+  let trustResponseReceived = false;
+  let trustResponseDelivered = false;
+  const originalRequest = client.request.bind(client);
+  client.request = (method, params) => {
+    const pending = originalRequest(method, params);
+    if (method !== 'mcp.trust.list') return pending;
+    return pending.then(async (result) => {
+      trustResponseReceived = true;
+      await trustResponseGate;
+      trustResponseDelivered = true;
+      return result;
+    });
+  };
+
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const lastFrame = () => completeFrame(painted);
+
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    const sessionCreations = requests.filter((item) => item.method === 'session.create').length;
+
+    stdin.write('/control create');
+    await waitFor(() => lastFrame().includes('› /control create'), { within: 5_000, read: lastFrame });
+    stdin.write('\r');
+    await waitFor(() => trustResponseReceived && requests.some((item) => item.method === 'mcp.trust.list'), {
+      within: 5_000,
+      read: lastFrame,
+    });
+
+    stdin.write('/new');
+    await waitFor(() => lastFrame().includes('› /new'), { within: 5_000, read: lastFrame });
+    stdin.write('\r');
+    await waitFor(() => requests.filter((item) => item.method === 'session.create').length > sessionCreations, {
+      within: 5_000,
+      read: lastFrame,
+    });
+    await waitFor(() => plainOutput(painted).includes('新会话 '), { within: 5_000, read: lastFrame });
+    releaseTrustResponse();
+    await waitFor(() => trustResponseDelivered, { within: 5_000, read: lastFrame });
+    stdin.write('after-new');
+    await waitFor(() => lastFrame().includes('› after-new'), { within: 5_000, read: lastFrame });
+
+    assert.doesNotMatch(lastFrame(), /创建外控授权|授权名称|默认权限|Grant name|Default permission/u);
+    assert.doesNotMatch(plainOutput(painted), /开始创建授权/u);
+  } finally {
+    releaseTrustResponse();
+    instance.unmount();
+  }
+}));
+
+test('opening a settings picker supersedes a pending grant setup request', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  let releaseTrustResponse = () => {};
+  const trustResponseGate = new Promise((resolve) => { releaseTrustResponse = resolve; });
+  let trustResponseReceived = false;
+  let trustResponseDelivered = false;
+  const originalRequest = client.request.bind(client);
+  client.request = (method, params) => {
+    const pending = originalRequest(method, params);
+    if (method !== 'mcp.trust.list') return pending;
+    return pending.then(async (result) => {
+      trustResponseReceived = true;
+      await trustResponseGate;
+      trustResponseDelivered = true;
+      return result;
+    });
+  };
+
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const lastFrame = () => completeFrame(painted);
+
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    stdin.write('/control create');
+    await waitFor(() => lastFrame().includes('› /control create'), { within: 5_000, read: lastFrame });
+    stdin.write('\r');
+    await waitFor(() => trustResponseReceived, { within: 5_000, read: lastFrame });
+
+    stdin.write('\u0010');
+    await waitFor(() => lastFrame().includes('Alpha / first-model'), { within: 5_000, read: lastFrame });
+    releaseTrustResponse();
+    await waitFor(() => trustResponseDelivered, { within: 5_000, read: lastFrame });
+    stdin.write('\u001b[B');
+    await waitFor(() => lastFrame().includes('› Alpha / second-model'), { within: 5_000, read: lastFrame });
+
+    assert.match(lastFrame(), /Alpha \/ second-model/u);
+    assert.doesNotMatch(lastFrame(), /创建外控授权/u);
+    assert.doesNotMatch(plainOutput(painted), /开始创建授权/u);
+  } finally {
+    releaseTrustResponse();
+    instance.unmount();
+  }
+}, {
+  config: { model: {
+    services: [{
+      id: 'alpha', name: 'Alpha', api: 'chat-completions', baseURL: 'http://127.0.0.1',
+      apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY', models: ['first-model', 'second-model'],
+    }],
+    selection: { provider: 'alpha', model: 'first-model' },
+  } },
+}));
+
 // `/think` 只列出模型声明的档位；应用后状态行显示覆盖值，恢复默认后隐藏。
 test('/think applies a thinking level the model declares and resets to the model default', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
   const { createElement } = await import('react');

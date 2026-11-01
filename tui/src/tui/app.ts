@@ -543,6 +543,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [controlSnapshot, setControlSnapshot] = useState<AgentControlSnapshot | null>(null);
   const [controlTarget, setControlTarget] = useState<string | null>(null);
   const [controlWizard, setControlWizard] = useState<ControlWizard | null>(null);
+  const [controlWizardSubmitting, setControlWizardSubmitting] = useState(false);
+  const controlWizardSubmittingRef = useRef(false);
+  const controlWizardGeneration = useRef(0);
   const [mcpTrustPending, setMcpTrustPending] = useState<McpTrustPending | null>(null);
   const [externalControl, setExternalControl] = useState(false);
   const [externalSnapshot, setExternalSnapshot] = useState<ExternalControlSnapshot | null>(null);
@@ -1212,6 +1215,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [app, inputs, info.boundary, sessionId, query?.id, push, t]);
 
   const openPicker = useCallback((kind: PickerKind, requestedControlTarget = controlTarget) => {
+    if (controlWizard === null && (kind === 'model' || kind === 'mode' || kind === 'policy')) {
+      controlWizardGeneration.current += 1;
+    }
     const token = ++pickerRequest.current;
     const own = sessionId;
     setDetail(null);
@@ -1361,7 +1367,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setPanel(null);
       push({ kind: 'error', text: t(`无法读取选项：${errorCode(error) ?? errorMessage(error) ?? 'picker_failed'}`, `Could not load choices: ${errorCode(error) ?? errorMessage(error) ?? 'picker_failed'}`) });
     });
-  }, [client, controlSnapshot, controlTarget, info.boundary, modes, push, sessionId, t]);
+  }, [client, controlSnapshot, controlTarget, controlWizard, info.boundary, modes, push, sessionId, t]);
 
   const beginSessionNavigation = useCallback((owner: string): SessionNavigationLease | undefined => {
     const navigation = sessionNavigation.current;
@@ -1589,9 +1595,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t('当前没有已选择的项目目录。', 'No project directory is selected.') });
           return;
         }
+        const owner = activeSession.current;
+        const generation = ++controlWizardGeneration.current;
+        controlWizardSubmittingRef.current = false;
+        setControlWizardSubmitting(false);
         void (async () => {
           try {
             const trust = await client.request('mcp.trust.list', { projectRoot: info.boundary });
+            if (generation !== controlWizardGeneration.current || activeSession.current !== owner) return;
             const mcpServers = trust.servers.filter((server) =>
               server.trustScopes.project?.trusted === true || server.trustScopes.user?.trusted === true,
             ).map((server) => server.name);
@@ -1602,6 +1613,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
               `Grant setup started. Press Enter after each answer; type cancel to stop. Trusted MCP servers: ${mcpServers.join(', ') || 'none'}`,
             ) });
           } catch (error) {
+            if (generation !== controlWizardGeneration.current || activeSession.current !== owner) return;
             push({ kind: 'error', text: t(`无法读取 MCP Server 信任状态：${errorCode(error) ?? 'mcp_trust_list_failed'}`, `Could not read MCP server trust: ${errorCode(error) ?? 'mcp_trust_list_failed'}`) });
           }
         })();
@@ -2672,6 +2684,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (wizard === null) return false;
     const outcome = parseControlWizardInput(wizard, raw, t);
     if (outcome.kind === 'cancelled') {
+      controlWizardGeneration.current += 1;
+      controlWizardSubmittingRef.current = false;
+      setControlWizardSubmitting(false);
       setControlWizard(null);
       resetDraft('');
       push({ kind: 'meta', text: t('已取消外控授权创建。', 'Agent Control grant creation cancelled.') });
@@ -2682,6 +2697,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return true;
     }
     if (outcome.kind === 'abort') {
+      controlWizardGeneration.current += 1;
+      controlWizardSubmittingRef.current = false;
+      setControlWizardSubmitting(false);
       setControlWizard(null);
       resetDraft('');
       push({ kind: 'error', text: outcome.message });
@@ -2695,6 +2713,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (outcome.kind === 'mcp-servers') {
       const values = outcome.values;
       const servers = values.allowedMcpServers ?? [];
+      const owner = activeSession.current;
+      const generation = ++controlWizardGeneration.current;
       resetDraft('');
       let tools: string[] = [];
       if (servers.length > 0) {
@@ -2702,8 +2722,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           const listed = await Promise.all(servers.map((server) => client.request('mcp.trust.tools', {
             projectRoot: info.boundary ?? '', server,
           })));
+          if (generation !== controlWizardGeneration.current || activeSession.current !== owner) return true;
           tools = listed.flatMap((entry) => entry.tools.map((tool) => 'mcp:' + entry.server + '/' + tool.name));
         } catch (error) {
+          if (generation !== controlWizardGeneration.current || activeSession.current !== owner) return true;
           push({ kind: 'error', text: t('读取 MCP 工具失败：' + (errorCode(error) ?? 'mcp_tool_list_failed'), 'Could not list MCP tools: ' + (errorCode(error) ?? 'mcp_tool_list_failed')) });
           return true;
         }
@@ -2716,6 +2738,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return true;
     }
     const values: ControlWizardValues = outcome.values;
+    const generation = ++controlWizardGeneration.current;
+    controlWizardSubmittingRef.current = true;
+    setControlWizardSubmitting(true);
     resetDraft('');
     void (async () => {
       try {
@@ -2725,12 +2750,20 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const created = await client.request('agent-control.create', controlGrantRequest(values, projectRoot, current.version)) as AgentControlSnapshot;
         setControlSnapshot(created);
         const grant = created.grants.at(-1);
-        setControlWizard(null);
+        if (generation === controlWizardGeneration.current) {
+          controlWizardSubmittingRef.current = false;
+          setControlWizardSubmitting(false);
+          setControlWizard(null);
+        }
         push({ kind: 'meta', text: grant === undefined
           ? t('外控授权已创建。', 'Agent Control grant created.')
           : t('外控授权 ' + grant.name + ' 已创建：' + grant.id + ' · /control copy ' + grant.id.slice(0, 8) + ' 可复制 MCP 配置', 'Grant ' + grant.name + ' created: ' + grant.id + ' · use /control copy ' + grant.id.slice(0, 8) + ' to copy the MCP config') });
       } catch (error) {
-        setControlWizard(null);
+        if (generation === controlWizardGeneration.current) {
+          controlWizardSubmittingRef.current = false;
+          setControlWizardSubmitting(false);
+          setControlWizard(null);
+        }
         push({ kind: 'error', text: t('外控授权创建失败：' + (errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed'), 'Could not create Agent Control grant: ' + (errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed')) });
       }
     })();
@@ -2740,8 +2773,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const send = useCallback((text: string) => {
     const route = routeInput(text, running);
     const answering = query !== null && !text.trim().startsWith('/');
+    // New input supersedes an unfinished grant-wizard setup before the wizard itself appears.
+    if (controlWizard === null && text.trim() !== '') controlWizardGeneration.current += 1;
     if (sessionNavigation.current.activeToken !== 0 && !answering && !(route.kind === 'command' && route.name === 'quit')) {
       push({ kind: 'meta', text: t('会话切换完成前不会提交输入，草稿已保留。', 'Input is held until the session switch completes; the draft is preserved.') });
+      return;
+    }
+    if (controlWizardSubmittingRef.current && query === null) {
+      push({ kind: 'meta', text: t('授权请求已提交，正在等待 Host 返回；此时不能取消或重复提交。', 'The grant request is submitted; wait for the Host result before continuing.') });
       return;
     }
     if (controlWizard !== null && query === null) { advanceControlWizard(text); return; }
@@ -2831,6 +2870,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const questionHeight = Math.max(1, geometry.rows - composerHeight - 6);
   const questionStart = Math.max(0, Math.min(questionOffset, Math.max(0, questionLines.length - questionHeight)));
   const controlPrompt = controlWizard === null ? null
+    : controlWizardSubmitting
+      ? t('授权请求已提交，正在等待 Host 返回结果。', 'Grant request submitted; waiting for the Host result.')
     : controlWizard.step === 8
       ? t(`允许外控启动哪些已信任的 MCP Server？逗号分隔：${controlWizard.mcpServers.join(', ') || '无'}；输入 none 表示不允许。`, `Which trusted MCP servers may the controller start? Comma-separated: ${controlWizard.mcpServers.join(', ') || 'none'}; type none for no servers.`)
       : controlWizard.step === 9
@@ -3282,13 +3323,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     controlWizard === null || !showComposer || query !== null ? null : h(PanelFrame, { tone: 'warning', width: geometry.columns },
       h(Text, { bold: true }, t('创建外控授权', 'Create Agent Control grant')),
       h(Text, { wrap: 'wrap' }, controlPrompt),
-      h(Text, { dimColor: true }, t('Enter 提交当前项 · 输入 cancel 取消', 'Enter submits this value · type cancel to stop'))),
+      h(Text, { dimColor: true }, controlWizardSubmitting
+        ? t('请求已提交，不能取消或重复提交', 'The request is submitted and cannot be canceled or repeated')
+        : t('Enter 提交当前项 · 输入 cancel 取消', 'Enter submits this value · type cancel to stop'))),
     externalControl ? h(Text, { color: running ? 'yellow' : 'cyan', wrap: 'truncate-end' }, externalControlLabel) : null,
     running && showSettings ? h(ProgressLine, { progress: status?.progress, seconds, marker: SPINNER[tick % SPINNER.length], columns: geometry.columns, locale }) : null,
     showComposer ? h(DraftInput, {
       draft, caret, columns: geometry.columns, height: composerHeight,
       placeholder: query !== null ? t('输入回答', 'Type your answer')
-        : controlWizard !== null ? t('输入授权设置答案', 'Enter the grant setting')
+        : controlWizard !== null ? controlWizardSubmitting ? t('等待授权保存', 'Waiting for grant creation') : t('输入授权设置答案', 'Enter the grant setting')
           : externalControl ? t('给外控 Agent 发消息 · /takeover 接管', 'Message the external agent · /takeover to take over')
             : t('描述任务 · / 命令 · @ 文件', 'Describe a task · / commands · @ files')
               + (geometry.columns >= 72 ? t(` · ${keyHint('newline')} 换行`, ` · ${keyHint('newline')} new line`) : ''),
