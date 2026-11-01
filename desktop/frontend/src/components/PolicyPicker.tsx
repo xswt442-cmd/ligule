@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { DropdownMenu } from 'radix-ui';
 import { useText } from '../locale';
-import { code } from '../protocol';
+import { code, type Client } from '../protocol';
+import { readSettingsCatalog } from '../settings-catalog';
 import type { Status } from '../status';
 import { Icon } from './Icon';
 import { keepEscape, Modal } from './ui';
@@ -9,7 +10,9 @@ import { keepEscape, Modal } from './ui';
 type PolicySelection = 'ask' | 'auto' | 'none';
 type PolicyValue = PolicySelection | 'never';
 
-export function PolicyPicker({ status, initialPolicy, disabled, onSelect }: {
+export function PolicyPicker({ client, projectRoot, status, initialPolicy, disabled, onSelect }: {
+  client: Client;
+  projectRoot: string;
   status: Status | null;
   initialPolicy: PolicyValue | null;
   disabled: boolean;
@@ -20,6 +23,18 @@ export function PolicyPicker({ status, initialPolicy, disabled, onSelect }: {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState('');
   const [confirmNone, setConfirmNone] = useState(false);
+  // 新会话没有 status：项目默认档要从设置目录读，否则“使用默认”是空的。
+  const [projectDefault, setProjectDefault] = useState<string | null | undefined>(undefined);
+  const readRequest = useRef(0);
+  useEffect(() => {
+    if (!open || status !== null) return;
+    const request = ++readRequest.current;
+    void readSettingsCatalog(client, projectRoot, null)
+      .then(catalog => { if (readRequest.current === request) setProjectDefault(catalog.policyDefault); })
+      .catch(() => { if (readRequest.current === request) setProjectDefault(undefined); });
+    return () => { readRequest.current += 1; };
+  }, [client, open, projectRoot, status]);
+  const defaultMode = status === null ? projectDefault : status.policyDefault;
   const active = status === null ? initialPolicy ?? 'default' : status.policySource === 'config' ? 'default' : status.policy;
   const title = status === null
     ? initialPolicy === null ? t('默认审批', 'Default approval') : policyLabel(initialPolicy, t)
@@ -43,7 +58,7 @@ export function PolicyPicker({ status, initialPolicy, disabled, onSelect }: {
     <DropdownMenu.Portal><DropdownMenu.Content className="menu policy-picker" side="top" align="start" sideOffset={8} onEscapeKeyDown={keepEscape}>
       <DropdownMenu.Label className="model-group-name">{status === null ? t('新会话审批方式', 'New conversation approval mode') : status.policySource === 'session' ? t('审批方式 · 本会话覆盖', 'Approval mode · session override') : t('审批方式', 'Approval mode')}</DropdownMenu.Label>
       {choices.map(choice => <DropdownMenu.Item key={choice.value} disabled={busy || active === choice.value} onSelect={event => { event.preventDefault(); if (choice.mode === 'none') { setOpen(false); setConfirmNone(true); } else void choose(choice.mode); }}><span>{choice.label}</span>{active === choice.value && <Icon name="check" size={14} />}</DropdownMenu.Item>)}
-      {status !== null && status.policyDefault !== undefined && <p className="policy-picker-note">{t(`项目默认：${policyLabel(status.policyDefault, t)}；选「使用默认」回到这一项。`, `Project default: ${policyLabel(status.policyDefault, t)}; pick "Use default" to return to it.`)}</p>}
+      {defaultMode != null && <p className="policy-picker-note">{t(`项目默认：${policyLabel(defaultMode, t)}；选「使用默认」回到这一项。`, `Project default: ${policyLabel(defaultMode, t)}; pick "Use default" to return to it.`)}</p>}
       {busy && <p className="policy-picker-note" role="status">{t('正在更新审批方式…', 'Updating approval mode…')}</p>}
       {failure && <div className="workspace-picker-error" role="alert"><span>{t('审批方式未更新。', 'Approval mode was not updated.')}</span><code>{failure}</code></div>}
     </DropdownMenu.Content></DropdownMenu.Portal>

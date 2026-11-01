@@ -157,7 +157,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
           initialPermission={initialPermission} initialConfirmations={initialPermissionConfirmations}
           disabled={disabled || closing || reading || starting} running={running}
           onInitialChange={onInitialPermissionChange} onStatus={onPermissionStatus} onOpenSecurity={onOpenSecurity} />
-        <PolicyPicker key={`${sessionId ?? '$new'}:${newSessionSettingsRevision}`} status={status} initialPolicy={initialPolicy} disabled={disabled || closing || reading || starting} onSelect={onSetPolicy} />
+        <PolicyPicker key={`${sessionId ?? '$new'}:${newSessionSettingsRevision}`} client={client} projectRoot={projectRoot} status={status} initialPolicy={initialPolicy} disabled={disabled || closing || reading || starting} onSelect={onSetPolicy} />
         <span className="bar-spacer" />
         <ScreenCaptureControl key={`screen:${sessionId ?? '$new'}`} client={client} sessionId={sessionId} status={status}
           disabled={disabled} running={running} onStatus={onPermissionStatus} />
