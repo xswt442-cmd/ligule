@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomInt } from 'node:crypto';
 import { KernelError } from '../kernel/error.js';
 import type { NativeHandle } from './windows-appcontainer-process.js';
 import type { OwnedProcessJob } from './win32-job.js';
@@ -266,7 +266,8 @@ function setDefaultDaclGrant(
 }
 
 export function randomWorkspaceRestrictedSid(): string {
-  const randomSubAuthority = () => (randomBytes(4).readUInt32LE(0) % (2 ** 30 - 1)) + 1;
+  // randomInt 在区间内均匀取值；对 32 位随机数取模会让靠前的取值被多算一次。
+  const randomSubAuthority = () => randomInt(1, 2 ** 30);
   return `S-1-4-${randomSubAuthority()}-${randomSubAuthority()}`;
 }
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { randomInt } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -139,7 +139,7 @@ test('a temporary restricted-token write ACE covers existing and new workspace f
   const existingFile = join(nested, 'existing.txt');
   const createdFile = join(nested, 'created.txt');
   await writeFile(existingFile, 'existing');
-  const sidPart = () => (randomBytes(4).readUInt32LE(0) % (2 ** 30 - 1)) + 1;
+  const sidPart = () => randomInt(1, 2 ** 30);
   const sid = `S-1-4-${sidPart()}-${sidPart()}`;
   const acl = (path) => execFileSync('icacls.exe', [path], { encoding: 'utf8', windowsHide: true });
   const before = new Map([workspace, nested, existingFile].map((path) => [path, acl(path)]));
