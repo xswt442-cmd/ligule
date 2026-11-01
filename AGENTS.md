@@ -29,6 +29,8 @@ Keep product manifests, `pnpm-lock.yaml`, `tui/src/version.ts`, Node engine decl
 
 Branch changes, commits, pushes, resets, and file restoration require an explicit request. Preserve existing user changes and inspect the target before a requested Git operation.
 
+Pull requests are reviewed by CodeRabbit (`.coderabbit.yaml`), Sourcery, and Greptile; CodeQL scans from `.github/workflows/codeql.yml`. Trigger a bot review from the PR; keep review settings out of product source.
+
 Document current behavior and link to its maintained source. Keep the Chinese and English user guides aligned for commands, configuration keys, and stable error codes. Do not duplicate an implementation detail when a nearby source file or test is the maintained authority.
 
 ## Local guides

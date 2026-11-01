@@ -51,7 +51,7 @@ export { compactionLimitsOf } from './runtime-limits.js';
 import { createCompaction } from '../session/compaction.js';
 import { sessionWriterActive } from '../session/lock.js';
 import { requestAgentControl, TRUSTED_AGENT_CONTROL_ORIGIN, type AgentControlRequest } from './agent-control-runtime.js';
-import { canChangePermission, controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissionControl, requireTrustedUi, runChannelOf, runOriginBasis, runScopesOf, type ControlTrust } from './capabilities.js';
+import { controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissionControl, requireTrustedUi, runChannelOf, runOriginBasis, runScopesOf, type ControlTrust } from './capabilities.js';
 import { usageEvent } from '../session/usage.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
@@ -806,7 +806,10 @@ export function createHost({
   const environments = new Map<string, ProjectEnvironment>([[defaultEnvironment.projectRoot, defaultEnvironment]]);
   const sessionConfigurationTails = new Map<string, Promise<void>>();
   const controlTrust: ControlTrust = { permissionControl, agentControl };
-  const canControlPermission = canChangePermission(controlTrust);
+  // 展示的“权限可改”与本机执行判定调用同一个函数，避免两处各维护一套条件。
+  // 可信 UI 的 Host 对所有连接可信（它只承载本机 TUI/桌面自身），桥连接按自身通道放行；
+  // 普通 MCP 客户端两条路径都不成立，因此展示值必须走这里而不是 Host 级的 permissionControl。
+  const mayChangePermission = (bridge: boolean): boolean => maySetPermission(controlTrust, bridge);
   let knownGrant: DelegationGrant | undefined;
 
   async function activeDelegation(): Promise<DelegationGrant | undefined> {
@@ -2463,7 +2466,7 @@ export function createHost({
     return pending.finally(() => building.delete(pending));
   }
 
-  async function sessionConfiguration(state: HostSessionState): Promise<Record<string, unknown>> {
+  async function sessionConfiguration(state: HostSessionState, bridge = false): Promise<Record<string, unknown>> {
     const generationView = (generation: SessionGeneration) => ({
       model: {
         provider: typeof resolveModel(generation.model).serviceId === 'string' ? resolveModel(generation.model).serviceId : 'legacy',
@@ -2533,7 +2536,7 @@ export function createHost({
         loopIterations: state.loopIterations,
         taskLimits: taskLimitsOf(state.environment.config, state.loopModelCalls),
         policy: { mode: state.chain.mode, source: state.chain.modeSource, default: state.chain.configuredMode() },
-        permission: sessionPermissionView(state, canControlPermission),
+        permission: sessionPermissionView(state, mayChangePermission(bridge)),
         screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
         search: state.search,
         browser: browserView(state),
@@ -2570,7 +2573,7 @@ export function createHost({
       || params.resetModel === true || params.resetThinking === true || params.resetOutputTokens === true;
     const categories = Number(modeChanged) + Number(policyChanged) + Number(permissionChanged) + Number(loopChanged) + Number(generationChanged);
     if (categories > 1) throw new KernelError('session_configure_one_category');
-    if (categories === 0) return await sessionConfiguration(state);
+    if (categories === 0) return await sessionConfiguration(state, bridge);
     if (agentControl !== undefined && !agentControl.operator) throw new KernelError('agent_control_operator_required');
 
     if (permissionChanged) {
@@ -2598,7 +2601,7 @@ export function createHost({
         state.pending = requested;
         applies = 'next_round';
       }
-      return { ...(await sessionConfiguration(state)), applies };
+      return { ...(await sessionConfiguration(state, bridge)), applies };
     }
 
     if (policyChanged) {
@@ -2622,7 +2625,7 @@ export function createHost({
           kind: 'grant.used', grantId: agentControl.grantId, policy: params.policy as 'ask' | 'auto' | 'none' | 'never',
         });
       }
-      return { ...(await sessionConfiguration(state)), applies: 'next_decision' };
+      return { ...(await sessionConfiguration(state, bridge)), applies: 'next_decision' };
     }
 
     if (loopChanged) {
@@ -2631,14 +2634,14 @@ export function createHost({
         throw new KernelError('host_loop_limits_invalid', { detail: 'iterations must be a positive safe integer' });
       }
       if (iterations === (state.pendingLoopIterations ?? state.loopIterations)) {
-        return { ...(await sessionConfiguration(state)), applies: 'unchanged' };
+        return { ...(await sessionConfiguration(state, bridge)), applies: 'unchanged' };
       }
       await state.session.append({ kind: 'sessionLoopIterations', ignorable: true, iterations });
       if (state.running === undefined) {
         state.loopIterations = iterations;
         state.pendingLoopIterations = undefined;
       } else state.pendingLoopIterations = iterations;
-      return { ...(await sessionConfiguration(state)), applies: state.running === undefined ? 'now' : 'next_round' };
+      return { ...(await sessionConfiguration(state, bridge)), applies: state.running === undefined ? 'now' : 'next_round' };
     }
 
     const hasProvider = params.provider !== undefined;
@@ -2683,7 +2686,7 @@ export function createHost({
     const generation: SessionGeneration = { provider, model, ...(explicit ? { explicit: true } : {}), options: generationOptions };
     const before = JSON.stringify({ model: previous.model, explicit: previous.explicit === true, options: previous.options });
     const after = JSON.stringify({ model, explicit, options: generationOptions });
-    if (before === after) return { ...(await sessionConfiguration(state)), applies: 'unchanged' };
+    if (before === after) return { ...(await sessionConfiguration(state, bridge)), applies: 'unchanged' };
     const compaction = state.running === undefined ? state.rebuildCompaction(model) : undefined;
     await state.session.append(sessionGenerationEvent(generation));
     if (state.running === undefined) {
@@ -2691,7 +2694,7 @@ export function createHost({
       state.pendingGeneration = undefined;
       state.compaction = compaction ?? null;
     } else state.pendingGeneration = generation;
-    return { ...(await sessionConfiguration(state)), applies: state.running === undefined ? 'now' : 'next_round' };
+    return { ...(await sessionConfiguration(state, bridge)), applies: state.running === undefined ? 'now' : 'next_round' };
   }
 
   async function setPermission(
@@ -2754,7 +2757,7 @@ export function createHost({
         state.permission.workspaceTrusted || confirmWorkspaceTrust === true));
     if (next.profile === state.permission.profile && next.network === state.permission.network) {
       state.permission = next;
-      return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'unchanged' };
+      return { sessionId: state.id, permission: sessionPermissionView(state, mayChangePermission(bridge)), applies: 'unchanged' };
     }
     if (state.extensions.loaded.length > 0 && (next.profile !== 'full-access' || next.network !== 'unrestricted')) {
       throw new KernelError('permission_extension_restart_required', {
@@ -2791,7 +2794,7 @@ export function createHost({
       state.permission = next;
       await state.managedProcesses.stopAll();
       if (permissionDenial(next, 'external') !== undefined) await revokeSessionMcp(state, BROWSER_SERVER);
-      return { sessionId: state.id, permission: sessionPermissionView(state, canControlPermission), applies: 'now' };
+      return { sessionId: state.id, permission: sessionPermissionView(state, mayChangePermission(bridge)), applies: 'now' };
     } finally {
       if (sessions.get(state.id) === state) state.permissionChanging = false;
     }
@@ -3267,7 +3270,8 @@ export function createHost({
               runProvenanceOf(controlTrust, bridge, origin ?? 'human', scope));
             const work = executeRun(state, input, origin ?? 'human', message.params.delegation, run, connection, userSeq => {
               accepted.resolve({ runId: run.runId, sessionId, userSeq, state: 'accepted', acceptedAt: run.acceptedAt,
-                ...(requestKey === undefined ? {} : { requestKey }) });
+                ...(requestKey === undefined ? {} : { requestKey }),
+                ...(run.via === undefined ? {} : { via: run.via, resolvedBy: run.resolvedBy }) });
             });
             void work.catch(error => accepted.reject(error));
             return await work;
@@ -3527,7 +3531,8 @@ export function createHost({
               runProvenanceOf(controlTrust, bridge, origin, scope));
             const work = executeRun(state, input, origin, message.params.delegation, run, connection, userSeq => {
               accepted.resolve({ runId: run.runId, sessionId, userSeq, state: 'accepted', acceptedAt: run.acceptedAt,
-                ...(run.requestKey === undefined ? {} : { requestKey: run.requestKey }) });
+                ...(run.requestKey === undefined ? {} : { requestKey: run.requestKey }),
+                ...(run.via === undefined ? {} : { via: run.via, resolvedBy: run.resolvedBy }) });
             });
             void work.catch(error => accepted.reject(error));
             const receipt = await accepted.promise;
@@ -3703,7 +3708,7 @@ export function createHost({
             policy: state.chain.mode,
             policySource: state.chain.modeSource,
             policyDefault: state.chain.configuredMode(),
-            permission: sessionPermissionView(state, canControlPermission),
+            permission: sessionPermissionView(state, mayChangePermission(bridge)),
             screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
             search: state.search,
             browser: browserView(state),
