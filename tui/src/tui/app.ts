@@ -547,16 +547,10 @@ export function buildStatusLine({ sessionId, boundary, status, running, seconds,
   const t = (zh: string, en: string) => chooseText(locale, zh, en);
   const id = `${chooseText(locale, '会话', 'session')} ${sessionId.slice(0, 8)}`;
   const root = boundary === undefined ? '' : boundary;
-  let base = `${id}${root === '' ? '' : ` · ${root}`}`;
-  if (status === null) return base;
-  const context = contextSegment(status.usage, locale);
-  const parts: string[] = [];
-  if (context !== '') parts.push(context);
-  if (status.permission !== undefined) {
-    const permission = status.permission;
-    parts.push(`perm: ${permission.profile} · ${permission.network} · ${permission.execution.available ? t('Shell 可用', 'Shell available') : t('Shell 受限', 'Shell restricted')}`);
-  }
-  const progress = status.progress;
+  const leaf = root === '' ? '' : root.split(/[\\/]/).filter(Boolean).pop() ?? '';
+  let base = `${id}${leaf === '' ? '' : ` · ${leaf}`}`;
+  // 预算、计数与完整标识符只进 /status；常驻行只留会话、执行阶段与可操作提示。
+  const progress = status?.progress;
   const phaseHint = progress === undefined || progress === null ? '' : {
     preparing: t('准备上下文', 'Preparing context'),
     model_request: t('请求模型', 'Requesting model'),
@@ -567,26 +561,18 @@ export function buildStatusLine({ sessionId, boundary, status, running, seconds,
     settling: t('正在收尾', 'Finishing'),
   }[progress.phase];
   const idleSeconds = progress === undefined || progress === null ? 0 : Math.max(0, Math.floor((now - progress.lastProgressAt) / 1000));
-  const progressHint = running && progress !== undefined && progress !== null
-    ? `${phaseHint} · ${progress.modelCalls} ${t('次模型调用', 'model calls')} · ${progress.toolCalls} ${t('个工具调用', 'tool calls')} · ${idleSeconds}${t('秒无新进展', 's without progress')}${progress.outputTokens === null ? '' : ` · ${progress.outputTokens} ${t('输出token', 'output tokens')}`}`
-    : '';
-  // 空间不足时优先隐藏条数，保留中断和展开提示。
-  const hints = (running ? `${progressHint === '' ? '' : ` · ${progressHint}`}${t(` · ${Math.floor(seconds)} 秒，${keyHint('interrupt')} 打断`, ` · ${Math.floor(seconds)}s, ${keyHint('interrupt')} to stop`)}` : '')
-    + (expanded ? t(` · 已展开（${keyHint('expand-or-history')} 收起）`, ` · expanded (${keyHint('expand-or-history')} to close)`) : '');
-  let tail = `${chooseText(locale, `记录 ${status.eventCount} 条`, `${status.eventCount} events`)}${hints}`;
-  let shown = parts;
-  // 无法读取终端宽度时不截断文本，由终端自行换行。
-  const line = () => [base, ...shown, tail].filter(part => part !== '').join(' · ');
+  const hints = (running
+    ? `${phaseHint === '' ? '' : `${phaseHint} · `}${Math.floor(seconds)}${t(' 秒，', 's, ')}${keyHint('interrupt')} ${t('打断', 'stop')}`
+    : '')
+    + (expanded ? `${running ? ' · ' : ''}${t('已展开（', 'expanded (')}${keyHint('expand-or-history')}${t(' 收起）', ' to close)')}` : '');
+  let tail = hints;
+  const line = () => [base, ...(running && progress !== undefined && progress !== null ? [`${idleSeconds}${t(' 秒无新进展', 's without progress')}`] : []), tail].filter(part => part !== '').join(' · ');
   const over = () => columns !== undefined && columns > 0 && displayWidth(line()) > columns;
-  const leaf = root === '' ? '' : root.split(/[\\/]/).filter(Boolean).pop() ?? '';
   if (over()) base = `${id}${leaf === '' ? '' : ` · ${leaf}`}`;
-  if (over()) shown = shown.filter((part) => !part.startsWith('ctx:'));
-  if (over()) shown = shown.filter((part) => !part.startsWith('perm:'));
   if (over()) base = id;
-  if (over()) tail = hints === '' ? '' : hints.slice(3);
-  if (over() && running && progress !== undefined && progress !== null) {
-    shown = [];
-    tail = `${phaseHint} · ${idleSeconds}${t('秒无新进展', 's without progress')} · ${keyHint('interrupt')} ${t('打断', 'stop')}`;
+  if (over()) tail = hints === '' ? '' : hints;
+  if (over() && running) {
+    tail = `${phaseHint} · ${keyHint('interrupt')} ${t('打断', 'stop')}`;
     if (over()) base = '';
   }
   return line();
@@ -3519,6 +3505,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       model: `${shownModel ?? t('未配置', 'not configured')}${status?.pendingModel ? `→${status.pendingModel}` : ''}`,
       mode: `${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''}`,
       policy: status?.policy ?? 'ask', thinking: status?.thinking?.pending ?? status?.thinking?.effective,
+      permission: status?.permission?.profile,
       external: externalControl, columns: geometry.columns, locale,
     }) : null,
     showSettings && !running && geometry.rows >= 20 ? h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, buildStatusLine({

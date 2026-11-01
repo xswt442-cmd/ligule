@@ -153,16 +153,15 @@ test('the app paints the session line and the input hint onto the terminal', opt
   assert.match(painted, /\/ 命令/);
 }));
 
-test('the metadata line contains session, context, record and runtime hints', options, () => {
+test('the metadata line keeps the session and its workspace, never budgets or counts', options, () => {
   const status = {
     mode: 'minimal', pendingMode: null, policy: 'ask', tools: ['read', 'find'], eventCount: 3,
     usage: { window: 200_000, threshold: 160_000, estimated: 42_000 },
   };
   const line = buildStatusLine({ sessionId: 'abcdef0123456789', boundary: 'C:\\workspace\\project', status, running: true, seconds: 12.7, expanded: true, columns: 180 });
   assert.match(line, /会话 abcdef01/);
-  assert.match(line, /C:\\workspace\\project/);
-  assert.match(line, /ctx:~42000\/200000/);
-  assert.match(line, /记录 3 条/);
+  assert.match(line, /project/);
+  assert.doesNotMatch(line, /ctx:|记录 3 条|次模型调用|输出token/);
   assert.match(line, /12 秒.*Esc.*打断/);
   assert.match(line, /已展开.*收起/);
   assert.doesNotMatch(line, /minimal|policy|test-model|model:/);
@@ -183,9 +182,8 @@ test('the metadata line identifies the Host phase and elapsed time since actual 
   };
   const line = buildStatusLine({ sessionId: 'session-id', status, running: true, seconds: 6, expanded: false, now: 11_000 });
   assert.match(line, /请求模型/);
-  assert.match(line, /2 次模型调用/);
-  assert.match(line, /1 个工具调用/);
-  assert.match(line, /7秒无新进展/);
+  assert.match(line, /7 秒无新进展/);
+  assert.doesNotMatch(line, /2 次模型调用|1 个工具调用|16384/);
   const english = buildStatusLine({ sessionId: 'session-id', status, running: true, seconds: 6, expanded: false, locale: 'en', now: 11_000 });
   assert.match(english, /Requesting model/);
   assert.match(english, /7s without progress/);
@@ -619,8 +617,8 @@ test('input typed while a round runs queues up and flushes in order', options, a
   }
 }, { delayMs: 1_800 }));
 
-// 未提供上下文窗口时，状态行不显示上下文占用信息。
-test('the metadata line reports context pressure only when a window is written', options, () => {
+// 上下文占用属于预算细节：常驻行不显示，只在 /status 里出现。
+test('the metadata line never carries context pressure', options, () => {
   assert.equal(contextSegment(null), '');
   assert.equal(contextSegment(undefined), '');
   assert.equal(contextSegment({ window: 200_000, threshold: 160_000, estimated: 42_000 }), 'ctx:~42000/200000');
@@ -631,8 +629,8 @@ test('the metadata line reports context pressure only when a window is written',
     denials: { consecutive: 0, total: 0 }, usage: { window: 200_000, threshold: 160_000, estimated: 42_000 },
   };
   const draw = (columns) => buildStatusLine({ sessionId: 'x', status, running: false, seconds: 0, expanded: false, columns });
-  assert.match(draw(200), /ctx:~42000\/200000/);
-  assert.match(draw(64), /ctx:~/);
+  assert.doesNotMatch(draw(200), /ctx:/);
+  assert.doesNotMatch(draw(64), /ctx:/);
   assert.doesNotMatch(draw(200), /mode:|policy:|tools:/);
   assert.ok(UI_COMMANDS.some((command) => command.name === 'compact'), '/compact 在命令表里');
 });
@@ -698,9 +696,10 @@ test('the metadata line shortens the workspace path and keeps the interrupt hint
   const idle = { running: false, expanded: false };
   const busy = { running: true, expanded: false };
   const draw = (columns, extra) => buildStatusLine({ ...args, ...extra, columns });
-  assert.match(draw(180, idle), /C:\\Users\\20411\\AppData\\Local\\Temp\\ligule-tui-7Rm2Qx\\project/);
-  assert.match(draw(60, idle), / · project · /);
-  assert.doesNotMatch(draw(60, idle), /Temp\\/);
+  // 完整路径只进 /status；常驻行到最窄仍保留会话与工作区叶子名。
+  assert.ok(draw(180, idle).endsWith(' · project'), '宽终端也只显示工作区叶子名');
+  assert.doesNotMatch(draw(180, idle), /Temp\\/);
+  assert.match(draw(60, idle), / · project/);
   assert.match(draw(30, busy), /Esc.*打断/);
   assert.doesNotMatch(draw(180, idle), /minimal|policy|model:|tools:/);
 });

@@ -34,6 +34,7 @@ export interface ConfigurationProps {
   readonly mode: string;
   readonly policy: string;
   readonly thinking?: string;
+  readonly permission?: string;
   readonly external?: boolean;
   readonly columns: number;
   readonly locale: Locale;
@@ -49,24 +50,40 @@ export function thinkingText(effort: string | undefined, locale: Locale): string
   return textOf(locale, `思考 ${label}`, `Thinking ${label}`);
 }
 
-export function configurationText({ model, mode, policy, thinking, external = false, columns, locale }: ConfigurationProps): string {
+export function configurationText({ model, mode, policy, thinking, permission, external = false, columns, locale }: ConfigurationProps): string {
   if (external) return fit(textOf(locale, `外控模型 ${model}`, `External model ${model}`), columns);
   const approval = policy === 'never' ? textOf(locale, '旧 never，需迁移', 'legacy never; migrate')
     : policy === 'none' ? textOf(locale, '不受审批', 'none')
       : policy === 'auto' ? textOf(locale, '自动判定', 'auto') : textOf(locale, '逐次审批', 'ask');
   const policyText = textOf(locale, `审批 ${approval}`, `Approval ${approval}`);
   const modeText = textOf(locale, `工具模式 ${mode}`, `Tools ${mode}`);
+  const permissionText = permission === undefined || permission === '' ? ''
+    : textOf(locale, `权限 ${permission}`, `Access ${permission}`);
   const modelText = columns >= 60 ? textOf(locale, `模型 ${model}`, `Model ${model}`) : model;
   const modelKey = columns >= 72 ? ` ${keyHint('model-picker')}` : '';
   const effortText = thinkingText(thinking, locale);
-  let parts = [modelText + modelKey, ...(effortText === '' ? [] : [effortText]), modeText, policyText];
-  if (displayWidth(parts.join('  ·  ')) > columns) {
-    const remaining = Math.max(0, columns - displayWidth(policyText) - 10);
-    const compactMode = fit(mode, Math.min(24, Math.floor(remaining / 2)));
-    const compactModel = fit(modelText, Math.max(0, remaining - displayWidth(compactMode)));
-    parts = [compactModel, compactMode, policyText].filter(Boolean);
+  const sep = '  ·  ';
+  const narrowSep = ' · ';
+  const candidates: readonly (readonly string[])[] = [
+    [modelText + modelKey, effortText, modeText, permissionText, policyText],
+    // 窄一档时先省掉模型标签与快捷键提示，把宽度留给模式、权限与审批的完整措辞。
+    [modelText, effortText, modeText, permissionText, policyText],
+    [model, effortText, modeText, permissionText, policyText],
+    [model, effortText, fit(modeText, 12), fit(permissionText, 14), policyText],
+    // 再窄一档：模式也只留值，仍保住思考、权限与审批。
+    [model, effortText, mode, fit(permissionText, 14), policyText],
+    [fit(modelText, 16), effortText, fit(modeText, 10), fit(permissionText, 12), policyText],
+    [fit(modelText, 16), fit(modeText, 12), permissionText, policyText],
+    [permissionText, policyText],
+  ];
+  // 第一种布局保留原始间距，其余用紧凑分隔符换一点宽度。
+  const joined = candidates.map((candidate, index) => ({
+    line: candidate.filter(part => part !== '').join(index === 0 || index === 6 ? sep : narrowSep),
+  }));
+  for (const { line } of joined) {
+    if (displayWidth(line) <= columns) return line;
   }
-  return fit(parts.join('  ·  '), columns);
+  return fit([permissionText, policyText].filter(part => part !== '').join(sep), columns);
 }
 
 export function ConfigurationLine(props: ConfigurationProps): ReactElement {
