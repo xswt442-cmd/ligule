@@ -43,6 +43,8 @@ Ligule 的 CLI/TUI 与桌面版共用 [Agent Core](core/README.md)。Node.js Hos
 
 CLI 与 TUI 需要 Node.js 24 或更新版本。安装后，在项目目录执行单次任务：
 
+首次运行前，请先配置模型服务和凭据；CLI/TUI 的配置步骤见[模型服务配置](docs/guide.zh-CN.md#配置模型服务)，桌面版可在「设置 → 模型服务」中添加。
+
 ```sh
 cd /path/to/your-project
 ligule run "检查项目结构并提出建议"

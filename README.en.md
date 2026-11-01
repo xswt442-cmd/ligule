@@ -43,6 +43,8 @@ The CLI/TUI and desktop app share the [Agent Core](core/README.en.md). The Node.
 
 The CLI and TUI require Node.js 24 or newer. Run a one-off task from a project directory:
 
+Before the first run, configure a model service and credentials. See [Configure a model service](docs/guide.en.md#configure-a-model-service); Desktop users can add one in Settings → Model services.
+
 ```sh
 cd /path/to/your-project
 ligule run "Review the project structure and suggest improvements"
