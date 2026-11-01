@@ -445,7 +445,8 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
           </label>}
         </section>
 
-        <section className="grant-config-card">
+        <details className="grant-config-card grant-advanced" open={draft.allowOperator || draft.defaultPolicy !== 'ask' || draft.allowedPolicies.length > 1}>
+          <summary>{t('高级：审批方式与 Operator', 'Advanced: approval and operator')}</summary>
           <h4>{t('审批方式', 'Approval behavior')}</h4>
           <label className="grant-field">
             <span>{t('默认 Policy', 'Default Policy')}</span>
@@ -469,10 +470,10 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
             <input type="checkbox" checked={draft.allowOperator} onChange={(event) => update('allowOperator', event.target.checked)} />
             <span>{t('允许 MCP 使用者通过 --operator 处理普通审批。', 'Allow the MCP client to handle ordinary approvals with --operator.')}</span>
           </label>
-        </section>
+        </details>
 
-        <section className="grant-config-card">
-          <h4>{t('屏幕观察（Windows）', 'Screen capture (Windows)')}</h4>
+        <details className="grant-config-card grant-advanced" open={draft.allowScreenCapture}>
+          <summary>{t('高级：屏幕观察（Windows）', 'Advanced: screen capture (Windows)')}</summary>
           <label className="grant-confirmation">
             <input type="checkbox" checked={draft.allowScreenCapture} onChange={event => {
               update('allowScreenCapture', event.target.checked);
@@ -484,9 +485,10 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
             <input type="checkbox" checked={draft.confirmScreenCapture} onChange={event => update('confirmScreenCapture', event.target.checked)} />
             <span>{t('确认屏幕可能含其他应用或项目的信息，截图将发送给当前图像模型。此授权不允许移动窗口、抢焦点、鼠标或键盘控制。', 'Confirm that the screen may include other applications or projects and captures will be sent to the selected image model. This permission does not allow moving windows, changing focus, or mouse and keyboard control.')}</span>
           </label>}
-        </section>
+        </details>
 
-        <section className="grant-config-card grant-mcp-limits">
+        <details className="grant-config-card grant-advanced grant-mcp-limits" open={draft.allowedMcpServers.length > 0 || draft.allowedMcpTools.length > 0}>
+          <summary>{t('高级：MCP Server 与工具', 'Advanced: MCP servers and tools')}</summary>
           <h4>{t('MCP Server 与工具', 'MCP servers and tools')}</h4>
           <p className="session-note">{t('此授权只能使用已在 MCP 信任设置中批准的 Server。先选允许启动的 Server，再加载工具清单并逐项选择。未选工具时，外部 Agent 不能调用该 Server 的工具。', 'This grant can use only servers approved in MCP trust settings. Select servers it may start, load their tool lists, then choose tools individually. Tools not selected here cannot be called by the external agent.')}</p>
           {mcpServers.length === 0 ? <p className="stub">{t('当前项目没有配置 MCP Server。', 'No MCP servers are configured for this project.')}</p>
@@ -518,7 +520,7 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
               </div>;
             })}
           {mcpLimitInvalid && <p className="grant-validation">{t('每个 MCP 工具都必须属于本授权允许启动的 Server。', 'Each MCP tool must belong to a server this grant can start.')}</p>}
-        </section>
+        </details>
 
       </div>
       <div className="grant-actions">

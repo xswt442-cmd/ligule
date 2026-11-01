@@ -896,3 +896,18 @@ button.notification-switch:disabled { opacity: .45; cursor: default; }
   .sheet-nav button .icon { display: none; }
   .composer-choice { max-width: 53%; }
 }
+
+.grant-config-card.grant-advanced {
+  grid-column: 1 / -1;
+  display: block;
+}
+
+.grant-advanced > summary {
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.grant-advanced[open] > summary {
+  margin-bottom: var(--space-2);
+}
