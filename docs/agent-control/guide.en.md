@@ -1,4 +1,4 @@
-# Local MCP Server
+# Agent Control via MCP
 
 The Ligule CLI can start a local MCP server over standard input and output. An external MCP client can use it to create or reopen sessions, submit work, check run status, read records, and cancel a run through the existing Host.
 

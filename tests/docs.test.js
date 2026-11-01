@@ -19,7 +19,7 @@ const bilingualPairs = [
   [join(repoRoot, 'tui', 'README.md'), join(repoRoot, 'tui', 'README.en.md')],
   [join(repoRoot, 'desktop', 'README.md'), join(repoRoot, 'desktop', 'README.en.md')],
   [zhPath, enPath],
-  [join(repoRoot, 'docs', 'mcp', 'mcp-guide.zh-CN.md'), join(repoRoot, 'docs', 'mcp', 'mcp-guide.en.md')],
+  [join(repoRoot, 'docs', 'agent-control', 'guide.zh-CN.md'), join(repoRoot, 'docs', 'agent-control', 'guide.en.md')],
   [join(repoRoot, 'docs', 'development', 'ARCHITECTURE.zh-cn.md'), join(repoRoot, 'docs', 'development', 'ARCHITECTURE.en.md')],
   [join(repoRoot, 'docs', 'development', 'GLOSSARY.zh-cn.md'), join(repoRoot, 'docs', 'development', 'GLOSSARY.en.md')],
   [join(repoRoot, 'docs', 'development', 'CONTRIBUTING.zh-cn.md'), join(repoRoot, 'docs', 'development', 'CONTRIBUTING.en.md')],
@@ -69,6 +69,21 @@ function anchors(text) {
 function links(text) {
   return [...text.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/g)].map((match) => match[1]);
 }
+
+// Claude 的入口只指向同目录 AGENTS.md；规则由 AGENTS.md 统一维护。
+test('所有受维护 AGENTS.md 都有对应的轻量 CLAUDE.md 入口', () => {
+  const agentGuides = [...guides, join('.github', 'engineering', 'templates', 'AGENTS.md')];
+  for (const guide of agentGuides) {
+    const claude = guidePath(guide.replace(/AGENTS\.md$/, 'CLAUDE.md'));
+    assert.ok(existsSync(claude), `${guide} 缺少同目录 CLAUDE.md`);
+    const text = readFileSync(claude, 'utf8').trim();
+    const lines = text.split(/\r?\n/).filter((line) => line.trim());
+    assert.equal(lines.length, 2, `${claude} 应只包含标题和 AGENTS.md 引用`);
+    assert.match(lines[0], /^# /, `${claude} 缺少标题`);
+    assert.match(lines[1], /^Read \[AGENTS\.md\]\(\.\/AGENTS\.md\)/, `${claude} 没有指向同目录 AGENTS.md`);
+    assert.deepEqual(links(text), ['./AGENTS.md'], `${claude} 不应引用其他文档`);
+  }
+});
 
 function codeTokens(text) {
   return new Set([...text.matchAll(/`([^`]+)`/g)].map((match) => match[1])

@@ -25,6 +25,6 @@
 
 ## 更多信息
 
-- [桌面版使用手册](../docs/guide.zh-CN.md) · [本地 MCP 指南](../docs/mcp/mcp-guide.zh-CN.md)
+- [桌面版使用手册](../docs/guide.zh-CN.md) · [Agent Control（MCP）指南](../docs/agent-control/guide.zh-CN.md)
 - [Desktop 更新记录](CHANGELOG.md)
 - [贡献与验证](../docs/development/CONTRIBUTING.zh-cn.md) · [维护者发行流程](../docs/development/RELEASE.md)

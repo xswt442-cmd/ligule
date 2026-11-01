@@ -55,7 +55,7 @@ Write access is not granted by default. Once a grant has been created with `/con
 
 CLI/TUI shares the [Agent Core](../core/README.en.md) session and tool semantics with [Desktop](../desktop/README.en.md). For model settings, credentials, MCP configuration, and permissions, see:
 
-- [User guide](docs/guide.en.md) · [Local MCP guide](../docs/mcp/mcp-guide.en.md)
+- [User guide](docs/guide.en.md) · [Agent Control via MCP](../docs/agent-control/guide.en.md)
 - [CLI/TUI changelog](CHANGELOG.md)
 - [Contributing and checks](../docs/development/CONTRIBUTING.en.md)
 

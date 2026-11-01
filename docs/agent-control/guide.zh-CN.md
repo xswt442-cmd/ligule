@@ -1,4 +1,4 @@
-# 本地 MCP Server
+# 通过 MCP 使用 Agent Control
 
 Ligule CLI 可以通过标准输入输出启动本地 MCP Server。它让外部 MCP 客户端调用现有 Host 来创建或接回会话、提交任务、检查运行状态、读取记录和取消任务。
 

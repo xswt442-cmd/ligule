@@ -91,7 +91,7 @@ flowchart LR
 
 [项目环境装载模块](../../core/src/host/environment.ts) 为 CLI 与 Desktop Host 入口提供同一次读取的配置层与扩展来源。[Provider 构造模块](../../core/src/host/provider.ts) 校验模型协议、能力声明与重试设置；未配置模型的 Host 可以接收设置请求，模型运行明确失败。[会话模式事务](../../core/src/host/session-mode.ts) 负责安装工具限制、提示片段、失败回收和模式事实记录；Host 继续持有会话锁、活跃轮次、协议路由与资源清理。TUI 的记录投影位于 [transcript.ts](../../tui/src/tui/transcript.ts)，Desktop 的[流式缓冲](../../desktop/frontend/src/session-stream.ts) 按会话隔离未落盘输出。
 
-`ligule mcp-server --project <绝对项目根>` 通过 [MCP 适配器](../../core/src/host/mcp-server.ts) 暴露本地控制工具。[控制门面](../../core/src/host/control.ts) 调用同一 Host，维护进程内 operation 状态，并将会话操作限制在启动时授权的项目内。默认模式拒绝需要审批的操作；明确启用 `--operator` 后，客户端可答复真实待决的审批与提问，并修改受支持的会话设置，但不能覆盖硬拒绝。可信 TUI/Desktop 可创建项目绑定的 [Agent Control Grant](../../core/src/host/agent-control.ts)；`--grant <id>` 将会话 Permission、网络和 Policy 限制在 Grant 的默认值与上限内，Host 会在请求时核验撤销、到期和项目绑定。连接关闭时会取消运行并释放会话锁；Session JSONL 持久保存会话记录，operation ID 和消息队列只在当前进程内有效。使用方法见 [MCP 用户指南](../mcp/mcp-guide.zh-CN.md)。
+`ligule mcp-server --project <绝对项目根>` 通过 [MCP 适配器](../../core/src/host/mcp-server.ts) 暴露本地控制工具。[控制门面](../../core/src/host/control.ts) 调用同一 Host，维护进程内 operation 状态，并将会话操作限制在启动时授权的项目内。默认模式拒绝需要审批的操作；明确启用 `--operator` 后，客户端可答复真实待决的审批与提问，并修改受支持的会话设置，但不能覆盖硬拒绝。可信 TUI/Desktop 可创建项目绑定的 [Agent Control Grant](../../core/src/host/agent-control.ts)；`--grant <id>` 将会话 Permission、网络和 Policy 限制在 Grant 的默认值与上限内，Host 会在请求时核验撤销、到期和项目绑定。连接关闭时会取消运行并释放会话锁；Session JSONL 持久保存会话记录，operation ID 和消息队列只在当前进程内有效。使用方法见 [Agent Control（MCP）指南](../agent-control/guide.zh-CN.md)。
 
 ### 委派执行与外控会话
 

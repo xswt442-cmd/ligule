@@ -57,7 +57,7 @@ Configure services and models in Desktop Settings. The CLI/TUI use the same conf
 ## Documentation
 
 - [简体中文使用手册](docs/guide.zh-CN.md) · [User guide](docs/guide.en.md)
-- [本地 MCP 指南](docs/mcp/mcp-guide.zh-CN.md) · [Local MCP guide](docs/mcp/mcp-guide.en.md)
+- [Agent Control（MCP）指南](docs/agent-control/guide.zh-CN.md) · [Agent Control guide (English)](docs/agent-control/guide.en.md)
 - [架构说明](docs/development/ARCHITECTURE.zh-cn.md) · [Architecture](docs/development/ARCHITECTURE.en.md)
 - [贡献与验证](docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks](docs/development/CONTRIBUTING.en.md)
 - [CLI/TUI changelog](tui/CHANGELOG.md) · [Desktop changelog](desktop/CHANGELOG.md)

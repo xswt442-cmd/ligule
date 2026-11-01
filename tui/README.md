@@ -55,7 +55,7 @@ ligule mcp-server --project /path/to/project
 
 CLI/TUI 与 [Desktop](../desktop/README.md) 共享 [Agent Core](../core/README.md) 的会话及工具语义。模型配置、凭据来源、MCP 配置和权限详见：
 
-- [使用手册](docs/guide.zh-CN.md) · [本地 MCP 指南](../docs/mcp/mcp-guide.zh-CN.md)
+- [使用手册](docs/guide.zh-CN.md) · [Agent Control（MCP）指南](../docs/agent-control/guide.zh-CN.md)
 - [CLI/TUI 更新记录](CHANGELOG.md)
 - [贡献与验证](../docs/development/CONTRIBUTING.zh-cn.md)
 
