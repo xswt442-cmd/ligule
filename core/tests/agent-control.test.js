@@ -10,6 +10,7 @@ import { serveHost } from '../dist/host/host.js';
 import { hostProviderFromConfig } from '../dist/host/provider.js';
 import { createMemoryConnectionPair } from '../dist/host/memory.js';
 import { createConnection } from '../dist/host/connection.js';
+import { TRUSTED_AGENT_CONTROL_ORIGIN } from '../dist/host/agent-control-runtime.js';
 
 const root = resolve('testplace');
 
@@ -356,6 +357,54 @@ test('a grant without operator permission cannot change session settings', async
         grantId: created.grants[0].id, storePath, operator: false,
         validate: () => requireDelegationGrant(storePath, created.grants[0].id, projectDirectory),
       };
+    },
+  });
+});
+
+test('the permission change flag follows the channel, not just the host', async () => {
+  await fixture(async ({ projectRoot, directory, storePath }) => {
+    const created = await createDelegationGrant(storePath, input(projectRoot), (await listDelegationGrants(storePath)).version);
+    const grantId = created.grants[0].id;
+    const config = createConfig({ user: { boundary: projectRoot, workspaceRoot: projectRoot, host: { sessionDirectory: join(directory, 'sessions') } } });
+    const pair = createMemoryConnectionPair();
+    const host = serveHost({ ...pair.host, config, provider: hostProviderFromConfig(config),
+      agentControl: { grantId, storePath, operator: false, validate: () => requireDelegationGrant(storePath, grantId, projectRoot) } });
+    const client = createConnection(pair.client);
+    const bridge = { notify() {}, async request() { return { decision: 'deny' }; }, [TRUSTED_AGENT_CONTROL_ORIGIN]: true };
+    try {
+      const { sessionId } = await client.request('session.create', { projectRoot });
+      const ordinary = await client.request('status.get', { sessionId });
+      assert.equal(ordinary.permission.changeAllowed, false, 'an ordinary client may not change permission');
+      const observed = await host.handle({ method: 'status.get', params: { projectRoot, sessionId } }, bridge);
+      assert.equal(observed.permission.changeAllowed, true, 'the bridge may change permission, so the view must say so');
+      const target = observed.permission.profile === 'read-only' ? 'workspace-write' : 'read-only';
+      const changed = await host.handle({ method: 'permission.set', params: { sessionId, permissionProfile: target } }, bridge);
+      assert.equal(changed.permission.profile, target);
+      assert.equal(changed.applies, 'now');
+      await assert.rejects(host.handle({ method: 'permission.set', params: { sessionId, permissionProfile: 'full-access' } }, bridge), { code: 'agent_control_permission_exceeds_grant' });
+      await assert.rejects(host.handle({ method: 'permission.set', params: { sessionId, permissionProfile: 'workspace-write' } },
+        { notify() {}, async request() { return { decision: 'deny' }; } }), { code: 'agent_control_operator_required' });
+    } finally { pair.client.output.end(); await host.release(); }
+  });
+});
+
+test('a bridge cannot change permission while a run is executing', async () => {
+  await withTuiHost(async ({ client, host, sessionId }) => {
+    const bridge = { notify() {}, async request() { return { decision: 'deny' }; }, [TRUSTED_AGENT_CONTROL_ORIGIN]: true };
+    const started = await client.request('run.submit', { sessionId, input: 'slow bridge turn', requestKey: 'bridge-running' });
+    assert.equal(started.state, 'running');
+    await assert.rejects(host.handle({ method: 'permission.set', params: { sessionId, permissionProfile: 'read-only' } }, bridge),
+      { code: 'permission_session_running' });
+    await client.request('run.wait', { sessionId, runId: started.runId });
+    const changed = await host.handle({ method: 'permission.set', params: { sessionId, permissionProfile: 'read-only' } }, bridge);
+    assert.equal(changed.permission.profile, 'read-only');
+  }, {
+    delayMs: 1_500,
+    agentControl: async ({ directory, projectDirectory }) => {
+      const storePath = join(directory, 'agent-control.json');
+      const created = await createDelegationGrant(storePath, input(projectDirectory), (await listDelegationGrants(storePath)).version);
+      const grantId = created.grants[0].id;
+      return { grantId, storePath, operator: false, validate: () => requireDelegationGrant(storePath, grantId, projectDirectory) };
     },
   });
 });

@@ -68,6 +68,11 @@ test('concurrent duplicates of one request key share a single run', async () => 
     assert.equal(first.runId, second.runId);
     assert.equal((await acceptances(context.sessionDirectory, context.sessionId)).length, 1);
     assert.equal([first, second].filter((item) => item.reused === true).length, 1, 'one call performed the work and the other reused it');
+    // 两条回执来自同一条持久 Acceptance：来源字段必须一致，不能只有 reused 那条带上。
+    assert.equal(second.via, first.via);
+    assert.equal(second.resolvedBy, first.resolvedBy);
+    assert.equal(typeof first.via, 'string');
+    assert.equal(typeof first.resolvedBy, 'string');
   });
 });
 
