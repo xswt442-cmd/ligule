@@ -201,6 +201,22 @@
   font-size: var(--text-sm);
 }
 
+.settings-advanced > summary::before,
+.about-fold > summary::before,
+.catalog-fold > summary::before {
+  content: '▸';
+  margin-inline-end: 8px;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.settings-advanced[open] > summary::before,
+.about-fold[open] > summary::before,
+.catalog-fold[open] > summary::before {
+  content: '▾';
+  color: var(--accent);
+}
+
 .settings-advanced[open] > summary,
 .about-fold[open] > summary { color: var(--fg); }
 

@@ -4,7 +4,7 @@ import { useText } from '../../locale';
 import type { SearchHit } from './types';
 
 const HIT_KINDS: Record<string, readonly [string, string]> = {
-  user: ['问', 'User'], assistant: ['答', 'Assistant'], reasoning: ['推理', 'Reasoning'], tool: ['工具', 'Tool'], label: ['名字', 'Name'],
+  user: ['你问', 'You'], assistant: ['回复', 'Reply'], reasoning: ['思考', 'Reasoning'], tool: ['工具输出', 'Tool output'], label: ['会话名', 'Session name'],
 };
 
 export function SessionSearch({ expanded, query, only, current, inputRef, hits, note, rootsById, onQueryChange, onScopeToggle, onClose, onSearch, onOpenHit }: {
@@ -64,8 +64,9 @@ export function SessionSearch({ expanded, query, only, current, inputRef, hits, 
         onClick={() => onOpenHit(hit, root === undefined || root === '' ? undefined : root)}
       >
         <span className="hit-where">
-          {kind === undefined ? hit.kind : t(kind[0], kind[1])} {t(`第 ${hit.seq} 条`, `#${hit.seq}`)}
           <span className="hit-session">{hit.name?.trim() || hit.sessionId.slice(0, 8)}</span>
+          <span className="hit-kind">{kind === undefined ? hit.kind : t(kind[0], kind[1])}</span>
+          <span className="hit-seq">{t(`第 ${hit.seq} 条`, `#${hit.seq}`)}</span>
         </span>
         <span className="hit-text">{hit.text}</span>
         {hit.spilled !== undefined && <span className="hit-note">{t('完整结果在', 'Full result in')} {hit.spilled}</span>}

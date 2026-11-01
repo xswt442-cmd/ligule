@@ -121,6 +121,13 @@
   white-space: nowrap;
 }
 
+.hit-kind,
+.hit-seq {
+  flex: 0 0 auto;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 .hit-text {
   max-inline-size: 100%;
   overflow-wrap: anywhere;
