@@ -58,18 +58,20 @@ export function resolveCapabilities(
 
 // 服务地址必须是无凭据、查询和片段的 HTTP(S) 根地址，避免请求目标随运行环境变化。
 // 此处只校验地址并去除尾部斜杠；是否需要 `/v1` 由各接口适配器决定。
+// 先去掉外围空白（`new URL` 接受结尾换行/空格，留着会在拼接路径时混进地址）。
 export function apiRoot(baseUrl: unknown): string {
-  if (typeof baseUrl !== 'string' || baseUrl === '') throw new KernelError('provider_base_url_required');
+  if (typeof baseUrl !== 'string' || baseUrl.trim() === '') throw new KernelError('provider_base_url_required');
+  const trimmed = baseUrl.trim();
   let parsed;
   try {
-    parsed = new URL(baseUrl);
+    parsed = new URL(trimmed);
   } catch {
     throw new KernelError('provider_base_url_invalid', { detail: 'a full HTTP(S) root is required' });
   }
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new KernelError('provider_base_url_invalid', { detail: 'an HTTP(S) root without credentials, query, or fragment' });
   }
-  return trimTrailingSeparators(baseUrl);
+  return trimTrailingSeparators(trimmed);
 }
 
 // 发送请求时才解析凭据；运行中更新密钥不需要重建提供方，配置快照也不保存密钥值。
