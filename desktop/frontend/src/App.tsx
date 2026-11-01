@@ -582,7 +582,7 @@ export function App({ transport }: { transport: Transport }) {
   }, [patch, settings.sidebar]);
 
   useEffect(() => {
-    client.onNotification((message) => {
+    const stopNotifications = client.onNotification((message) => {
       if (message.notify === 'fault') {
         setRows((current) => [...current, metaRow('error', `连接错误：${message.code} ${message.detail ?? ''}`, `Connection error: ${message.code} ${message.detail ?? ''}`)]);
         return;
@@ -637,7 +637,7 @@ export function App({ transport }: { transport: Transport }) {
       }
     });
 
-    client.onRequest((message) => {
+    const stopRequests = client.onRequest((message) => {
       // 用户提问一次可以包含多道题，答复按题目编号关联；此流程与审批分开处理。
       if (message.method === 'question.request') {
         const asked = message.params as { sessionId?: string; projectRoot?: string; questions?: QuestionAsk['questions'] };
@@ -706,6 +706,10 @@ export function App({ transport }: { transport: Transport }) {
 
     // 显示 Host 进程的标准错误输出；它不属于协议帧。
     transport.onLog((line) => setDiagnosticLogs((current) => [...current, line].slice(-50)));
+    return () => {
+      stopNotifications();
+      stopRequests();
+    };
   }, [client, notify, transport]);
 
   const refreshStatus = useCallback(async (id: string) => {
