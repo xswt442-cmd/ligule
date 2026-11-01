@@ -1,6 +1,7 @@
 import { textOf as chooseText, type Locale } from '@ligule/core/kernel/locale.js';
 import type { SessionEvent } from '@ligule/core/session/format.js';
 import { providerDiagnosticText, runtimeFailureText } from './errors.js';
+import { toolTarget } from './message-format.js';
 
 // SessionEvent 是记录事实源；投影只生成展示行，不改记录，也不把行号当作事件序号。
 export type TuiRecord = SessionEvent;
@@ -10,6 +11,8 @@ export interface TranscriptItem {
   text: string;
   source?: 'controller';
   tool?: string;
+  // 调用的代表性目标（路径、命令等），让成功结果也能压成一行。
+  target?: string;
   code?: string;
   exitCode?: number;
   spilled?: string;
@@ -72,6 +75,8 @@ export function projectRecord(record: TuiRecord, locale: Locale = 'zh'): Transcr
     const kind = result.failed !== true ? 'result' : result.kind === 'refusal' ? 'refusal' : 'failure';
     const parts = resultParts(result);
     const row: TranscriptItem = { kind, tool: typeof parts.capability === 'string' ? parts.capability : capabilityOf(typeof record.tool === 'string' ? record.tool : '', isRecord(record.args) ? record.args : undefined), text: parts.text };
+    const target = toolTarget(JSON.stringify(isRecord(record.args) ? record.args : {}));
+    if (target !== '') row.target = target;
     if (typeof result.code === 'string') row.code = result.code;
     if (typeof parts.exitCode === 'number') row.exitCode = parts.exitCode;
     if (typeof result.spilled === 'string') row.spilled = result.spilled;

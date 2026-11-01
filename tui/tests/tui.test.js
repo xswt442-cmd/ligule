@@ -322,6 +322,9 @@ test('the TUI remembers a session-scoped approval and applies it after the next 
     });
     try {
       const first = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'read', args: { path: 'note.txt' } }) });
+      // 记住规则收在第二层：先看到入口，按 m 展开后才出现规则选项。
+      await waitFor(() => painted.includes('记住规则'), { read: () => painted });
+      stdin.write('m');
       await waitFor(() => painted.includes('2 记住本会话'), { read: () => painted });
       stdin.write('2');
       await first;

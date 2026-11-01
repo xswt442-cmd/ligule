@@ -878,6 +878,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [ask, query, sessionId]);
   const [approvalExpanded, setApprovalExpanded] = useState(false);
   const [approvalCursor, setApprovalCursor] = useState(0);
+  // 记住规则属于第二层：默认收起，换一条审批时复位，避免把上一条的展开状态带过去。
+  const [rememberOpen, setRememberOpen] = useState(false);
+  useEffect(() => setRememberOpen(false), [ask?.id]);
   const [questionOffset, setQuestionOffset] = useState(0);
   useEffect(() => setQuestionOffset(0), [query?.id, query?.at]);
 
@@ -967,6 +970,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       const args = isRecord(params.args) ? params.args : {};
       setApprovalExpanded(false);
       setApprovalCursor(0);
+      // 新审批从收起态开始：先给主操作，规则选项再按 m 打开。
+      setRememberOpen(false);
       setDetail(null);
       setSessionPicker(null);
       setSearch(null);
@@ -3039,7 +3044,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const view = viewportPosition(detail?.cursor ?? 0, viewLines.length, viewHeight, detail?.offset ?? 0);
   const selection = detail?.anchor === undefined || detail.anchor === null ? [view.cursor, view.cursor] : [Math.min(detail.anchor, view.cursor), Math.max(detail.anchor, view.cursor)];
   const approvalLayout = useMemo(() => ask === null ? null : buildApprovalLayout(ask, approvalExpanded,
-    geometry.columns, Math.max(1, geometry.rows - 1), locale), [ask, approvalExpanded, geometry.columns, geometry.rows, locale]);
+    geometry.columns, Math.max(1, geometry.rows - 1), locale, rememberOpen), [ask, approvalExpanded, rememberOpen, geometry.columns, geometry.rows, locale]);
   const approvalLines = approvalLayout?.bodyLines ?? [];
   const approvalHeight = approvalLayout?.bodyHeight ?? 0;
   const approvalView = viewportPosition(approvalCursor, approvalLines.length, approvalHeight);
@@ -3130,12 +3135,16 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           : hit('approval-up', input, key) ? approvalView.cursor - 1 : hit('approval-down', input, key) ? approvalView.cursor + 1 : null;
       if (target !== null) { setApprovalCursor(target); return; }
     }
+    if (ask !== null && hit('approval-remember', input, key)) {
+      if (ask.rememberable) setRememberOpen(!rememberOpen);
+      return;
+    }
     if (ask !== null) {
-      if (ask.rememberable && ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace') && input.toLowerCase() === 'w') {
+      if (rememberOpen && ask.rememberable && ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace') && input.toLowerCase() === 'w') {
         setAsk({ ...ask, rememberTarget: ask.rememberTarget === 'workspace' ? 'file' : 'workspace' });
         return;
       }
-      const option = /^\d$/u.test(input) ? Number(input) - 2 : -1;
+      const option = rememberOpen && /^\d$/u.test(input) ? Number(input) - 2 : -1;
       const rememberScope = ask.rememberable && option >= 0 ? ask.rememberScopes[option] : undefined;
       if (hit('approve', input, key) || ask.rememberable && input === '1' || rememberScope !== undefined) {
         if (approvalLayout?.canApprove !== true) return;

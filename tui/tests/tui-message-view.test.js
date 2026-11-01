@@ -5,6 +5,7 @@ import { createElement } from 'react';
 import { Box } from 'ink';
 import { MessageRow } from '../dist/tui/message-view.js';
 import { foldText, foldTextForColumns, toolCallSummary } from '../dist/tui/message-format.js';
+import { displayWidth } from '../dist/tui/commands.js';
 import { wrapLine } from '../dist/tui/viewport.js';
 import { projectRecord } from '../dist/tui/transcript.js';
 
@@ -99,4 +100,52 @@ test('NO_COLOR keeps tool outcome symbols and labels readable without color SGR'
     if (previous === undefined) delete process.env.NO_COLOR;
     else process.env.NO_COLOR = previous;
   }
+});
+
+function paintedLines(output) {
+  return stripAnsi(output).split('\n').map((line) => line.trimEnd()).filter((line) => line !== '');
+}
+
+test('a short successful tool result collapses to one summary line naming tool, target and size', async () => {
+  const text = Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join('\n');
+  const rows = projectRecord({ seq: 1, kind: 'tool', tool: 'read', args: { path: 'notes.md' }, result: { content: { text }, failed: false } });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].target, 'notes.md', 'the projection keeps the call target for the one-line summary');
+  const lines = paintedLines(await paint(rows, 80));
+  assert.equal(lines.length, 1, `a twelve-line success should occupy exactly one row:\n${lines.join('\n')}`);
+  assert.match(lines[0], /✓ read notes\.md · 12 行/u);
+});
+
+test('a collapsed result still fits a narrow window', async () => {
+  const text = Array.from({ length: 12 }, (_, index) => `l${index + 1}`).join('\n');
+  const rows = projectRecord({ seq: 1, kind: 'tool', tool: 'read', args: { path: '工作区/项目/很深/notes.md' }, result: { content: { text }, failed: false } });
+  const lines = paintedLines(await paint(rows, 24));
+  assert.equal(lines.length, 1, `the summary stays one row at 24 columns:\n${lines.join('\n')}`);
+  assert.ok(displayWidth(lines[0]) <= 24, `summary exceeds 24 columns: ${lines[0]}`);
+  assert.match(lines[0], /12 行/u, 'the size stays visible even when the target is clipped');
+});
+
+test('long successes keep a bounded preview instead of a one-line summary', async () => {
+  const long = Array.from({ length: 20 }, (_, index) => `alpha ${String(index + 1).padStart(2, '0')}`).join('\n');
+  const longLines = paintedLines(await paint(projectRecord({ seq: 1, kind: 'tool', tool: 'exec', args: { command: 'node long.js' }, result: { content: { text: long }, failed: false } }), 80));
+  assert.ok(longLines[0].includes('✓ exec node long.js'), longLines[0]);
+  assert.ok(longLines.join('\n').includes('alpha 01'));
+  assert.ok(!longLines.join('\n').includes('alpha 20'), 'later lines stay behind Ctrl+O');
+  assert.ok(longLines.join('\n').includes('Ctrl+O'));
+
+  const wide = '结果行😀 '.repeat(80);
+  const wideLines = paintedLines(await paint(projectRecord({ seq: 2, kind: 'tool', tool: 'exec', args: { command: 'node wide.js' }, result: { content: { text: wide }, failed: false } }), 80));
+  assert.ok(wideLines.length > 1, 'a single very wide line keeps its preview rows');
+  assert.ok(wideLines.join('\n').includes('Ctrl+O'));
+});
+
+test('failures do not collapse: they keep the code, the target and the reason', async () => {
+  const rows = projectRecord({
+    seq: 1, kind: 'tool', tool: 'write', args: { path: 'notes.md' },
+    result: { kind: 'failure', failed: true, code: 'policy_write_denied', reason: '审批规则拒绝了此写入。\n原因第二行' },
+  });
+  const lines = paintedLines(await paint(rows, 80));
+  assert.ok(lines.length >= 3, `a failure keeps its reason rows:\n${lines.join('\n')}`);
+  assert.match(lines[0], /✗ write notes\.md 失败 \(policy_write_denied\)/u);
+  assert.ok(lines.join('\n').includes('审批规则拒绝了此写入。'));
 });

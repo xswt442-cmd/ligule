@@ -101,6 +101,7 @@ export function buildApprovalLayout(
   columns: number,
   rows: number,
   locale: Locale,
+  rememberOpen = false,
 ): ApprovalLayout {
   const contentColumns = Math.max(1, Math.floor(columns) - 3);
   const lineCount = Math.max(0, Math.floor(rows));
@@ -110,26 +111,31 @@ export function buildApprovalLayout(
     ? text(locale, `目标未提供 · 工具：${ask.tool}`, `Target not provided · Tool: ${ask.tool}`)
     : text(locale, '目标：', 'Target: ') + ask.detail;
   const targetLines = wrapLine(targetText, contentColumns);
-  const range = rememberRange(ask, locale);
+  // 记住规则收在第二层：默认只留按 m 的入口，展开后才显示记忆范围与规则选项。
+  const range = rememberOpen ? rememberRange(ask, locale) : undefined;
   const scopeLines = range === undefined ? [] : wrapLine(range, contentColumns);
   const rememberable = ask.rememberable;
-  const actions = [
-    rememberable
-      ? text(locale, '1 允许一次', '1 Allow once')
-      : `${keyHint('approve')} ${text(locale, '允许一次', 'Allow once')}`,
-    ...(rememberable ? ask.rememberScopes.map((scope, index) => {
-      const label = scope === 'session' ? text(locale, '记住本会话', 'Remember this session')
-        : scope === 'project' ? text(locale, '记住本项目', 'Remember this project')
-          : text(locale, '记住所有项目', 'Remember all projects');
-      return `${index + 2} ${label}`;
-    }) : []),
-    ...(rememberable && ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace')
-      ? [text(locale, 'w 切换文件/工作区范围', 'w switch file/workspace scope')]
-      : []),
-    `${keyHint('deny')} ${text(locale, '拒绝', 'Deny')}`,
-    `${keyHint('expand-or-history')} ${text(locale, '查看详情', 'View details')}`,
-    `${keyHint('approval-cancel')} ${text(locale, '取消本轮', 'Cancel this turn')}`,
-  ];
+  const allowAction = rememberable
+    ? text(locale, '1 允许一次', '1 Allow once')
+    : `${keyHint('approve')} ${text(locale, '允许一次', 'Allow once')}`;
+  const rememberChoices = rememberable ? ask.rememberScopes.map((scope, index) => {
+    const label = scope === 'session' ? text(locale, '记住本会话', 'Remember this session')
+      : scope === 'project' ? text(locale, '记住本项目', 'Remember this project')
+        : text(locale, '记住所有项目', 'Remember all projects');
+    return `${index + 2} ${label}`;
+  }) : [];
+  const scopeToggle = rememberable && ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace')
+    ? [text(locale, 'w 切换文件/工作区范围', 'w switch file/workspace scope')]
+    : [];
+  const rememberToggle = rememberable
+    ? [`${keyHint('approval-remember')} ${rememberOpen ? text(locale, '收起记住选项', 'hide remember choices') : text(locale, '记住规则…', 'remember rule…')}`]
+    : [];
+  const denyAction = `${keyHint('deny')} ${text(locale, '拒绝', 'Deny')}`;
+  const detailAction = `${keyHint('expand-or-history')} ${text(locale, '查看详情', 'View details')}`;
+  const cancelAction = `${keyHint('approval-cancel')} ${text(locale, '取消本轮', 'Cancel this turn')}`;
+  const actions = rememberOpen && rememberable
+    ? [allowAction, ...rememberChoices, ...scopeToggle, ...rememberToggle, denyAction, detailAction, cancelAction]
+    : [allowAction, denyAction, detailAction, cancelAction, ...rememberToggle];
   const actionLines = packActions(actions, contentColumns);
   const summary = bodySummary(ask, locale, !expanded);
   const bodyText = expanded
@@ -152,8 +158,9 @@ export function buildApprovalLayout(
       targetLines: [],
       scopeLines: [],
       actionLines: [
-        `${keyHint('deny')} ${text(locale, '拒绝', 'Deny')}`,
-        `${keyHint('approval-cancel')} ${text(locale, '取消本轮', 'Cancel this turn')}`,
+        denyAction,
+        cancelAction,
+        ...(rememberOpen && rememberable ? rememberToggle : []),
       ],
       warningLines: wrapLine(text(locale, '请放大窗口后再审批。', 'Enlarge window to review.'), contentColumns),
       bodyLines,

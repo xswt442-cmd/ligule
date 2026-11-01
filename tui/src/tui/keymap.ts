@@ -33,7 +33,7 @@ export type TerminalAction =
   | 'list-open' | 'list-up' | 'list-down' | 'list-page-up' | 'list-page-down' | 'list-first' | 'list-last' | 'list-close'
   | 'view-up' | 'view-down' | 'view-page-up' | 'view-page-down' | 'view-top' | 'view-bottom'
   | 'mark-up' | 'mark-down' | 'copy-selection' | 'view-close'
-  | 'approval-cancel' | 'approve' | 'deny'
+  | 'approval-cancel' | 'approve' | 'deny' | 'approval-remember'
   | 'approval-up' | 'approval-down' | 'approval-page-up' | 'approval-page-down' | 'approval-top' | 'approval-bottom'
   | 'question-back' | 'question-page-up' | 'question-page-down'
   | 'panel-up' | 'panel-down' | 'panel-page-up' | 'panel-page-down' | 'panel-left' | 'panel-right' | 'panel-select' | 'panel-close';
@@ -67,6 +67,7 @@ export const ENGLISH_LABELS: Record<TerminalAction, string> = {
   'view-top': 'Go to start', 'view-bottom': 'Go to end', 'mark-up': 'Extend selection up', 'mark-down': 'Extend selection down',
   'copy-selection': 'Copy selection', 'view-close': 'Close transcript and keep the draft',
   'approval-cancel': 'Cancel this turn', approve: 'Allow this call', deny: 'Deny this call',
+  'approval-remember': 'Show or hide the remember-rule choices',
   'approval-up': 'Scroll up a line', 'approval-down': 'Scroll down a line', 'approval-page-up': 'Previous page', 'approval-page-down': 'Next page',
   'approval-top': 'Go to start', 'approval-bottom': 'Go to end', 'question-back': 'Edit the previous answer when the draft is empty',
   'question-page-up': 'Read the previous question page', 'question-page-down': 'Read the next question page',
@@ -145,6 +146,8 @@ export const KEYMAP: Readonly<Record<TerminalAction, Binding>> = {
   'view-close': { spec: 'escape', view: '完整历史', label: '关掉这份视图，回到原来的草稿' },
 
   'approval-cancel': { spec: 'escape', view: '审批', label: '取消这一轮（不允许这一次调用）' },
+  // 记住规则的选项默认收在第二层：先看清允许一次/拒绝，再决定要不要记一条规则。
+  'approval-remember': { spec: 'm', view: '审批', label: '展开或收起记住规则的范围选项' },
   'approve': { spec: 'y', view: '审批', label: '允许这一次调用' },
   'deny': { spec: 'n', view: '审批', label: '不允许这一次调用' },
   'approval-up': { spec: 'arrowup', view: '审批', label: '在那一段改动里往上走一行' },
