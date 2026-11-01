@@ -1,39 +1,23 @@
-# Agent guide
+# Ligule engineering guide
 
-These rules apply throughout the repository. Read the nearest local `AGENTS.md` before changing code under `core/src/`, `tui/src/`, or `desktop/`. The [architecture guide](docs/development/ARCHITECTURE.en.md) explains runtime ownership and data flow; [contributing](docs/development/CONTRIBUTING.en.md) lists development checks.
+Follow this file and the nearest module `AGENTS.md`. Current implementation and tests take precedence over historical notes. See [architecture](docs/development/ARCHITECTURE.en.md), [contributing](docs/development/CONTRIBUTING.en.md), and the [engineering standard](.github/engineering/ENGINEERING_STANDARD.md).
 
-## Ownership and dependencies
+## Architecture and safety
 
-- Node.js owns all business logic. CLI and TUI use the Node Host in process; Electron Main manages windows and the Host process while forwarding protocol frames without interpreting them.
-- The Host assembles the kernel from plugins and owns project environments, model providers, policy, and open sessions. The kernel has no built-in tools; registered tools call through kernel validation and policy.
-- Dependencies point `tui → core ← desktop`. Core is the private shared source package; it has no product version, changelog, tag, or release. Core must not import TUI, React, Ink, or Electron.
-- `core/src/kernel/` must not depend on client adapters. Put environment-sensitive operations under `core/src/capability/`; model-callable tool contracts belong under `core/src/tools/`. Keep protocol transport under `core/src/host/`.
-- A workspace's `workspaceRoot` identifies its project environment and session ownership. `boundary` limits filesystem tools. They may differ and must remain separate.
+- Node Host owns business logic, project environments, sessions, and policy. The kernel executes only registered tools; clients communicate through Host protocols. Dependencies flow `tui → core ← desktop`; private Core has no separate release and must not depend on Electron, Ink, React, or TUI.
+- Keep `workspaceRoot` (project identity) distinct from the filesystem tool `boundary`. Resolve network targets and command backends once, then use that same resolved target for approval and execution.
+- Session JSONL is authoritative. Writable sessions need a cross-process lock; derived checkpoints are validated before use. Recovery records unknown outcomes and never replays unresolved tools.
+- Configuration is layered and snapshot-based. Treat project input as untrusted; preserve the `__proto__` merge guard and public-field allowlists. `dataRoot()` owns user-data paths: `LIGULE_HOME` must be absolute. Resolve credentials from a nonempty environment variable or OS credential store; never expose values in records, logs, or configuration.
+- Keep approvals, questions, events, cancellation, and tool results bound to the initiating Session and request. Reject unsupported parsing or unavailable execution backends rather than silently falling back.
+- Electron Main/Preload own native transport and lifecycle; Host owns session and permission decisions.
 
-## Runtime invariants
+## Development
 
-- Resolve a declared network target or command backend once, then pass that same result to policy and execution. Do not approve one target and execute another.
-- Session JSONL is the source of truth. A writable session requires its cross-process lock; checkpoints and other summaries are derived and must be validated before use. Never replay an unresolved tool call during recovery.
-- Configuration is layered and frozen into a snapshot before tools run. Expose configuration through explicit allowlists. Credentials are references: resolve a non-empty environment variable first, then the operating system credential store; Linux uses persistent Secret Service and reports failure when it is unavailable.
-- `dataRoot()` is the single implementation of the user data directory. Respect absolute `LIGULE_HOME`; reject relative values. Do not construct the `.ligule` path independently elsewhere.
-- A tool result, refusal, or failure must leave a result for each dispatched call in the session. Keep approval, question, cancellation, and event routing scoped to the originating session and request.
-- Project configuration is untrusted input. Keep the merge protection against `__proto__`; tools receive the frozen configuration snapshot and injected logger, and must not write directly to process output.
-- If command syntax cannot be parsed or its required backend is unavailable, fail closed with the existing error or approval path. Never approve a command from an incomplete parse.
-- Electron Main and Preload own desktop transport, native interactions, and process lifecycle. Keep session ownership, policy, and Host protocol semantics in Node.
+- Use Node.js 24+ and pinned pnpm 12.9.1. Run `pnpm install --frozen-lockfile` and relevant tests; `pnpm test` is the full suite. Use `pnpm check-pack` and `pnpm verify-install` for CLI release changes. See [release procedures](docs/development/RELEASE.md) for Desktop and publication checks.
+- Core and TUI runtime TypeScript uses erasable syntax; avoid `enum`, `namespace`, and parameter properties. Keep package manifests, lockfile, engine declarations, and workflow versions consistent.
+- Keep generated binaries, `desktop/vendor/`, credentials, Session data, and temporary test output untracked. Preserve existing work; branch, commit, push, merge, restore, tag, and publish only with explicit authorization.
+- Document implemented behavior only. Keep Simplified Chinese and English guides aligned; do not duplicate source-owned details or add private paths and one-off verification logs to tracked documents.
 
-## Build, tests, and release
+## Module guides
 
-Use Node.js 24 or newer and the workspace-pinned pnpm 12.9.1. Install development dependencies with `pnpm install --frozen-lockfile`; run the full module and integration suites with `pnpm test`, and check the npm artifact with `pnpm check-pack` and `pnpm verify-install`. Prepare the Desktop runtime with `pnpm run prepare-runtime`, then install Electron's platform binary with `pnpm --filter ligule-desktop exec install-electron`. Desktop checks are listed in [docs/development/CONTRIBUTING.en.md](docs/development/CONTRIBUTING.en.md). Use npm for clean-consumer checks of CLI tarballs. [docs/development/RELEASE.md](docs/development/RELEASE.md) is the maintainer reference for release scope and procedure. CI artifacts do not mean a version has been published.
-
-Keep product manifests, `pnpm-lock.yaml`, `tui/src/version.ts`, Node engine declarations, and workflow versions consistent. Runtime source in `core/src/` and `tui/src/` is strict TypeScript and uses erasable syntax; do not add `enum`, `namespace`, or parameter properties. Generated `desktop/vendor/`, platform binaries, personal session data, credentials, and temporary test output do not belong in commits. Do not make release or publishing claims without checking the registry and GitHub Release state.
-
-Branch changes, commits, pushes, resets, and file restoration require an explicit request. Preserve existing user changes and inspect the target before a requested Git operation.
-
-Pull requests are reviewed by CodeRabbit (`.coderabbit.yaml`), Sourcery, and Greptile; CodeQL uses the repository default setup (no workflow file). Trigger a bot review from the PR; keep review settings out of product source.
-
-Document current behavior and link to its maintained source. Keep the Chinese and English user guides aligned for commands, configuration keys, and stable error codes. Do not duplicate an implementation detail when a nearby source file or test is the maintained authority.
-
-## Local guides
-
-- [desktop/AGENTS.md](desktop/AGENTS.md) applies to the Electron shell and frontend; its child guide covers [`frontend/`](desktop/frontend/AGENTS.md).
-- [core/src/kernel/AGENTS.md](core/src/kernel/AGENTS.md), [core/src/tools/AGENTS.md](core/src/tools/AGENTS.md), [core/src/session/AGENTS.md](core/src/session/AGENTS.md), [core/src/host/AGENTS.md](core/src/host/AGENTS.md), and [tui/AGENTS.md](tui/AGENTS.md) cover their respective directories.
+[Host](core/src/host/AGENTS.md) · [Kernel](core/src/kernel/AGENTS.md) · [Sessions](core/src/session/AGENTS.md) · [Tools](core/src/tools/AGENTS.md) · [TUI](tui/AGENTS.md) · [Desktop](desktop/AGENTS.md) · [Frontend](desktop/frontend/AGENTS.md).
