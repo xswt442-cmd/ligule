@@ -31,6 +31,15 @@ test('configuration keeps approval visible and stays within narrow display width
   }
 });
 
+test('the configuration line shows a thinking override and hides the default', () => {
+  const overridden = configurationText({ model: 'deepseek-flash', mode: 'full', policy: 'ask', thinking: 'high', columns: 120, locale: 'zh' });
+  assert.match(overridden, /思考 高/);
+  assert.match(configurationText({ model: 'deepseek-flash', mode: 'full', policy: 'ask', thinking: 'max', columns: 120, locale: 'en' }), /Thinking max/);
+  for (const thinking of [undefined, 'default']) {
+    assert.doesNotMatch(configurationText({ model: 'deepseek-flash', mode: 'full', policy: 'ask', thinking, columns: 120, locale: 'zh' }), /思考/);
+  }
+});
+
 test('welcome uses a left-aligned compact block with useful commands', async () => {
   const frame = await paint(createElement(Welcome, { version: '0.0.7', boundary: 'C:/workspace/project', columns: 80, locale: 'zh' }), 80);
   assert.match(frame, /^ ❧ ligule/m);

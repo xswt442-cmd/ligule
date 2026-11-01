@@ -101,6 +101,12 @@ interface TuiStatus {
   };
   readonly model?: string | null;
   readonly pendingModel?: string | null;
+  readonly thinking?: {
+    readonly available: readonly string[];
+    readonly defaultEffort: string | null;
+    readonly effective: string;
+    readonly pending: string | null;
+  } | null;
   readonly mode?: string | null;
   readonly pendingMode?: string | null;
   readonly policy: string;
@@ -230,7 +236,7 @@ interface SearchState {
   readonly at: number;
 }
 
-type PickerKind = 'model' | 'mode' | 'policy' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network' | 'permission-confirm-partial'
+type PickerKind = 'model' | 'thinking' | 'mode' | 'policy' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network' | 'permission-confirm-partial'
   | 'control' | 'control-action' | 'control-revoke-confirm';
 type PolicyValue = 'ask' | 'auto' | 'none' | 'never';
 type PolicySelection = 'ask' | 'auto' | 'none';
@@ -460,6 +466,7 @@ interface TuiRequestResults {
   readonly 'status.get': TuiStatus;
   readonly 'permission.set': { readonly sessionId: string; readonly permission: NonNullable<TuiStatus['permission']>; readonly applies: 'now' | 'unchanged' };
   readonly 'model.select': { readonly model: string | null; readonly serviceId: string; readonly when: 'now' | 'round' };
+  readonly 'session.configure': { readonly applies: 'now' | 'next_round' | 'unchanged'; readonly [key: string]: unknown };
   readonly 'config.get': TuiConfigResult;
   readonly 'credentials.status': CredentialStatus;
   readonly 'mode.set': { readonly mode: string | null; readonly layer: string | null; readonly pending: string | null; readonly tools: string[] };
@@ -1256,6 +1263,28 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     ].join('\n') });
   }, [client, push, sessionId, t]);
 
+  // 思考档属于生成设置：'default' 清除会话覆盖并回到模型默认值，其余值交给 Host 校验。
+  const changeThinking = useCallback((effort: string) => {
+    const own = sessionId;
+    const request = effort === 'default'
+      ? { sessionId: own, resetThinking: true }
+      : { sessionId: own, thinkingEffort: effort };
+    void client.request('session.configure', request).then(async (configured) => {
+      if (activeSession.current !== own) return;
+      await refreshStatus();
+      const label = effort === 'default' ? t('模型默认', 'model default')
+        : effort === 'none' ? t('无', 'none')
+          : effort === 'low' ? t('低', 'low')
+            : effort === 'high' ? t('高', 'high')
+              : effort === 'max' ? t('最高', 'max') : effort;
+      push({ kind: 'meta', text: configured.applies === 'next_round'
+        ? t(`思考档：${label}（下一轮生效）`, `Thinking: ${label} (applies next turn)`)
+        : t(`思考档：${label}`, `Thinking: ${label}`) });
+    }, (error: unknown) => {
+      if (activeSession.current === own) push({ kind: 'error', text: t(`无法切换思考档：${errorCode(error) ?? 'session_configure_failed'}`, `Could not change the thinking level: ${errorCode(error) ?? 'session_configure_failed'}`) });
+    });
+  }, [client, push, refreshStatus, sessionId, t]);
+
   const createPresetGrant = useCallback((presetId: string) => {
     const permission = status?.permission;
     if (permission === undefined) {
@@ -1368,6 +1397,26 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         if (typeof config.model?.model === 'string') available.unshift({
           id: `legacy:${config.model.model}`, label: `${t('默认服务', 'Default service')} / ${config.model.model}`, selection: { provider: 'legacy', model: config.model.model },
         });
+      } else if (kind === 'thinking') {
+        const current = await client.request('status.get', { sessionId: own });
+        if (activeSession.current !== own || pickerRequest.current !== token) return;
+        setStatus(current);
+        const thinking = current.thinking;
+        const efforts = thinking?.available ?? [];
+        if (efforts.length === 0) {
+          setPanel(null);
+          push({ kind: 'meta', text: t('当前模型没有声明思考档；换一个支持思考的模型后再试。', 'The selected model does not declare thinking levels; switch to a model that does.') });
+          return;
+        }
+        const active = thinking?.pending ?? thinking?.effective ?? 'default';
+        const label = (effort: string): string => effort === 'none' ? t('无', 'none')
+          : effort === 'low' ? t('低', 'low')
+            : effort === 'high' ? t('高', 'high')
+              : effort === 'max' ? t('最高', 'max') : effort;
+        available = [
+          { id: 'default', label: t('模型默认', 'Model default'), description: thinking?.defaultEffort === null || thinking?.defaultEffort === undefined ? undefined : t(`跟随模型：${label(thinking.defaultEffort)}`, `Follow the model: ${label(thinking.defaultEffort)}`) },
+          ...efforts.map((effort) => ({ id: effort, label: label(effort), description: effort === active ? t('当前生效', 'active now') : undefined })),
+        ];
       } else if (kind === 'mode') {
         if (modes === undefined) throw new Error('mode_list_unavailable');
         available = (await modes.read()).map(mode => ({ id: mode.name, label: mode.name,
@@ -2351,6 +2400,16 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
+    if (name === 'think') {
+      const asked = argument.trim();
+      if (asked === '') { openPicker('thinking'); return; }
+      if (!['default', 'none', 'low', 'high', 'max'].includes(asked)) {
+        push({ kind: 'error', text: t('用法：/think [none|low|high|max|default]', 'Usage: /think [none|low|high|max|default]') });
+        return;
+      }
+      changeThinking(asked);
+      return;
+    }
     if (name === 'mode') {
       if (argument === '') { openPicker('mode'); return; }
       void (async () => {
@@ -2587,7 +2646,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, changePermission, client, closeUnadoptedSession, externalControl, finishSessionNavigation, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, refreshStatus, resetOrdinaryDraft, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, externalControl, finishSessionNavigation, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, refreshStatus, resetOrdinaryDraft, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
@@ -2663,6 +2722,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (id === 'confirm') void changePermission({ network: 'unrestricted', confirmNetwork: true });
       return;
     }
+    if (currentPanel === 'thinking') {
+      changeThinking(id);
+      return;
+    }
     if (choice.selection === undefined) {
       runCommand(currentPanel, choice.id);
       return;
@@ -2673,7 +2736,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       await refreshStatus();
       push({ kind: 'meta', text: changed.when === 'round' ? t(`下轮使用 ${changed.model}`, `${changed.model} will apply next turn`) : t(`已切换至 ${changed.model}`, `Switched to ${changed.model}`) });
     }, (error: unknown) => push({ kind: 'error', text: t(`无法选择模型：${errorCode(error) ?? 'model_select_failed'}`, `Could not select model: ${errorCode(error) ?? 'model_select_failed'}`) }));
-  }, [choices, panel, closePanel, openPicker, changePermission, createPresetGrant, runCommand, client, sessionId, refreshStatus, push, t, info.boundary, controlSnapshot, controlTarget]);
+  }, [choices, panel, closePanel, openPicker, changePermission, changeThinking, createPresetGrant, runCommand, client, sessionId, refreshStatus, push, t, info.boundary, controlSnapshot, controlTarget]);
 
   const loadApprovalDetails = useCallback(async () => {
     const current = ask;
@@ -3415,6 +3478,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     h(ChoicePanel, {
       active: panel !== null && panel !== 'help', interactive,
       title: panel === 'model' ? t('选择模型', 'Select model')
+        : panel === 'thinking' ? t('选择思考档', 'Select thinking level')
         : panel === 'mode' ? t('选择工具模式', 'Select tool mode')
           : panel === 'policy' ? t('选择审批方式', 'Select approval mode')
             : panel === 'permission' ? t('会话权限', 'Session permissions')
@@ -3428,6 +3492,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
                     : '',
       options: choices,
       selected: panel === 'model' ? `${status?.serviceId}:${status?.selectedModel ?? status?.model}`
+        : panel === 'thinking' ? status?.thinking?.pending ?? status?.thinking?.effective ?? 'default'
         : panel === 'mode' ? status?.mode ?? undefined
           : panel === 'policy' ? status?.policy
             : panel === 'permission' ? status?.permission?.profile
@@ -3453,7 +3518,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     showSettings ? h(ConfigurationLine, {
       model: `${shownModel ?? t('未配置', 'not configured')}${status?.pendingModel ? `→${status.pendingModel}` : ''}`,
       mode: `${status?.mode ?? '—'}${status?.pendingMode ? `→${status.pendingMode}` : ''}`,
-      policy: status?.policy ?? 'ask', external: externalControl, columns: geometry.columns, locale,
+      policy: status?.policy ?? 'ask', thinking: status?.thinking?.pending ?? status?.thinking?.effective,
+      external: externalControl, columns: geometry.columns, locale,
     }) : null,
     showSettings && !running && geometry.rows >= 20 ? h(Text, { color: TUI_COLORS.muted, wrap: 'truncate-end' }, buildStatusLine({
       sessionId, boundary: info.boundary, status, running: false, seconds, expanded, columns: geometry.columns, locale,

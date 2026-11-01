@@ -1504,3 +1504,92 @@ test('/control creates a project-bound grant through the interactive wizard', op
     instance.unmount();
   }
 }, { permissionControl: true }));
+
+// `/think` 只列出模型声明的档位；应用后状态行显示覆盖值，恢复默认后隐藏。
+test('/think applies a thinking level the model declares and resets to the model default', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const strip = (text) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
+  const lastFrame = () => completeFrame(painted);
+  const spoken = (text) => strip(painted).includes(text);
+  const type = async (line) => {
+    stdin.write(line);
+    await waitFor(() => lastFrame().includes(`› ${line}`), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+  };
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    await type('/think');
+    await waitFor(() => lastFrame().includes('选择思考档'), { read: lastFrame });
+    for (const label of ['模型默认', '无', '低', '高', '最高']) {
+      await waitFor(() => lastFrame().includes(label), { read: lastFrame });
+    }
+    // 关闭列表后再用命令应用档位，避免输入被面板吃掉。
+    stdin.write('');
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    await type('/think high');
+    await waitFor(() => requests.some((request) => request.method === 'session.configure'
+      && request.params?.thinkingEffort === 'high'), { read: () => strip(painted).slice(-700) });
+    await waitFor(() => spoken('思考档：高'), { read: () => strip(painted).slice(-700) });
+    assert.equal((await client.request('status.get', { sessionId })).thinking.effective, 'high');
+    await waitFor(() => lastFrame().includes('思考 高'), { read: lastFrame });
+
+    await type('/think default');
+    await waitFor(() => requests.some((request) => request.method === 'session.configure'
+      && request.params?.resetThinking === true), { read: () => strip(painted).slice(-700) });
+    await waitFor(async () => (await client.request('status.get', { sessionId })).thinking.effective === 'default', { read: () => strip(painted).slice(-700) });
+  } finally {
+    instance.unmount();
+  }
+}, {
+  config: {
+    model: {
+      api: 'chat-completions', baseURL: 'http://127.0.0.1:9/v1', model: 'local-test-model', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY',
+      services: [{ id: 'deepseek', name: 'DeepSeek', api: 'chat-completions', baseURL: 'https://api.deepseek.com', apiKeyEnv: 'DEEPSEEK_API_KEY', models: ['deepseek-flash'] }],
+      selection: { provider: 'deepseek', model: 'deepseek-flash' },
+    },
+  },
+}));
+
+// 没有声明思考能力的模型不弹出空列表，也不发送配置请求。
+test('/think explains when the selected model declares no thinking levels', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const strip = (text) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
+  const lastFrame = () => completeFrame(painted);
+  const type = async (line) => {
+    stdin.write(line);
+    await waitFor(() => lastFrame().includes(`› ${line}`), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+  };
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    await type('/think');
+    await waitFor(() => strip(painted).includes('当前模型没有声明思考档'), { read: () => strip(painted).slice(-900) });
+    assert.deepEqual(requests.filter((request) => request.method === 'session.configure'), []);
+  } finally {
+    instance.unmount();
+  }
+}));

@@ -33,12 +33,23 @@ export interface ConfigurationProps {
   readonly model: string;
   readonly mode: string;
   readonly policy: string;
+  readonly thinking?: string;
   readonly external?: boolean;
   readonly columns: number;
   readonly locale: Locale;
 }
 
-export function configurationText({ model, mode, policy, external = false, columns, locale }: ConfigurationProps): string {
+// 思考档只在会话明确覆盖了模型默认值时显示，避免默认情况下多占一行宽度。
+export function thinkingText(effort: string | undefined, locale: Locale): string {
+  if (effort === undefined || effort === 'default') return '';
+  const label = effort === 'none' ? textOf(locale, '无', 'none')
+    : effort === 'low' ? textOf(locale, '低', 'low')
+      : effort === 'high' ? textOf(locale, '高', 'high')
+        : effort === 'max' ? textOf(locale, '最高', 'max') : effort;
+  return textOf(locale, `思考 ${label}`, `Thinking ${label}`);
+}
+
+export function configurationText({ model, mode, policy, thinking, external = false, columns, locale }: ConfigurationProps): string {
   if (external) return fit(textOf(locale, `外控模型 ${model}`, `External model ${model}`), columns);
   const approval = policy === 'never' ? textOf(locale, '旧 never，需迁移', 'legacy never; migrate')
     : policy === 'none' ? textOf(locale, '不受审批', 'none')
@@ -47,7 +58,8 @@ export function configurationText({ model, mode, policy, external = false, colum
   const modeText = textOf(locale, `工具模式 ${mode}`, `Tools ${mode}`);
   const modelText = columns >= 60 ? textOf(locale, `模型 ${model}`, `Model ${model}`) : model;
   const modelKey = columns >= 72 ? ` ${keyHint('model-picker')}` : '';
-  let parts = [modelText + modelKey, modeText, policyText];
+  const effortText = thinkingText(thinking, locale);
+  let parts = [modelText + modelKey, ...(effortText === '' ? [] : [effortText]), modeText, policyText];
   if (displayWidth(parts.join('  ·  ')) > columns) {
     const remaining = Math.max(0, columns - displayWidth(policyText) - 10);
     const compactMode = fit(mode, Math.min(24, Math.floor(remaining / 2)));
