@@ -8,6 +8,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+- 终端常驻区只保留模型、思考档（模型声明可用时）、工具模式、权限、审批与会话阶段；预算、计数和完整标识符在 `/status` 查看。
+
 - `run.wait` 必须明确指定 `origin`，但该字段不授予权限。可信本地 UI 可读取本 Session 的所有回执；经过认证的 Agent Control 桥接受限于 human 与当前 Grant scope；其他 Host 只能读取自己的 controller scope。Host 按持久 Run 归属与调用方上下文授权。跨 scope 的 `requestKey` 多重匹配返回 `run_request_key_ambiguous`，应使用 `runId`。
 - POSIX MCP Server 使用独立进程组；撤销、取消或 Host 关闭时有界地发送终止信号并清理仍存活的所属子进程，失败保留为可重试错误。主动通过 `setpgid` 移入其他进程组或通过 `setsid` 创建新会话的后代不在原进程组边界内。
 - `delete` 只使用操作系统回收站；系统后端报错后会复核原目标对象身份及顶层元数据，仍匹配时返回后端错误；不核对文件正文或递归目录内容，无法确认时返回 `delete_outcome_unknown`。Linux 通过 GIO 调用系统回收站。历史 `.ligule-trash` 不迁移或清理，Shell 删除继续使用自己的 Policy 与审批链。
@@ -41,6 +43,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - 委派运行支持整个任务和单次模型请求的期限、父子共享模型调用次数上限；失败结果保留已确认的用量与部分正文。`full` 新增 `present`，记录工作区文件交付时的类型、大小和 SHA-256。图片按 Session 引用保留，过期且未引用的图片可有界清理。
 
 ### English
+
+- The terminal status area keeps only the model, thinking effort (when the model declares one), tool mode, permission, approvals, and the session phase; budgets, counters, and full identifiers live in `/status`.
 
 - `run.wait` requires an explicit `origin`, but that field does not grant access. A trusted local UI can read all Receipts in its Session; an authenticated Agent Control bridge is limited to human and its active Grant scopes; other Hosts can read only their controller scope. The Host authorizes access from the persisted Run owner and caller context. An ambiguous `requestKey` across visible scopes returns `run_request_key_ambiguous`; use `runId` to select one.
 - POSIX MCP servers use dedicated process groups. Revoke, cancellation, and Host shutdown send bounded termination signals and clean up surviving owned descendants; failures remain retryable. Descendants that move to another group with `setpgid` or start a new session with `setsid` are outside the original process-group boundary.
