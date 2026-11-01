@@ -10,13 +10,14 @@ import { useSessionPermission } from '../../use-session-permission';
 import { networkLabel, profileLabel } from '../../permission-labels';
 import type { PermissionNetwork, PermissionProfile } from '../../status';
 
-export function SecuritySettings({ client, projectRoot, sessionId, status, onStatus, onEdit }: {
+export function SecuritySettings({ client, projectRoot, sessionId, status, onStatus, onEdit, onRulesEdit }: {
   client: Client;
   projectRoot: string;
   sessionId: string | null;
   status: Status | null;
   onStatus: (status: Status) => void;
   onEdit: (reason: string) => void;
+  onRulesEdit: (reason: string) => void;
 }) {
   const t = useText();
   const [catalog, setCatalog] = useState<SettingsCatalog | null>(null);
@@ -70,6 +71,16 @@ export function SecuritySettings({ client, projectRoot, sessionId, status, onSta
     onInitialChange: () => undefined,
     onStatus,
   });
+
+  const editReason = editor.busy || busy
+    ? t('权限与安全设置正在保存。', 'Permission and security settings are being saved.')
+    : editor.hasChanges
+      ? t('本会话权限更改尚未应用。', 'Session permission changes have not been applied.')
+      : '';
+  useEffect(() => {
+    onEdit(editReason);
+    return () => onEdit('');
+  }, [editReason, onEdit]);
 
   return <div className="security-settings">
     {failure !== '' && <p className="session-note" data-tone="bad">{t('读取或更新安全状态失败。', 'Could not read or update security settings.')} <code>{failure}</code></p>}
@@ -132,7 +143,7 @@ export function SecuritySettings({ client, projectRoot, sessionId, status, onSta
       <Row label={t('自定义规则', 'Custom rules')}>
         <details className="catalog-fold">
           <summary>{t('查看与编辑审批规则', 'View and edit approval rules')}</summary>
-        <PolicyRules client={client} projectRoot={projectRoot} onEdit={onEdit} />
+        <PolicyRules client={client} projectRoot={projectRoot} onEdit={onRulesEdit} />
         </details>
       </Row>
     </Group>

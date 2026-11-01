@@ -1,5 +1,6 @@
 import { Fold } from './Fold';
 import { useText } from '../locale';
+import { callRowFoldLabel } from '../rows';
 import type { RowProps } from './types';
 
 // 调用卡片摘要只显示能力名称和操作对象；完整参数可展开查看。
@@ -24,6 +25,6 @@ export function CallRow({ row, verbosity }: RowProps) {
       {row.summary !== undefined && row.summary !== '' && <span className="row-target-inline">{row.summary}</span>}
     </div>
     {/* 只有路径这类单键参数不值得单独展开：目标已经在标题行，正文只放真正有用的参数。 */}
-    {!pathOnly && <Fold text={row.text} verbosity={verbosity} always label={row.text.trim().startsWith('{') ? '看参数' : '看全文'} />}
+    {!pathOnly && <Fold text={row.text} verbosity={verbosity} always label={callRowFoldLabel(row.text, t)} />}
   </article>;
 }

@@ -3,6 +3,7 @@
 export type ReopenOutcome =
   | { readonly kind: 'opened' }
   | { readonly kind: 'locked'; readonly waitedMs: number }
+  | { readonly kind: 'cancelled' }
   | { readonly kind: 'failed'; readonly code: string };
 
 export type ReopenOptions = {
@@ -13,6 +14,7 @@ export type ReopenOptions = {
   readonly sleep: (ms: number) => Promise<void>;
   readonly budgetMs: number;
   readonly retryMs?: number;
+  readonly isCurrent?: () => boolean;
 };
 
 // 锁的租约只有十秒量级，重试间隔取半秒即可覆盖；预算耗尽时把结果交给调用方决定怎么提示。
@@ -20,10 +22,13 @@ export async function reopenSessionWriter(options: ReopenOptions): Promise<Reope
   const retryMs = options.retryMs ?? 500;
   const start = options.now();
   for (;;) {
+    if (options.isCurrent !== undefined && !options.isCurrent()) return { kind: 'cancelled' };
     try {
       await options.open();
+      if (options.isCurrent !== undefined && !options.isCurrent()) return { kind: 'cancelled' };
       return { kind: 'opened' };
     } catch (error) {
+      if (options.isCurrent !== undefined && !options.isCurrent()) return { kind: 'cancelled' };
       const failure = options.code(error);
       if (!options.isLocked(failure)) return { kind: 'failed', code: failure };
       if (options.now() - start >= options.budgetMs) return { kind: 'locked', waitedMs: options.now() - start };

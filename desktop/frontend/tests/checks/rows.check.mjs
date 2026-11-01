@@ -1,6 +1,6 @@
 // 检查 Host 事件如何转换为桌面端转录行和状态提示。
 import assert from 'node:assert/strict';
-import { capabilityOf, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn } from '../../src/rows.ts';
+import { capabilityOf, callRowFoldLabel, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn } from '../../src/rows.ts';
 
 const call = projectRecord({
   kind: 'assistant',
@@ -10,6 +10,8 @@ const call = projectRecord({
 assert.equal(call.tool, 'mcp:demo/lookup');
 assert.equal(call.summary, '{"input":{"key":"x"}}');
 assert.match(call.text, /"server": "demo"/);
+assert.equal(callRowFoldLabel(call.text, (_chinese, english) => english), 'View arguments');
+assert.equal(callRowFoldLabel(call.text, (chinese) => chinese), '看参数');
 
 const questionCall = projectRecord({
   kind: 'assistant',

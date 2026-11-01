@@ -77,3 +77,37 @@ test('reopening stops on an error that is not a lock', async () => {
   assert.deepEqual(outcome, { kind: 'failed', code: 'session_missing' });
   assert.equal(attempts, 1);
 });
+
+test('reopening stops retrying after the user switches sessions', async () => {
+  let current = true;
+  let attempts = 0;
+  const outcome = await reopenSessionWriter({
+    open: async () => { attempts += 1; throw Object.assign(new Error('busy'), { code: 'session_locked' }); },
+    code,
+    isLocked: locked,
+    now: () => 0,
+    sleep: async () => { current = false; },
+    isCurrent: () => current,
+    budgetMs: 15_000,
+  });
+  assert.deepEqual(outcome, { kind: 'cancelled' });
+  assert.equal(attempts, 1, 'a stale reconnect must not open the old session again');
+});
+
+test('reopening does not continue with a stale session after an open resolves', async () => {
+  let resolveOpen!: () => void;
+  const opened = new Promise<void>((resolve) => { resolveOpen = resolve; });
+  let current = true;
+  const pending = reopenSessionWriter({
+    open: async () => opened,
+    code,
+    isLocked: locked,
+    now: () => 0,
+    sleep: async () => undefined,
+    isCurrent: () => current,
+    budgetMs: 15_000,
+  });
+  current = false;
+  resolveOpen();
+  assert.deepEqual(await pending, { kind: 'cancelled' });
+});

@@ -60,6 +60,7 @@ export function SettingsDialog(props: SettingsProps) {
   const reports = useMemo(() => ({
     model: (reason: string) => setGate((now) => report(now, 'model', reason)),
     rules: (reason: string) => setGate((now) => report(now, 'rules', reason)),
+    permissions: (reason: string) => setGate((now) => report(now, 'permissions', reason)),
     control: (reason: string) => setGate((now) => report(now, 'control', reason)),
   }), []);
 
@@ -92,7 +93,7 @@ export function SettingsDialog(props: SettingsProps) {
           <AppearanceSettings settings={settings} patch={patch} />
         </>}
         {section === 'model' && <Model client={props.client} sessionId={props.sessionId} projectRoot={props.projectRoot} onEdit={reports.model} />}
-        {section === 'security' && <SecuritySettings client={props.client} projectRoot={props.projectRoot} sessionId={props.sessionId} status={props.status} onStatus={props.onStatus} onEdit={reports.rules} />}
+        {section === 'security' && <SecuritySettings client={props.client} projectRoot={props.projectRoot} sessionId={props.sessionId} status={props.status} onStatus={props.onStatus} onEdit={reports.permissions} onRulesEdit={reports.rules} />}
         {section === 'tools' && <ToolsSettings client={props.client} projectRoot={props.projectRoot} sessionId={props.sessionId} />}
         {section === 'control' && <AgentControlPanel client={props.client} projectRoot={props.projectRoot} onEdit={reports.control} />}
         {section === 'notifications' && <NotificationPanel preferences={settings.notifications} bridge={props.notifications} problem={props.notificationProblem} onChange={notifications => patch({ notifications })} />}

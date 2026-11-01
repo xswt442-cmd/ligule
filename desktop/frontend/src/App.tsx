@@ -811,7 +811,7 @@ export function App({ transport }: { transport: Transport }) {
         hasMore = older.hasMore;
       }
       if (openRequest.current !== request) return;
-      setWriterLockNoticeSessionId(writerLockHeld ? id : null);
+      setWriterLockNoticeSessionId(writerLockHeld && reclaimQueue ? id : null);
       // 将后台会话中已关闭问题卡片的题目和答案写入该会话记录。
       const kept = pendingEchoes.current.get(id) ?? [];
       pendingEchoes.current.delete(id);
@@ -1015,6 +1015,7 @@ export function App({ transport }: { transport: Transport }) {
       prefsSettled.current = refreshedPreferences;
       await refreshedPreferences;
       if (sessionId !== null) {
+        if (active.current !== sessionId) return;
         // Host 被强制结束后，记录锁可能要等租约过期；重试预算比租约略长，仍拿不到就明确提示。
         await reopenSessionWriter({
           open: () => client.call('session.open', projectRoot === '' ? { sessionId } : { sessionId, projectRoot }, 60_000).then(() => undefined),
@@ -1023,7 +1024,9 @@ export function App({ transport }: { transport: Transport }) {
           now: () => Date.now(),
           sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
           budgetMs: 15_000,
+          isCurrent: () => active.current === sessionId,
         });
+        if (active.current !== sessionId) return;
         await openSession(sessionId, undefined, true);
       } else {
         try {
@@ -1853,7 +1856,7 @@ export function App({ transport }: { transport: Transport }) {
       keyNotice={keyNotice}
       link={link}
       logs={diagnosticLogs}
-      onStatus={setStatus}
+      onStatus={(next) => { if (active.current === next.sessionId) { setStatus(next); setTaskSnapshotAt(Date.now()); } }}
       counts={panelProps.counts}
       waiting={panelProps.waiting}
       onReconnect={() => void reconnect()}

@@ -29,6 +29,9 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
   const [note, setNote] = useState<{ text: string; code?: string; bad: boolean } | null>(null);
   const [confirmingRevoke, setConfirmingRevoke] = useState<Grant | null>(null);
   const [copied, setCopied] = useState('');
+  const [policyDetailsOpen, setPolicyDetailsOpen] = useState(false);
+  const [screenCaptureDetailsOpen, setScreenCaptureDetailsOpen] = useState(false);
+  const [mcpDetailsOpen, setMcpDetailsOpen] = useState(false);
   const [workspaceRoster, setWorkspaceRoster] = useState<WorkspaceRoster>({ default: null, workspaces: [] });
   const [selectedProject, setSelectedProject] = useState(projectRoot.trim());
   const [selectedGrantId, setSelectedGrantId] = useState('');
@@ -51,6 +54,12 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
   useEffect(() => {
     setSelectedProject((current) => current === '' ? projectRoot.trim() : current);
   }, [projectRoot]);
+
+  const resetAdvancedDetails = () => {
+    setPolicyDetailsOpen(false);
+    setScreenCaptureDetailsOpen(false);
+    setMcpDetailsOpen(false);
+  };
 
   const load = useCallback(async (keepNote = false) => {
     try {
@@ -135,6 +144,7 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
       setDraft(emptyGrantDraft());
       setDirty(false);
       setGrantStep(0);
+      resetAdvancedDetails();
       setNote({ text: t('授权已保存。请将授权 ID 放入本地 MCP 配置。', 'Grant saved. Use its ID in your local MCP configuration.'), bad: false });
     } catch (error) {
       setNote({ text: t('授权保存失败。', 'Could not save the grant.'), code: code(error), bad: true });
@@ -189,10 +199,14 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
   }, [projectRoot, project, workspaceRoster]);
   const applyPreset = (id: GrantPresetId) => {
     const preset = grantPreset(id);
-    setDraft((current) => ({
-      ...applyGrantPreset(current, id),
-      name: current.name.trim() === '' ? t(preset.name.zh, preset.name.en) : current.name,
-    }));
+    const nextDraft = {
+      ...applyGrantPreset(draft, id),
+      name: draft.name.trim() === '' ? t(preset.name.zh, preset.name.en) : draft.name,
+    };
+    setDraft(nextDraft);
+    setPolicyDetailsOpen(nextDraft.allowOperator || nextDraft.defaultPolicy !== 'ask' || nextDraft.allowedPolicies.length > 1);
+    setScreenCaptureDetailsOpen(nextDraft.allowScreenCapture);
+    setMcpDetailsOpen(nextDraft.allowedMcpServers.length > 0 || nextDraft.allowedMcpTools.length > 0);
     setDirty(true);
     setGrantStep(1);
     setNote(null);
@@ -201,6 +215,7 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
     setDraft(emptyGrantDraft());
     setDirty(false);
     setGrantStep(0);
+    resetAdvancedDetails();
     setNote(null);
   };
 
@@ -344,7 +359,8 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
           </label>}
         </section>
 
-        <details className="grant-config-card grant-advanced" open={draft.allowOperator || draft.defaultPolicy !== 'ask' || draft.allowedPolicies.length > 1}>
+        <details className="grant-config-card grant-advanced" open={policyDetailsOpen || policyMissing}
+          onToggle={(event) => setPolicyDetailsOpen(event.currentTarget.open)}>
           <summary>{t('高级：审批方式与 Operator', 'Advanced: approval and operator')}</summary>
           <h4>{t('审批方式', 'Approval behavior')}</h4>
           <label className="grant-field">
@@ -371,7 +387,8 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
           </label>
         </details>
 
-        <details className="grant-config-card grant-advanced" open={draft.allowScreenCapture}>
+        <details className="grant-config-card grant-advanced" open={screenCaptureDetailsOpen}
+          onToggle={(event) => setScreenCaptureDetailsOpen(event.currentTarget.open)}>
           <summary>{t('高级：屏幕观察（Windows）', 'Advanced: screen capture (Windows)')}</summary>
           <label className="grant-confirmation">
             <input type="checkbox" checked={draft.allowScreenCapture} onChange={event => {
@@ -386,7 +403,8 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
           </label>}
         </details>
 
-        <details className="grant-config-card grant-advanced grant-mcp-limits" open={draft.allowedMcpServers.length > 0 || draft.allowedMcpTools.length > 0}>
+        <details className="grant-config-card grant-advanced grant-mcp-limits" open={mcpDetailsOpen || mcpLimitInvalid}
+          onToggle={(event) => setMcpDetailsOpen(event.currentTarget.open)}>
           <summary>{t('高级：MCP Server 与工具', 'Advanced: MCP servers and tools')}</summary>
           <h4>{t('MCP Server 与工具', 'MCP servers and tools')}</h4>
           <p className="session-note">{t('此授权只能使用已在 MCP 信任设置中批准的 Server。先选允许启动的 Server，再加载工具清单并逐项选择。未选工具时，外部 Agent 不能调用该 Server 的工具。', 'This grant can use only servers approved in MCP trust settings. Select servers it may start, load their tool lists, then choose tools individually. Tools not selected here cannot be called by the external agent.')}</p>

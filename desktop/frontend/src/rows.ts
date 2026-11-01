@@ -82,6 +82,10 @@ export const shownIn = (verbosity: string, row: Row): boolean =>
   !(verbosity === 'brief' && (row.kind === 'reasoning' || row.kind === 'call' || row.kind === 'result' || row.kind === 'context'))
   && !(verbosity === 'standard' && (row.kind === 'reasoning' || row.kind === 'context'));
 
+export function callRowFoldLabel(text: string, t: (chinese: string, english: string) => string): string {
+  return text.trim().startsWith('{') ? t('看参数', 'View arguments') : t('看全文', 'Show more');
+}
+
 export type Row = {
   id: number;
   kind: 'question' | 'answer' | 'reasoning' | 'call' | 'result' | 'refusal' | 'failure' | 'round' | 'context' | 'meta' | 'error';
