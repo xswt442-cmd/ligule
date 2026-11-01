@@ -1,17 +1,5 @@
 import type { Locale } from '@ligule/core/kernel/locale.js';
-import type { ProviderDiagnostic, ProviderDiagnosticCategory } from '@ligule/core/kernel/error.js';
-
-const DIAGNOSTIC_CATEGORIES: Readonly<Record<ProviderDiagnosticCategory, readonly [string, string]>> = {
-  authentication: ['身份认证', 'authentication'],
-  rate_limit: ['请求限流', 'rate limit'],
-  client: ['客户端请求', 'client request'],
-  server: ['服务端故障', 'server failure'],
-  http: ['HTTP 响应', 'HTTP response'],
-  transport: ['传输故障', 'transport failure'],
-  stream: ['响应流中断', 'response stream interrupted'],
-  invalid_response: ['响应格式无效', 'invalid response'],
-  cancelled: ['请求已取消', 'request cancelled'],
-};
+import { parseProviderDiagnostic, providerDiagnosticText as providerDiagnosticTextPair } from '@ligule/core/kernel/error.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -19,22 +7,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function providerDiagnosticText(value: unknown, locale: Locale = 'zh'): string | undefined {
   if (!isRecord(value)) return undefined;
-  const categories = Object.keys(DIAGNOSTIC_CATEGORIES);
-  if (typeof value.category !== 'string' || !categories.includes(value.category)
-    || !Number.isSafeInteger(value.attempts) || (value.attempts as number) < 1
-    || typeof value.responseReceived !== 'boolean' || typeof value.streamReceived !== 'boolean'
-    || typeof value.recoverable !== 'boolean'
-    || (value.status !== undefined && (!Number.isSafeInteger(value.status) || (value.status as number) < 100 || (value.status as number) > 599))) {
-    return undefined;
-  }
-  const diagnostic = value as unknown as ProviderDiagnostic;
-  const category = DIAGNOSTIC_CATEGORIES[diagnostic.category][locale === 'zh' ? 0 : 1];
-  const status = diagnostic.status === undefined ? (locale === 'zh' ? 'HTTP 状态未知' : 'HTTP status unknown') : `HTTP ${diagnostic.status}`;
-  const attempts = locale === 'zh' ? `尝试 ${diagnostic.attempts} 次` : `${diagnostic.attempts} attempts`;
-  const response = diagnostic.responseReceived ? (locale === 'zh' ? '收到响应' : 'response received') : (locale === 'zh' ? '未收到响应' : 'no response');
-  const stream = diagnostic.streamReceived ? (locale === 'zh' ? '收到响应流' : 'stream data received') : (locale === 'zh' ? '未收到响应流' : 'no stream data');
-  const recovery = diagnostic.recoverable ? (locale === 'zh' ? '可恢复' : 'recoverable') : (locale === 'zh' ? '不可安全重试' : 'not safe to retry');
-  return `${status} · ${category} · ${attempts} · ${response} · ${stream} · ${recovery}`;
+  const diagnostic = parseProviderDiagnostic(value);
+  if (diagnostic === undefined) return undefined;
+  return providerDiagnosticTextPair(diagnostic)[locale === 'zh' ? 'zh' : 'en'];
 }
 
 const FAILURE_TEXT: Readonly<Record<string, Readonly<Record<Locale, string>>>> = {
