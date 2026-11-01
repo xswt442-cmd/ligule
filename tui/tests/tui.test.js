@@ -1592,3 +1592,37 @@ test('/think explains when the selected model declares no thinking levels', opti
     instance.unmount();
   }
 }));
+
+test('a narrow terminal keeps a pending approval operable when the settings line is already covered', options, async (t) => {
+  const permission = await measuredPermissionContext('full-access', 'unrestricted');
+  if (permission.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');
+  await withTuiHost(async ({ client, sessionId }) => {
+    const { createElement } = await import('react');
+    const { render } = await import('ink');
+    const { PassThrough } = await import('node:stream');
+    const { App } = await import('../dist/tui/app.js');
+
+    const stdout = new PassThrough();
+    // 80x12 比 80x24 更紧：设置行与欢迎区都放不下，审批卡必须自己撑住可用性。
+    stdout.columns = 80;
+    stdout.rows = 12;
+    stdout.isTTY = true;
+    let painted = '';
+    stdout.on('data', (chunk) => { painted += chunk; });
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+    const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+    let decision;
+    try {
+      const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'git --version' } }) });
+      await waitFor(() => /允许执行 exec？/.test(painted), { read: () => painted });
+      stdin.write('1');
+      decision = await run;
+    } finally {
+      instance.unmount();
+    }
+    assert.match(painted, /允许执行 exec？/);
+    assert.match(painted, /git --version/);
+    // 允许一次后命令应真的执行：decision.text 是工具结果，而不是取消标记。
+    assert.match(decision.text, /git version/);
+  }, { permission });
+});
