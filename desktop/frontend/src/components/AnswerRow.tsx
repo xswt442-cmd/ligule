@@ -16,7 +16,7 @@ export function AnswerRow({ row }: RowProps) {
   };
   return <article className="row answer" data-kind="answer">
     <div className="row-body"><Markdown text={row.text} /></div>
-    <div className="inline-field">
+    <div className="row-actions">
       <button type="button" className="mini chip" onClick={() => void copy()}>
         {copyState === 'failed' ? t('重试复制', 'Retry copy') : t('复制回答', 'Copy answer')}
       </button>
