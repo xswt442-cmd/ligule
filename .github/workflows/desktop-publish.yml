@@ -115,6 +115,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          package-manager-cache: false
           # 不在此类发布工作流里缓存依赖：它们检出并构建待发布的提交，
           # 写入的缓存会进入 `main` 的缓存作用域，非特权提交就有机会污染后续发布（CodeQL cache poisoning）。
 
