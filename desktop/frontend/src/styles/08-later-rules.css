@@ -246,6 +246,40 @@ button.pill:hover {
   line-height: 1.5;
 }
 
+.mode-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mode-choice {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  text-align: start;
+  cursor: pointer;
+}
+
+.mode-choice:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
+
+.mode-choice[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--fg);
+}
+
+.mode-choice-name { min-inline-size: 5.5rem; }
+
+.mode-choice-note {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
 /* 会话面板分为模式和审批策略两个分区。 */
 .sm-group {
   display: flex;

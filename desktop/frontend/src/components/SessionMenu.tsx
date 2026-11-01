@@ -10,6 +10,11 @@ const MODE_LAYERS: Record<string, [string, string]> = {
   user: ['用户', 'user'],
   project: ['项目', 'project'],
 };
+// 快捷菜单只放“一句话区别”，完整工具目录在设置里看。
+const MODE_NOTES: Record<string, [string, string]> = {
+  minimal: ['随包必备工具：读写文件、查目录、跑命令。', 'The bundled essentials: read, write, list, and run commands.'],
+  full: ['随包全部工具，包含检索、网络与更多执行能力。', 'Every bundled tool, including search, network, and more.'],
+};
 
 export function SessionMenu({ status, selectedMode, onSetMode }: {
   status: Status | null;
@@ -31,6 +36,7 @@ export function SessionMenu({ status, selectedMode, onSetMode }: {
     setDraft('');
   };
   const knownModes = [...new Set(['minimal', 'full', status?.mode, status?.pendingMode, selectedMode].filter((name): name is string => typeof name === 'string' && name !== ''))];
+  const activeMode = status === null ? selectedMode : status.mode;
   return <Popover.Portal>
     <Popover.Content className="session-menu" side="top" align="start" sideOffset={8}
       aria-label={t('工具模式', 'Tool mode')} aria-describedby={undefined} onEscapeKeyDown={keepEscape}
@@ -52,8 +58,20 @@ export function SessionMenu({ status, selectedMode, onSetMode }: {
           <span className="sm-label">{t('下一轮生效', 'Pending')}</span>
           <span className="sm-value mono">{status.pendingMode}</span>
         </div>}
+        <div className="mode-list" role="group" aria-label={t('常用模式', 'Common modes')}>
+          {knownModes.map((name) => <button
+            key={name}
+            type="button"
+            className="mode-choice"
+            aria-pressed={activeMode === name}
+            onClick={() => { onSetMode(name); setDraft(''); setModeError(false); }}
+          >
+            <span className="mode-choice-name mono">{name}</span>
+            <span className="mode-choice-note">{MODE_NOTES[name] === undefined ? t('自定义模式', 'Custom mode') : t(...MODE_NOTES[name])}</span>
+          </button>)}
+        </div>
         <div className="sm-row">
-          <label className="sm-label" htmlFor="session-mode">{t('切换模式', 'Change mode')}</label>
+          <label className="sm-label" htmlFor="session-mode">{t('其他模式', 'Other mode')}</label>
           <span className="inline-field">
             <input id="session-mode" list="session-mode-options" value={draft} placeholder={t('输入模式名', 'Enter a mode name')} aria-label={t('模式名', 'Mode name')} onChange={(event) => { setDraft(event.target.value); setModeError(false); }} onKeyDown={(event) => {
               if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || event.key !== 'Enter') return;

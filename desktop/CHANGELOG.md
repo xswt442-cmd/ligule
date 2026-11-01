@@ -11,6 +11,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - 桌面输入区把模型、工具模式、权限、审批固定在同一顺序；截图授权收为右侧次级图标按钮，状态保留在按钮与授权确认中。
 - 权限弹窗只保留当前会话的权限档与必要确认；网络访问、隔离细节与项目信任集中到「设置 → 权限与安全」。工具目录改为一行一个工具并折叠详情；模型服务列表只显示模型数量与首个模型；外控面板的会话配置折叠进详情。
 - 消息区的工具调用只显示一次工具名，不再逐行重复「完成」。
+- 工具模式菜单直接列出 minimal / full 的一句话区别并可点选，自定义模式移到「其他模式」；会话搜索结果先显示会话名，再用浅色标注命中位置；折叠区恢复 ▸ / ▾ 标记。
+- 失败行先用一句话说明发生了什么和下一步，原始错误码与英文正文收进「原始信息」。
 
 - `run.wait` 必须明确指定 `origin`，但该字段不授予权限。可信本地 UI 可读取本 Session 的所有回执；经过认证的 Agent Control 桥接受限于 human 与当前 Grant scope；其他 Host 只能读取自己的 controller scope。Host 按持久 Run 归属与调用方上下文授权。跨 scope 的 `requestKey` 多重匹配返回 `run_request_key_ambiguous`，应使用 `runId`。
 - POSIX MCP Server 使用独立进程组；撤销、取消或 Host 关闭时有界地发送终止信号并清理仍存活的所属子进程，失败保留为可重试错误。主动通过 `setpgid` 移入其他进程组或通过 `setsid` 创建新会话的后代不在原进程组边界内。
