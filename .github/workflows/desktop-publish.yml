@@ -41,7 +41,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           package-manager-cache: false
@@ -112,7 +112,7 @@ jobs:
           version: 12.9.1
           run_install: false
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           package-manager-cache: false
@@ -202,7 +202,7 @@ jobs:
           ref: ${{ needs.preflight.outputs.commit }}
           persist-credentials: false
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           package-manager-cache: false
@@ -333,7 +333,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           package-manager-cache: false
