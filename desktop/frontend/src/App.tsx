@@ -228,7 +228,8 @@ export function App({ transport }: { transport: Transport }) {
   const [inputOwner, setInputOwner] = useState<string | null>(null);
   const [readOnlySessionId, setReadOnlySessionId] = useState<string | null>(null);
   const [writerLockNoticeSessionId, setWriterLockNoticeSessionId] = useState<string | null>(null);
-  const [externalWriterActive, setExternalWriterActive] = useState(false);
+  const [sessionWriterActive, setSessionWriterActive] = useState(false);
+  const [externalControlSessionId, setExternalControlSessionId] = useState<string | null>(null);
   const saveWarned = useRef(false);
   // Host 重连期间暂停发送队列，也不触发轮次结束后的自动发送。
   const reconnecting = useRef(false);
@@ -339,6 +340,10 @@ export function App({ transport }: { transport: Transport }) {
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   // 当前前台会话 ID，与会话打开状态同步更新；后台会话的响应不得覆盖前台状态。
   const active = useRef<string | null>(null);
+  const updateExternalControlAvailability = useCallback((owner: string, available: boolean) => {
+    if (active.current !== owner) return;
+    setExternalControlSessionId(available ? owner : null);
+  }, []);
   // 阅读位置在底部时自动跟随新内容；用户向上滚动后暂停跟随，并显示返回最新内容的按钮。
   const list = useRef<VirtuosoHandle | null>(null);
   const [pinned, setPinned] = useState(true);
@@ -427,9 +432,10 @@ export function App({ transport }: { transport: Transport }) {
   // Host 进程的启动和重启由 Electron 壳负责。
   const beat = useCallback(async (timeoutMs = 5_000) => {
     if (sessionId === null) return;
-    if (readOnlySessionId === sessionId) { setLink(null); return; }
     try {
-      await client.call('status.get', { sessionId }, timeoutMs);
+      if (readOnlySessionId === sessionId) {
+        await client.call('session.observe', { projectRoot, sessionId, limit: 1 }, timeoutMs);
+      } else await client.call('status.get', { sessionId }, timeoutMs);
       connectionLost.current = false;
       setLink(null);
     } catch (error) {
@@ -437,7 +443,7 @@ export function App({ transport }: { transport: Transport }) {
       connectionLost.current = true;
       setLink(code(error));
     }
-  }, [client, notify, readOnlySessionId, sessionId]);
+  }, [client, notify, projectRoot, readOnlySessionId, sessionId]);
 
   useEffect(() => {
     const removeFault = transport.onFault?.((reason) => {
@@ -734,7 +740,8 @@ export function App({ transport }: { transport: Transport }) {
     setWanted(null);
     setInputOwner(null);
     setReadOnlySessionId(null);
-    setExternalWriterActive(false);
+    setSessionWriterActive(false);
+    setExternalControlSessionId(null);
     setStatus(null);
     dispatchAt.current.clear();
     setReading(true);
@@ -787,7 +794,7 @@ export function App({ transport }: { transport: Transport }) {
         patchQueue(id, () => ({ items: restored, paused: restored.length > 0 }));
       }
       setReadOnlySessionId(observing ? id : null);
-      setExternalWriterActive(observing && newest.writerActive === true);
+      setSessionWriterActive(observing && newest.writerActive === true);
       setInputOwner(observing ? null : id);
       setSettings((current) => ({ ...current, lastSession: { id, projectRoot: root } }));
       let events = newest.events;
@@ -812,6 +819,8 @@ export function App({ transport }: { transport: Transport }) {
         ...events.flatMap((record) => projectRecord(record)),
         ...kept.map((line) => metaRow('meta', line.zh, line.en)),
       ]);
+      connectionLost.current = false;
+      setLink(null);
       setPage({ before: Number(events[0]?.seq ?? 1), hasMore });
       // 如果保存的阅读位置仍在已加载页面中就恢复该位置；否则停在末尾，不改变展示档或自动加载更多页面。
       const back = savedAnchor !== undefined && savedAnchor > Number(events[0]?.seq) && savedAnchor < Number(events.at(-1)?.seq)
@@ -841,7 +850,8 @@ export function App({ transport }: { transport: Transport }) {
       limit: RENDER_WINDOW,
       isCurrent: () => openRequest.current === request && active.current === sessionId,
       onSnapshot: (snapshot) => {
-        setExternalWriterActive(snapshot.writerActive);
+        setSessionWriterActive(snapshot.writerActive);
+        if (!snapshot.writerActive) setExternalControlSessionId(null);
         setRows((current) => appendProjectedRecords(current, snapshot.events));
       },
     });
@@ -1681,15 +1691,17 @@ export function App({ transport }: { transport: Transport }) {
 
       {observingExternalSession && <div className="banner" role="status">
         <Icon name="warn" size={15} />
-        <span>{externalWriterActive
-          ? t('外控 Agent 正在运行。下方可以查看进度、补充消息、处理待决问题或接管会话。', 'An external agent is controlling this session. Use the panel below to follow progress, send guidance, answer requests, or take over.')
+        <span>{sessionWriterActive
+          ? externalControlSessionId === sessionId
+            ? t('外控 Agent 正在运行。下方可以查看进度、补充消息、处理待决问题或接管会话。', 'An external agent is controlling this session. Use the panel below to follow progress, send guidance, answer requests, or take over.')
+            : t('另一个 Host 正在写入此会话。当前为只读观察；锁释放后可重新打开会话。', 'Another Host is writing to this conversation. This view is read-only; reopen it after the lock clears.')
           : t('此会话当前没有活动写入者。刷新会话可重新打开并取得控制权。', 'This session has no active writer. Refresh to reopen it and take control.')}
           {writerLockNoticeSessionId === sessionId && <> {t(
             '先前的宿主仍持有会话写入锁；锁释放后重新打开会话即可恢复写入。',
             'The previous Host still holds the session writer lock. Reopen the conversation after it clears to regain write access.',
           )}</>}</span>
         <button type="button" onClick={() => { if (sessionId !== null) void openSession(sessionId, undefined, false, projectRoot); }}>
-          {externalWriterActive ? t('刷新观察', 'Refresh view') : t('重新打开', 'Reopen session')}
+          {sessionWriterActive ? t('刷新观察', 'Refresh view') : t('重新打开', 'Reopen session')}
         </button>
       </div>}
 
@@ -1739,12 +1751,13 @@ export function App({ transport }: { transport: Transport }) {
         onDetails={(ask) => void loadApprovalDetails(ask)}
       />}
 
-      {observingExternalSession && externalWriterActive && sessionId !== null && <ExternalSessionControlPanel
+      {observingExternalSession && sessionWriterActive && sessionId !== null && <ExternalSessionControlPanel
         key={sessionId}
         client={client}
         sessionId={sessionId}
         projectRoot={projectRoot}
         verbosity={verbosity}
+        onRuntimeAvailability={updateExternalControlAvailability}
         onDelta={acceptExternalDelta}
         onSessionEvent={settleExternalEvent}
         onTakeover={() => { void openSession(sessionId, undefined, false, projectRoot); }}
@@ -1764,7 +1777,7 @@ export function App({ transport }: { transport: Transport }) {
         <button type="button" className="icon-button" aria-label={t('关闭提示', 'Dismiss')} onClick={() => setNotificationProblem(null)}><Icon name="close" size={14} /></button>
       </div>}
 
-      {observingExternalSession && externalWriterActive && sessionId !== null
+      {observingExternalSession && sessionWriterActive && externalControlSessionId === sessionId && sessionId !== null
         ? <ExternalSessionComposer client={client} sessionId={sessionId} projectRoot={projectRoot} />
         : <Composer
         client={client}

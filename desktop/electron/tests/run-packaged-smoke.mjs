@@ -1474,7 +1474,7 @@ async function runChecks() {
       }))()`);
       try {
         await waitUntil(async () => (await observationReady()).statusBanners.some(text =>
-          /外控 Agent 正在运行|此会话当前没有活动写入者|An external agent is controlling this session|This session has no active writer/u.test(text)),
+          /外控 Agent 正在运行|另一个 Host 正在写入此会话|此会话当前没有活动写入者|An external agent is controlling this session|Another Host is writing to this conversation|This session has no active writer/u.test(text)),
         90_000, 'locked_session_observation_ready');
       } catch (error) {
         throw new Error(`locked_session_observation_state:${JSON.stringify(await observationReady())}`, { cause: error });
@@ -1486,22 +1486,43 @@ async function runChecks() {
         throw new Error(`packaged_host_did_not_report_session_lock:${appLockFailure instanceof Error ? appLockFailure.message : 'opened'}`);
       }
       const observed = await devTools.evaluate(`(() => {
+        const mainComposer = document.querySelector('footer.composer:not(.external-session-composer)');
+        const mainInput = mainComposer?.querySelector('textarea.composer-input');
+        const mainSend = mainComposer?.querySelector('button.send');
         return {
           title: document.querySelector('#session-title')?.textContent?.trim() ?? '',
-          mainComposerExists: document.querySelector('footer.composer:not(.external-session-composer) textarea.composer-input') !== null,
+          mainComposerExists: mainInput instanceof HTMLTextAreaElement,
+          mainComposerReadOnly: mainInput instanceof HTMLTextAreaElement && mainInput.readOnly,
+          mainSendDisabled: mainSend instanceof HTMLButtonElement && mainSend.disabled,
           externalComposerExists: document.querySelector('footer.external-session-composer textarea.composer-input') !== null,
+          externalControlPanelExists: document.querySelector('.external-control') !== null,
           statusBanners: [...document.querySelectorAll('.banner[role="status"]')].map(item => item.textContent?.trim() ?? ''),
         };
       })()`);
-      if (observed.title !== 'Packaged smoke record' || observed.mainComposerExists || !observed.externalComposerExists) {
-        throw new Error(`packaged_locked_session_not_read_only:${JSON.stringify(observed)}`);
+      const problems = [];
+      if (observed.title !== 'Packaged smoke record') problems.push('selected_session_changed');
+      if (!observed.mainComposerExists || !observed.mainComposerReadOnly || !observed.mainSendDisabled) {
+        problems.push('ordinary_session_composer_not_read_only');
+      }
+      if (observed.externalComposerExists || observed.externalControlPanelExists) problems.push('external_controls_shown_without_runtime');
+      if (!observed.statusBanners.some(text => /另一个 Host 正在写入此会话|Another Host is writing to this conversation/u.test(text))) {
+        problems.push('ordinary_host_misidentified_as_external_agent');
       }
       const lockNoticeVisible = observed.statusBanners.some(text =>
         /先前的宿主仍持有会话写入锁|previous Host still holds the session writer lock/u.test(text));
-      if (!lockNoticeVisible) {
-        throw new Error(`packaged_readonly_lock_notice_missing:${JSON.stringify(observed.statusBanners)}`);
-      }
-      return `Host PID ${oldPid} 已结束；外部 Host PID ${lockHolder.pid} 持有写入锁，Desktop 以只读方式打开并解释占用原因`;
+      if (!lockNoticeVisible) problems.push('readonly_lock_notice_missing');
+
+      const lockedAppHost = await hostProcessFor(applicationProcess.pid);
+      const lockedAppHostPid = Number(lockedAppHost.pid);
+      killHostImmediately(lockedAppHostPid);
+      await hostProcessGone(lockedAppHostPid);
+      await waitUntil(async () => await devTools.evaluate(`${reconnectSelector} !== null`), 10_000, 'readonly_host_disconnect_banner');
+      const persistenceDeadline = Date.now() + 7_000;
+      await waitUntil(async () => Date.now() >= persistenceDeadline, 8_000, 'readonly_disconnect_heartbeat_window');
+      const disconnectBannerRemains = await devTools.evaluate(`${reconnectSelector} !== null`);
+      if (disconnectBannerRemains !== true) problems.push('readonly_heartbeat_cleared_host_disconnect');
+      if (problems.length > 0) throw new Error(`packaged_locked_session_ui:${JSON.stringify({ problems, observed, disconnectBannerRemains })}`);
+      return `Host PID ${oldPid} 已结束；外部 Host PID ${lockHolder.pid} 仍持锁；Main Host 再次退出后断连横幅跨过心跳周期保留`;
     } finally {
       await lockHolder.close();
     }

@@ -103,11 +103,12 @@ function phaseLabel(snapshot: ControlSnapshot | null, t: (chinese: string, engli
   }
 }
 
-export function ExternalSessionControlPanel({ client, sessionId, projectRoot, verbosity, onDelta, onSessionEvent, onTakeover }: {
+export function ExternalSessionControlPanel({ client, sessionId, projectRoot, verbosity, onRuntimeAvailability, onDelta, onSessionEvent, onTakeover }: {
   client: Client;
   sessionId: string;
   projectRoot: string;
   verbosity: Verbosity;
+  onRuntimeAvailability: (sessionId: string, available: boolean) => void;
   onDelta: (kind: 'text' | 'reasoning', text: string) => void;
   onSessionEvent: (kind: string) => void;
   onTakeover: () => void;
@@ -161,10 +162,13 @@ export function ExternalSessionControlPanel({ client, sessionId, projectRoot, ve
         }
         cursor = Math.max(cursor, result.nextCursor);
         setSnapshot(result);
+        onRuntimeAvailability(sessionId, true);
         setNote((current) => current?.bad === true ? null : current);
         waitMs = result.state === 'running' ? 0 : 1_000;
       } catch (error) {
         if (!disposed) {
+          setSnapshot(null);
+          onRuntimeAvailability(sessionId, false);
           setNote({ text: t(`外控连接暂不可用：${code(error)}`, `External control is unavailable: ${code(error)}`), bad: true });
           waitMs = 1_000;
         }
@@ -175,7 +179,7 @@ export function ExternalSessionControlPanel({ client, sessionId, projectRoot, ve
     };
     void poll();
     return () => { disposed = true; if (timer !== undefined) clearTimeout(timer); };
-  }, [client, onDelta, onSessionEvent, projectRoot, sessionId, t]);
+  }, [client, onDelta, onRuntimeAvailability, onSessionEvent, projectRoot, sessionId, t]);
 
   async function act(request: Record<string, unknown>): Promise<unknown> {
     return await client.call('session.control', { projectRoot, sessionId, request }, 35_000);
@@ -227,6 +231,8 @@ export function ExternalSessionControlPanel({ client, sessionId, projectRoot, ve
   const pending = snapshot?.pendingInteractions ?? [];
   const project = projectRoot.split(/[\\/]/u).filter(Boolean).at(-1) ?? '';
   const phase = phaseLabel(snapshot, t);
+
+  if (snapshot === null) return null;
 
   return <section className="external-control" aria-label={t('外控会话控制', 'External session controls')}>
     <div className="external-control-head">
