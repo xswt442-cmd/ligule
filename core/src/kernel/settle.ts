@@ -11,7 +11,6 @@ export async function settleWithin(
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<boolean>((resolve) => {
     timer = setTimeout(() => { onTimeout?.(); resolve(false); }, graceMs);
-    timer.unref?.();
   });
   const settled = promise.then(() => true, () => true);
   try {
