@@ -28,6 +28,7 @@ import { displayWidth } from './commands.js';
 import { textOf as chooseText, type Locale } from '@ligule/core/kernel/locale.js';
 import { controlPresets } from '@ligule/core/host/control-presets.js';
 import type { TerminalAction } from './keymap.js';
+import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type ControlWizardValues } from './control-wizard.js';
 import type { SessionEvent, SessionHeader } from '@ligule/core/session/format.js';
 import type { SessionSummary } from '@ligule/core/session/list.js';
 import type { AskAnswer, AskQuestion } from '@ligule/core/tools/ask-user.js';
@@ -239,7 +240,6 @@ interface SearchState {
 type PickerKind = 'model' | 'thinking' | 'mode' | 'policy' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network' | 'permission-confirm-partial'
   | 'control' | 'control-action' | 'control-revoke-confirm';
 type PolicyValue = 'ask' | 'auto' | 'none' | 'never';
-type PolicySelection = 'ask' | 'auto' | 'none';
 type AgentGrant = {
   readonly id: string;
   readonly name: string;
@@ -260,23 +260,6 @@ type AgentGrant = {
   readonly revokedAt: string | null;
 };
 type AgentControlSnapshot = { readonly version: string; readonly grants: readonly AgentGrant[] };
-type ControlWizardValues = {
-  name?: string;
-  defaultPermissionProfile?: AgentGrant['defaultPermissionProfile'];
-  maxPermissionProfile?: AgentGrant['maxPermissionProfile'];
-  defaultNetwork?: AgentGrant['defaultNetwork'];
-  maxNetwork?: AgentGrant['maxNetwork'];
-  defaultPolicy?: PolicySelection;
-  allowedPolicies?: PolicySelection[];
-  allowOperator?: boolean;
-  allowedMcpServers?: string[];
-  allowedMcpTools?: string[];
-  expiresAt?: string | null;
-  confirmFullAccess?: boolean;
-  confirmUnrestrictedNetwork?: boolean;
-  confirmPartialWorkspaceWrite?: boolean;
-  confirmWorkspaceTrust?: boolean;
-};
 type McpTrustScope = 'session' | 'project' | 'user';
 type McpServerSummary = {
   readonly name: string;
@@ -296,29 +279,12 @@ type McpTrustPending = {
   readonly version: string;
   readonly identityDigest: string;
 };
-type ControlWizard = {
-  readonly step: number;
-  readonly values: ControlWizardValues;
-  readonly mcpServers: readonly string[];
-  readonly mcpTools: readonly string[];
-};
-
 function agentMcpConfig(grant: AgentGrant): string {
   const args = ['mcp-server', '--project', grant.projectRoot, '--grant', grant.id];
   if (grant.allowOperator) args.push('--operator');
   return JSON.stringify({ mcpServers: { ligule: { command: 'ligule', args } } }, null, 2);
 }
 
-function controlWizardNext(step: number, values: ControlWizardValues): number {
-  if (step === 10) return 11;
-  if (step === 11) return values.maxPermissionProfile !== 'read-only' ? 12
-    : values.maxNetwork === 'unrestricted' ? 14 : -1;
-  if (step === 12) return values.maxPermissionProfile === 'full-access' ? 13
-    : values.maxNetwork === 'unrestricted' ? 14 : -1;
-  if (step === 13) return values.maxNetwork === 'unrestricted' ? 14 : -1;
-  if (step === 14) return -1;
-  return step + 1;
-}
 interface RuntimeChoice extends PanelChoice {
   readonly selection?: ModelSelection;
 }
@@ -2812,161 +2778,68 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const advanceControlWizard = useCallback(async (raw: string) => {
     const wizard = controlWizard;
     if (wizard === null) return false;
-    const input = raw.trim();
-    if (input.toLowerCase() === 'cancel' || input.toLowerCase() === '/cancel') {
+    const outcome = parseControlWizardInput(wizard, raw, t);
+    if (outcome.kind === 'cancelled') {
       setControlWizard(null);
       resetDraft('');
       push({ kind: 'meta', text: t('已取消外控授权创建。', 'Agent Control grant creation cancelled.') });
       return true;
     }
-    const values: ControlWizardValues = { ...wizard.values };
-    const fail = (message: string) => push({ kind: 'error', text: message });
-    if (wizard.step === 0) {
-      if (input === '' || input.length > 80) { fail(t('名称须为 1 到 80 个字符。', 'Name must contain 1 to 80 characters.')); return true; }
-      values.name = input;
-    } else if (wizard.step === 1 || wizard.step === 2) {
-      if (!['read-only', 'workspace-write', 'full-access'].includes(input)) {
-        fail(t('请输入 read-only、workspace-write 或 full-access。', 'Enter read-only, workspace-write, or full-access.')); return true;
-      }
-      if (wizard.step === 1) values.defaultPermissionProfile = input as AgentGrant['defaultPermissionProfile'];
-      else {
-        const max = input as AgentGrant['maxPermissionProfile'];
-        const rank = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
-        if (values.defaultPermissionProfile !== undefined && rank[max] < rank[values.defaultPermissionProfile]) {
-          fail(t('权限上限不能低于默认权限。', 'The permission ceiling cannot be lower than its default.')); return true;
-        }
-        values.maxPermissionProfile = max;
-      }
-    } else if (wizard.step === 3 || wizard.step === 4) {
-      if (!['disabled', 'policy', 'unrestricted'].includes(input)) {
-        fail(t('请输入 disabled、policy 或 unrestricted。', 'Enter disabled, policy, or unrestricted.')); return true;
-      }
-      if (wizard.step === 3) values.defaultNetwork = input as AgentGrant['defaultNetwork'];
-      else {
-        const max = input as AgentGrant['maxNetwork'];
-        const rank = { disabled: 0, policy: 1, unrestricted: 2 };
-        if (values.defaultNetwork !== undefined && rank[max] < rank[values.defaultNetwork]) {
-          fail(t('网络上限不能低于默认网络范围。', 'The network ceiling cannot be lower than its default.')); return true;
-        }
-        values.maxNetwork = max;
-      }
-    } else if (wizard.step === 5) {
-      if (!['ask', 'auto', 'none'].includes(input)) { fail(t('请输入 ask、auto 或 none。', 'Enter ask, auto, or none.')); return true; }
-      values.defaultPolicy = input as PolicySelection;
-    } else if (wizard.step === 6) {
-      const allowed = input.split(',').map((part) => part.trim()).filter(Boolean);
-      if (allowed.length === 0 || allowed.some((part) => !['ask', 'auto', 'none'].includes(part))
-        || new Set(allowed).size !== allowed.length || !allowed.includes(values.defaultPolicy ?? 'ask')) {
-        fail(t('请输入不重复的 Policy 列表，例如 ask,none，并包含默认 Policy。', 'Enter distinct Policy modes such as ask,none, including the default.')); return true;
-      }
-      values.allowedPolicies = allowed as PolicySelection[];
-    } else if (wizard.step === 7) {
-      if (!['y', 'yes', 'n', 'no'].includes(input.toLowerCase())) { fail(t('请输入 yes 或 no。', 'Enter yes or no.')); return true; }
-      values.allowOperator = ['y', 'yes'].includes(input.toLowerCase());
-    } else if (wizard.step === 8) {
-      const allowed = input === '' || input.toLowerCase() === 'none' ? [] : input.split(',').map((part) => part.trim()).filter(Boolean);
-      if (new Set(allowed).size !== allowed.length || allowed.some((server) => !wizard.mcpServers.includes(server))) {
-        fail(t(`请输入已信任的 Server 名称列表：${wizard.mcpServers.join(', ') || 'none'}。`, `Enter a list of trusted server names: ${wizard.mcpServers.join(', ') || 'none'}.`)); return true;
-      }
-      values.allowedMcpServers = allowed;
+    if (outcome.kind === 'error') {
+      push({ kind: 'error', text: outcome.message });
+      return true;
+    }
+    if (outcome.kind === 'abort') {
+      setControlWizard(null);
+      resetDraft('');
+      push({ kind: 'error', text: outcome.message });
+      return true;
+    }
+    if (outcome.kind === 'step') {
+      resetDraft('');
+      setControlWizard(outcome.wizard);
+      return true;
+    }
+    if (outcome.kind === 'mcp-servers') {
+      const values = outcome.values;
+      const servers = values.allowedMcpServers ?? [];
+      resetDraft('');
       let tools: string[] = [];
-      if (allowed.length > 0) {
+      if (servers.length > 0) {
         try {
-          const listed = await Promise.all(allowed.map((server) => client.request('mcp.trust.tools', {
+          const listed = await Promise.all(servers.map((server) => client.request('mcp.trust.tools', {
             projectRoot: info.boundary ?? '', server,
           })));
-          tools = listed.flatMap((entry) => entry.tools.map((tool) => `mcp:${entry.server}/${tool.name}`));
+          tools = listed.flatMap((entry) => entry.tools.map((tool) => 'mcp:' + entry.server + '/' + tool.name));
         } catch (error) {
-          fail(t(`读取 MCP 工具失败：${errorCode(error) ?? 'mcp_tool_list_failed'}`, `Could not list MCP tools: ${errorCode(error) ?? 'mcp_tool_list_failed'}`)); return true;
+          push({ kind: 'error', text: t('读取 MCP 工具失败：' + (errorCode(error) ?? 'mcp_tool_list_failed'), 'Could not list MCP tools: ' + (errorCode(error) ?? 'mcp_tool_list_failed')) });
+          return true;
         }
       }
-      values.allowedMcpTools = [];
-      resetDraft('');
       setControlWizard({ step: 9, values, mcpServers: wizard.mcpServers, mcpTools: tools });
       push({ kind: 'meta', text: t(
-        `可授权的 MCP 工具：${tools.join(', ') || '无'}。输入完整能力名列表，或 none。`,
-        `MCP tools available to grant: ${tools.join(', ') || 'none'}. Enter exact capability names or none.`,
+        '可授权的 MCP 工具：' + (tools.join(', ') || '无') + '。输入完整能力名列表，或 none。',
+        'MCP tools available to grant: ' + (tools.join(', ') || 'none') + '. Enter exact capability names or none.',
       ) });
       return true;
-    } else if (wizard.step === 9) {
-      const allowed = input === '' || input.toLowerCase() === 'none' ? [] : input.split(',').map((part) => part.trim()).filter(Boolean);
-      if (new Set(allowed).size !== allowed.length || allowed.some((tool) => !wizard.mcpTools.includes(tool))) {
-        fail(t(`请输入可授权清单中的完整能力名：${wizard.mcpTools.join(', ') || 'none'}。`, `Enter exact capability names from the available list: ${wizard.mcpTools.join(', ') || 'none'}.`)); return true;
-      }
-      values.allowedMcpTools = allowed;
-    } else if (wizard.step === 10) {
-      if (input === '' || input.toLowerCase() === 'none') values.expiresAt = null;
-      else {
-        const expiry = input.length === 10 ? Date.parse(`${input}T23:59:59`) : Date.parse(input);
-        if (!Number.isFinite(expiry) || expiry <= Date.now()) { fail(t('请输入未来的日期/时间或 none。', 'Enter a future date/time or none.')); return true; }
-        values.expiresAt = new Date(expiry).toISOString();
-      }
-    } else if (wizard.step === 11) {
-      if (!['y', 'yes'].includes(input.toLowerCase())) {
-        setControlWizard(null); resetDraft('');
-        fail(t('未确认信任此项目，授权未创建。', 'Project trust was not confirmed; no grant was created.')); return true;
-      }
-      values.confirmWorkspaceTrust = true;
-    } else if (wizard.step === 12) {
-      if (!['y', 'yes'].includes(input.toLowerCase())) {
-        setControlWizard(null); resetDraft('');
-        fail(t('未确认工作区部分隔离限制，授权未创建。', 'Partial workspace-write limits were not confirmed; no grant was created.')); return true;
-      }
-      values.confirmPartialWorkspaceWrite = true;
-    } else if (wizard.step === 13) {
-      if (!['y', 'yes'].includes(input.toLowerCase())) {
-        setControlWizard(null); resetDraft('');
-        fail(t('未确认 full-access，授权未创建。', 'Full-access was not confirmed; no grant was created.')); return true;
-      }
-      values.confirmFullAccess = true;
-    } else if (wizard.step === 14) {
-      if (!['y', 'yes'].includes(input.toLowerCase())) {
-        setControlWizard(null); resetDraft('');
-        fail(t('未确认不受限网络，授权未创建。', 'Unrestricted network was not confirmed; no grant was created.')); return true;
-      }
-      values.confirmUnrestrictedNetwork = true;
     }
+    const values: ControlWizardValues = outcome.values;
     resetDraft('');
-    const next = controlWizardNext(wizard.step, values);
-    if (next >= 0) {
-      setControlWizard({ step: next, values, mcpServers: wizard.mcpServers, mcpTools: wizard.mcpTools });
-      return true;
-    }
     void (async () => {
       try {
         const projectRoot = info.boundary;
         if (projectRoot === undefined || projectRoot === '') throw new Error('workspace_required');
         const current = await client.request('agent-control.list', {}) as AgentControlSnapshot;
-        const created = await client.request('agent-control.create', {
-          version: current.version,
-          grantName: values.name!,
-          projectRoot,
-          defaultPermissionProfile: values.defaultPermissionProfile!,
-          maxPermissionProfile: values.maxPermissionProfile!,
-          defaultNetwork: values.defaultNetwork!,
-          maxNetwork: values.maxNetwork!,
-          defaultPolicy: values.defaultPolicy!,
-          allowedPolicyAsk: values.allowedPolicies!.includes('ask'),
-          allowedPolicyAuto: values.allowedPolicies!.includes('auto'),
-          allowedPolicyNone: values.allowedPolicies!.includes('none'),
-          allowOperator: values.allowOperator!,
-          allowedMcpServers: values.allowedMcpServers ?? [],
-          allowedMcpTools: values.allowedMcpTools ?? [],
-          confirmFullAccess: values.confirmFullAccess === true,
-          confirmUnrestrictedNetwork: values.confirmUnrestrictedNetwork === true,
-          confirmPartialWorkspaceWrite: values.confirmPartialWorkspaceWrite === true,
-          confirmWorkspaceTrust: values.confirmWorkspaceTrust === true,
-          expiresAt: values.expiresAt ?? '',
-        }) as AgentControlSnapshot;
+        const created = await client.request('agent-control.create', controlGrantRequest(values, projectRoot, current.version)) as AgentControlSnapshot;
         setControlSnapshot(created);
         const grant = created.grants.at(-1);
         setControlWizard(null);
         push({ kind: 'meta', text: grant === undefined
           ? t('外控授权已创建。', 'Agent Control grant created.')
-          : t(`外控授权 ${grant.name} 已创建：${grant.id} · /control copy ${grant.id.slice(0, 8)} 可复制 MCP 配置`, `Grant ${grant.name} created: ${grant.id} · use /control copy ${grant.id.slice(0, 8)} to copy the MCP config`) });
+          : t('外控授权 ' + grant.name + ' 已创建：' + grant.id + ' · /control copy ' + grant.id.slice(0, 8) + ' 可复制 MCP 配置', 'Grant ' + grant.name + ' created: ' + grant.id + ' · use /control copy ' + grant.id.slice(0, 8) + ' to copy the MCP config') });
       } catch (error) {
         setControlWizard(null);
-        push({ kind: 'error', text: t(`外控授权创建失败：${errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed'}`, `Could not create Agent Control grant: ${errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed'}`) });
+        push({ kind: 'error', text: t('外控授权创建失败：' + (errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed'), 'Could not create Agent Control grant: ' + (errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed')) });
       }
     })();
     return true;
