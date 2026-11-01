@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react';
-import { ArrowUp, Bell, Check, ChevronDown, ChevronRight, Clock, Copy, Download, Folder, FolderOpen, HelpCircle, List, MoreHorizontal, PanelLeft, Plus, RefreshCw, Search, Settings, Shield, Sparkles, Square, Trash2, TriangleAlert, X } from 'lucide-react';
+import { ArrowUp, Bell, Check, ChevronDown, ChevronRight, Clock, Copy, Download, Folder, FolderOpen, HelpCircle, List, Monitor, MoreHorizontal, PanelLeft, Plus, RefreshCw, Search, Settings, Shield, Sparkles, Square, Trash2, TriangleAlert, X } from 'lucide-react';
 
 // 统一使用 Lucide 图标，并在此处设置视图框、尺寸和描边。
 // 组件仅接受下方登记的图标名称，新增图标需先加入列表。
@@ -28,6 +28,7 @@ const SHAPES = {
   sidebar: PanelLeft,
   bell: Bell,
   shield: Shield,
+  screen: Monitor,
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof SHAPES;
