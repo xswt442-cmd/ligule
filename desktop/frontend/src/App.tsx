@@ -1410,7 +1410,6 @@ export function App({ transport }: { transport: Transport }) {
     // 答案回显只写入发起请求的会话转录。
     if (head.sessionId === sessionId) {
       // 先更新本地转录再发送答复，因为 Host 收到答复后可能立即返回工具结果。
-      setRows((current) => [...current, metaRow('meta', `${decision === 'allow' ? '已允许' : '已拒绝'} ${head.tool}${head.detail === '' ? '' : `：${head.detail.slice(0, 60)}`}`, `${decision === 'allow' ? 'Allowed' : 'Refused'} ${head.tool}${head.detail === '' ? '' : `: ${head.detail.slice(0, 60)}`}`)]);
     }
     client.reply(head.id, { decision, ...(rememberScope === undefined ? {} : { rememberScope }), ...(rememberTarget === undefined ? {} : { rememberTarget }) });
     // 答复后移走按钮焦点，避免下一次 Enter 重复提交。
@@ -1676,7 +1675,7 @@ export function App({ transport }: { transport: Transport }) {
         {collapsed && <button type="button" className="icon-button" aria-label={t('展开侧栏', 'Show sidebar')} onClick={() => patch({ collapsed: false })}><Icon name="sidebar" /></button>}
         <div className="title">
           <strong id="session-title">{sessionId === null ? t('新会话', 'New conversation') : sessionLabel.name || t('未命名会话', 'Untitled conversation')}</strong>
-          <span className="muted" id="session-note" title={projectRoot}>{projectRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? t('默认工作区', 'Default workspace')}</span>
+          <span className="muted title-workspace" id="session-note" title={projectRoot}>{projectRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? t('默认工作区', 'Default workspace')}</span>
         </div>
         {running && <span className="running-label" aria-live="polite" title={progressLabel}><span className="status-dot" /><span className="running-detail">{progressLabel}</span></span>}
         {status?.usage && <UsageMeter usage={status.usage} running={running} seconds={seconds} />}
