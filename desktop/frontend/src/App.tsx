@@ -1218,6 +1218,37 @@ export function App({ transport }: { transport: Transport }) {
     }
   }, [client, draft, inputOwner, newSessionMode, newSessionPermission, newSessionPermissionConfirmations, newSessionPolicy, openSession, projectRoot, reading, sessionId, settings.newSelections, settingsReady, submit, t]);
 
+  const steer = useCallback(async () => {
+    const own = sessionId;
+    const text = draft;
+    if (quitting.current || reading || own === null || readOnlySessionId === own || inputOwner !== own
+      || !runningIds.includes(own) || text.trim() === '') return;
+    const inView = () => active.current === own;
+    try {
+      const current = await client.call('status.get', { sessionId: own }, 10_000) as Status;
+      if (typeof current.activeRunId !== 'string' || current.activeRunId === '') {
+        throw Object.assign(new Error('run_not_running'), { code: 'run_not_running' });
+      }
+      const accepted = await client.call('run.steer', {
+        sessionId: own, runId: current.activeRunId, input: text,
+      }, 15_000) as { pendingCount: number; cancelledInteractions: number };
+      void client.call('history.append', { text }, 15_000).then(
+        (written) => setHistory((written as { entries: string[] }).entries),
+        () => setHistory((entries) => [text, ...entries.filter((item) => item !== text)]),
+      );
+      if (inView()) {
+        setDraft((currentDraft) => currentDraft === text ? '' : currentDraft);
+        setWalk(-1);
+        setRows((currentRows) => [...currentRows, metaRow('meta',
+          `输入已加入当前运行，待应用 ${accepted.pendingCount} 条${accepted.cancelledInteractions > 0 ? `；已取消 ${accepted.cancelledInteractions} 个等待答复` : ''}`,
+          `Input added to the active run; ${accepted.pendingCount} pending${accepted.cancelledInteractions > 0 ? `; cancelled ${accepted.cancelledInteractions} pending interactions` : ''}`)]);
+      }
+    } catch (error) {
+      if (inView()) setRows((currentRows) => [...currentRows,
+        metaRow('error', `当前运行未收到输入：${code(error)}`, `The active run did not receive the input: ${code(error)}`)]);
+    }
+  }, [client, draft, inputOwner, readOnlySessionId, reading, runningIds, sessionId]);
+
   // `own` 指定取消目标会话；默认取消当前前台会话。
   const cancel = useCallback(async (own = sessionId) => {
     if (own === null) return;
@@ -1865,6 +1896,7 @@ export function App({ transport }: { transport: Transport }) {
           && requestIsCurrent(renderedSessionRequest, active.current, openRequest.current)) { setStatus(next); setTaskSnapshotAt(Date.now()); } }}
         onStop={() => void cancel()}
         onSend={() => void send()}
+        onSteer={() => void steer()}
       />}
     </main>
 

@@ -67,6 +67,38 @@ test('slash discovery scrolls the whole command list and completes without sendi
   }));
 });
 
+test('the TUI steers the active Run through its Host id and reports acceptance', async () => {
+  let releaseFirstResponse!: () => void;
+  let reportFirstRequest!: () => void;
+  const firstResponse = new Promise<void>((resolve) => { releaseFirstResponse = resolve; });
+  const firstRequest = new Promise<void>((resolve) => { reportFirstRequest = resolve; });
+  let holdFirstResponse = true;
+
+  await withTuiHost(async (context) => withApp(context, async ({ frame, type, wait }) => {
+    await type('Start a route task.');
+    await firstRequest;
+    try {
+      await type('/steer Keep the public route unchanged.');
+      await wait(() => frame().includes('输入已加入当前运行'));
+      assert.ok(context.requests.some((request) => request.method === 'run.steer'), 'the command uses the shared Host protocol');
+    } finally { releaseFirstResponse(); }
+    await wait(() => context.providerRequests.length === 2);
+    assert.ok(context.providerRequests[1].messages.some((message) =>
+      message.role === 'user' && typeof message.content === 'string' && message.content.includes('Keep the public route unchanged.')));
+    const record = await context.client.request('session.read', { sessionId: context.sessionId }) as {
+      events: { kind?: string; state?: string }[];
+    };
+    assert.deepEqual(record.events.filter((event) => event.kind === 'runInput').map((event) => event.state), ['accepted', 'applied']);
+  }), {
+    beforeResponse: async () => {
+      if (!holdFirstResponse) return;
+      holdFirstResponse = false;
+      reportFirstRequest();
+      await firstResponse;
+    },
+  });
+});
+
 test('modal paste preserves the draft and history-search paste edits its own query', async () => {
   await withTuiHost(async (context) => withApp(context, async ({ frame, stdin, wait }) => {
     stdin.write('保留草稿');

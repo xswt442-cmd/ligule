@@ -81,6 +81,8 @@ function isAskQuestion(value: unknown): value is AskQuestion {
 }
 
 interface TuiStatus {
+  readonly running?: boolean;
+  readonly activeRunId?: string | null;
   readonly screenCapture?: { readonly enabled: boolean; readonly source: string; readonly changeAllowed?: boolean };
   readonly browser?: {
     readonly configured: boolean;
@@ -375,6 +377,14 @@ interface TuiRequestResults {
   readonly 'paths.list': PathListing;
   readonly 'run.start': LoopResult;
   readonly 'run.cancel': { readonly cancelled: boolean };
+  readonly 'run.steer': {
+    readonly inputId: string;
+    readonly runId: string;
+    readonly state: 'accepted';
+    readonly source: 'human' | 'controller';
+    readonly pendingCount: number;
+    readonly cancelledInteractions: number;
+  };
   readonly 'status.get': TuiStatus;
   readonly 'usage.get': { readonly sessionId: string; readonly summary: UsageSummary };
   readonly 'permission.set': { readonly sessionId: string; readonly permission: NonNullable<TuiStatus['permission']>; readonly applies: 'now' | 'unchanged' };
@@ -2332,6 +2342,40 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         push({ kind: 'meta', text: current === null ? t('无法读取状态', 'Could not read status')
           : t(`工具模式 ${current.mode ?? '-'} · 审批 ${current.policy} · 连续拒绝 ${current.denials.consecutive} / 累计 ${current.denials.total} · ${current.eventCount} 条记录`, `Mode ${current.mode ?? '-'} · approvals ${current.policy} · denials ${current.denials.consecutive} consecutive / ${current.denials.total} total · ${current.eventCount} events`)
             + permission + (context === '' ? '' : ` · ${context}`) + task });
+      })();
+      return;
+    }
+    if (name === 'steer') {
+      const input = argument.trim();
+      if (input === '') {
+        push({ kind: 'error', text: t('用法：/steer <文字>', 'Usage: /steer <text>') });
+        return;
+      }
+      void (async () => {
+        try {
+          const current = externalControl
+            ? await client.request('session.control', {
+              projectRoot: info.boundary ?? '', sessionId, request: { action: 'configuration' },
+            }) as unknown as TuiStatus
+            : await client.request('status.get', { sessionId });
+          const runId = current.activeRunId;
+          if (typeof runId !== 'string' || runId === '') {
+            throw Object.assign(new Error('run_not_running'), { code: 'run_not_running' });
+          }
+          const accepted = externalControl
+            ? await client.request('session.control', {
+              projectRoot: info.boundary ?? '', sessionId, request: { action: 'steer', runId, input },
+            })
+            : await client.request('run.steer', { sessionId, runId, input });
+          const pendingCount = typeof accepted.pendingCount === 'number' ? accepted.pendingCount : 0;
+          const cancelledInteractions = typeof accepted.cancelledInteractions === 'number' ? accepted.cancelledInteractions : 0;
+          push({ kind: 'meta', text: t(
+            `输入已加入当前运行，待应用 ${pendingCount} 条${cancelledInteractions > 0 ? `；已取消 ${cancelledInteractions} 个等待答复` : ''}`,
+            `Input added to the active run; ${pendingCount} pending${cancelledInteractions > 0 ? `; cancelled ${cancelledInteractions} pending interactions` : ''}`,
+          ) });
+        } catch (error) {
+          push({ kind: 'error', text: t(`当前运行未收到输入：${errorCode(error) ?? 'run_steer_failed'}`, `The active run did not receive the input: ${errorCode(error) ?? 'run_steer_failed'}`) });
+        }
       })();
       return;
     }

@@ -4,13 +4,17 @@
 // 它沿用父会话的权限判定、不能递归启动其他子 Agent，且拥有独立记录以便恢复。
 //
 // 该工具通过插件注册，不属于 Kernel 内置能力。每个父会话最多同时运行三个派生任务。
-import { randomUUID } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import type { FileWriteQueue } from '../kernel/file-write-queue.js';
-import { createLoop, DEFAULT_LOOP_LIMITS, type LoopLimits } from '../kernel/loop.js';
+import { createLoop, DEFAULT_LOOP_LIMITS, type LoopLimits, type LoopProgressEvent } from '../kernel/loop.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
-import { createSessionLog } from '../session/session.js';
+import { createSessionLog, type SessionLog } from '../session/session.js';
+import { createRunAcceptance, isRunAcceptance, publishRunResult, readRunResult, runReceipts } from '../session/run.js';
+import { readSessionRecord } from '../session/record.js';
+import { createRunSteeringInbox, type RunSteeringInbox } from '../kernel/run-steering.js';
+import { workspaceIdentity } from '../kernel/workspace.js';
 import {
   assertDelegationCompletion, completedRunResult, createOutputSchemaContract, DELEGATION_RESULT_TOOL, failedRunResult, MAX_DELEGATION_SCHEMA_BYTES,
   MODE_SELECTION_SCHEMA, outputSchemaInstructions, registerDelegationResultTool,
@@ -35,6 +39,7 @@ import { createMediaStore, type MediaStore } from '../capability/media.js';
 import { boundaryOf } from '../capability/limits.js';
 import type { PermissionContext } from '../kernel/permission.js';
 import type { Telemetry } from '../kernel/telemetry.js';
+import type { RunResult } from '../delegation.js';
 
 type LoopOptions = Parameters<typeof createLoop>[0];
 type ThinkingEffort = 'none' | 'low' | 'high' | 'max';
@@ -47,6 +52,7 @@ type SubagentProvider = LoopOptions['provider'] & {
 };
 const DEFAULT_CONCURRENT_SUBAGENTS = 3;
 const MAX_CONCURRENT_SUBAGENTS = 8;
+const MAX_RETAINED_SUBRUNS = 64;
 
 function stableErrorCode(error: unknown): string {
   const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
@@ -74,6 +80,120 @@ export interface SubagentDeps {
   promptFragmentBytes?: number;
   loopLimits?: LoopLimits;
   telemetry?: Telemetry;
+  parentSession?: SessionLog;
+}
+
+export interface SubagentRunArguments {
+  readonly task?: string;
+  readonly mode?: RequestedModeSelection;
+  readonly outputTokens?: number;
+  readonly thinkingEffort?: ThinkingEffort;
+  readonly loopIterations?: number;
+  readonly modelCalls?: number;
+  readonly outputSchema?: Record<string, unknown>;
+}
+
+export interface SubagentCallContext {
+  readonly signal?: AbortSignal;
+  readonly permission: PermissionContext;
+  readonly runId?: string;
+  readonly executionId?: string;
+  readonly callId?: string;
+}
+
+export interface SubrunReference {
+  readonly subrunId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly parentRunId?: string;
+  readonly parentCallId?: string;
+}
+
+export interface SubrunStatus extends SubrunReference {
+  readonly state: 'starting' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown';
+  readonly phase: string | null;
+  readonly task: ReturnType<TaskBudget['snapshot']> | null;
+  readonly pendingInteractions: { readonly approvals: number; readonly questions: number };
+  readonly errorCode?: string;
+  readonly result?: { readonly state: string; readonly textCharacters: number; readonly validation?: unknown };
+  readonly startedAt: number;
+  readonly updatedAt: number;
+  readonly completedAt?: number;
+}
+
+export interface SubagentRuntime {
+  readonly name: string;
+  setup(kernel: { register(tool: unknown): () => void; manifest(): readonly { readonly name: string }[] }): () => void;
+  start(args: SubagentRunArguments, context: SubagentCallContext, source?: 'human' | 'controller'): Promise<SubrunReference>;
+  status(subrunId: string, parentRunId: string): Promise<SubrunStatus>;
+  message(args: { readonly subrunId: string; readonly runId: string; readonly parentRunId: string; readonly input: string }, source: 'human' | 'controller'): Promise<{
+    readonly inputId: string;
+    readonly runId: string;
+    readonly state: 'accepted';
+    readonly source: 'human' | 'controller';
+    readonly pendingCount: number;
+    readonly subrunId: string;
+  }>;
+  wait(subrunIds: readonly string[], parentRunId: string, timeoutMs: number): Promise<{
+    readonly subruns: readonly SubrunStatus[];
+    readonly timedOut: boolean;
+  }>;
+  waitForResult(subrunId: string, parentRunId?: string): Promise<unknown>;
+  cancel(args: { readonly subrunId: string; readonly runId: string; readonly parentRunId: string }): Promise<{
+    readonly subrunId: string;
+    readonly runId: string;
+    readonly cancelRequested: boolean;
+    readonly state: SubrunStatus['state'];
+  }>;
+  settleParent(parentRunId: string, status: 'completed' | 'failed' | 'cancelled'): Promise<void>;
+  finishParent(parentRunId: string): Promise<void>;
+  close(): Promise<void>;
+  interaction(runId: string, type: 'approval' | 'question', waiting: boolean): void;
+}
+
+type SubrunRecord = {
+  readonly subrunId: string;
+  readonly parentRunId?: string;
+  readonly parentCallId?: string;
+  readonly controller: AbortController;
+  state: SubrunStatus['state'];
+  sessionId?: string;
+  runId?: string;
+  path?: string;
+  inbox?: RunSteeringInbox;
+  phase: string | null;
+  pendingApprovals: number;
+  pendingQuestions: number;
+  errorCode?: string;
+  result?: Record<string, unknown>;
+  work?: Promise<Record<string, unknown>>;
+  startedAt: number;
+  updatedAt: number;
+  completedAt?: number;
+};
+
+interface ChildRunStarted extends SubrunReference {
+  readonly path: string;
+  readonly inbox: RunSteeringInbox;
+  readonly session: SessionLog;
+}
+
+interface ChildRunLifecycle {
+  readonly subrunId: string;
+  readonly sessionId: string;
+  readonly source: 'human' | 'controller';
+  readonly onStarted: (child: ChildRunStarted) => void;
+  readonly onProgress: (event: LoopProgressEvent) => void;
+}
+
+function deferred<TResult>() {
+  let resolve!: (value: TResult) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<TResult>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function childLimits(args: { loopIterations?: number; modelCalls?: number }, parent: LoopLimits) {
@@ -116,7 +236,7 @@ function childProvider(args: { outputTokens?: number; thinkingEffort?: ThinkingE
   return provider.withGeneration(options);
 }
 
-export function createSubagentPlugin(deps: SubagentDeps) {
+export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
   const loopConfig = typeof deps.config.loop === 'object' && deps.config.loop !== null && !Array.isArray(deps.config.loop)
     ? deps.config.loop as Record<string, unknown> : {};
   const concurrency = loopConfig.maxConcurrentSubagents ?? DEFAULT_CONCURRENT_SUBAGENTS;
@@ -124,23 +244,307 @@ export function createSubagentPlugin(deps: SubagentDeps) {
     throw new KernelError('subagent_concurrency_invalid', { detail: `loop.maxConcurrentSubagents must be an integer between 1 and ${MAX_CONCURRENT_SUBAGENTS}` });
   }
   let counter = 0;
+  let counterInitialization: Promise<void> | undefined;
+  let closed = false;
   let active = 0;
+  const subruns = new Map<string, SubrunRecord>();
+  const closedParents = new Set<string>();
+  let executeSubagent: ((args: SubagentRunArguments, context: SubagentCallContext, lifecycle?: ChildRunLifecycle) => Promise<Record<string, unknown>>) | undefined;
 
   async function nextSessionId(): Promise<string> {
-    let entries;
-    try { entries = await readdir(deps.directory, { withFileTypes: true }); }
-    catch (cause) { throw new KernelError('subagent_session_directory_read_failed', { cause }); }
-    const prefix = `${deps.sessionId}.sub-`;
-    let highest = counter;
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.startsWith(prefix) || !entry.name.endsWith('.jsonl')) continue;
-      const suffix = entry.name.slice(prefix.length, -'.jsonl'.length);
-      if (!/^\d+$/u.test(suffix)) continue;
-      const number = Number(suffix);
-      if (Number.isSafeInteger(number)) highest = Math.max(highest, number);
+    if (counterInitialization === undefined) {
+      counterInitialization = (async () => {
+        let entries;
+        try { entries = await readdir(deps.directory, { withFileTypes: true }); }
+        catch (cause) { throw new KernelError('subagent_session_directory_read_failed', { cause }); }
+        const prefix = `${deps.sessionId}.sub-`;
+        for (const entry of entries) {
+          if (!entry.isFile() || !entry.name.startsWith(prefix) || !entry.name.endsWith('.jsonl')) continue;
+          const suffix = entry.name.slice(prefix.length, -'.jsonl'.length);
+          if (!/^\d+$/u.test(suffix)) continue;
+          const number = Number(suffix);
+          if (Number.isSafeInteger(number)) counter = Math.max(counter, number);
+        }
+      })();
     }
-    counter = highest + 1;
+    const initialize = counterInitialization;
+    try { await initialize; }
+    catch (cause) {
+      if (counterInitialization === initialize) counterInitialization = undefined;
+      throw cause;
+    }
+    counter += 1;
     return `${deps.sessionId}.sub-${counter}`;
+  }
+
+  const referenceOf = (record: SubrunRecord): SubrunReference => {
+    if (record.sessionId === undefined || record.runId === undefined) throw new KernelError('subagent_not_started');
+    return {
+      subrunId: record.subrunId, sessionId: record.sessionId, runId: record.runId,
+      ...(record.parentRunId === undefined ? {} : { parentRunId: record.parentRunId }),
+      ...(record.parentCallId === undefined ? {} : { parentCallId: record.parentCallId }),
+    };
+  };
+
+  function viewOf(record: SubrunRecord): SubrunStatus {
+    if (record.sessionId === undefined || record.runId === undefined) throw new KernelError('subagent_not_started');
+    const nested = typeof record.result?.result === 'object' && record.result.result !== null
+      ? record.result.result as Record<string, unknown> : undefined;
+    const result = record.result === undefined ? undefined : {
+      state: typeof nested?.state === 'string' ? nested.state : record.state,
+      textCharacters: typeof record.result.text === 'string' ? record.result.text.length : 0,
+      ...(nested?.validation === undefined ? {} : { validation: nested.validation }),
+    };
+    return {
+      ...referenceOf(record),
+      state: record.state,
+      phase: record.phase,
+      task: deps.taskBudget?.()?.snapshot() ?? null,
+      pendingInteractions: { approvals: record.pendingApprovals, questions: record.pendingQuestions },
+      ...(record.errorCode === undefined ? {} : { errorCode: record.errorCode }),
+      ...(result === undefined ? {} : { result }),
+      startedAt: record.startedAt,
+      updatedAt: record.updatedAt,
+      ...(record.completedAt === undefined ? {} : { completedAt: record.completedAt }),
+    };
+  }
+
+  function findSubrun(subrunId: string, parentRunId?: string): SubrunRecord {
+    const record = subruns.get(subrunId);
+    if (record === undefined || record.parentRunId !== parentRunId) throw new KernelError('subagent_not_found');
+    return record;
+  }
+
+  function pruneSubruns(): void {
+    if (subruns.size < MAX_RETAINED_SUBRUNS) return;
+    const oldestFinished = [...subruns.values()].find(record =>
+      record.state === 'completed' || record.state === 'failed' || record.state === 'cancelled');
+    if (oldestFinished === undefined) throw new KernelError('subagent_operation_limit');
+    subruns.delete(oldestFinished.subrunId);
+  }
+
+  async function start(args: SubagentRunArguments, context: SubagentCallContext, source: 'human' | 'controller' = 'controller'):
+    Promise<SubrunReference> {
+    if (closed) throw new KernelError('subagent_host_closed');
+    if (typeof args.task !== 'string' || args.task.trim() === '') throw new KernelError('subagent_task_required');
+    if (context.runId !== undefined && closedParents.has(context.runId)) throw new KernelError('subagent_parent_not_active');
+    const execute = executeSubagent;
+    if (execute === undefined) throw new KernelError('subagent_runtime_unavailable');
+    const sessionId = await nextSessionId();
+    if (closed) throw new KernelError('subagent_host_closed');
+    if (context.runId !== undefined && closedParents.has(context.runId)) throw new KernelError('subagent_parent_not_active');
+    pruneSubruns();
+    const controller = new AbortController();
+    const parentSignal = context.signal;
+    const abortParent = () => controller.abort(parentSignal?.reason);
+    if (parentSignal?.aborted) abortParent();
+    else parentSignal?.addEventListener('abort', abortParent, { once: true });
+    const ready = deferred<SubrunReference>();
+    // The stable control ID is also the durable child Session ID, so a new Host can
+    // resolve it without an in-memory index or a second Session store.
+    const subrunId = sessionId;
+    const record: SubrunRecord = {
+      subrunId,
+      ...(context.runId === undefined ? {} : { parentRunId: context.runId }),
+      ...(context.callId === undefined ? {} : { parentCallId: context.callId }),
+      controller,
+      state: 'starting',
+      phase: 'preparing',
+      pendingApprovals: 0,
+      pendingQuestions: 0,
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    subruns.set(subrunId, record);
+    let started = false;
+    const work = Promise.resolve().then(() => execute(args, { ...context, signal: controller.signal }, {
+      subrunId,
+      sessionId,
+      source,
+      onStarted: (child) => {
+        record.sessionId = child.sessionId;
+        record.runId = child.runId;
+        record.path = child.path;
+        record.inbox = child.inbox;
+        record.state = 'running';
+        record.phase = 'preparing';
+        record.updatedAt = Date.now();
+        started = true;
+        ready.resolve(referenceOf(record));
+      },
+      onProgress: (event) => {
+        record.phase = event.kind === 'phase' ? event.phase : event.phase;
+        record.updatedAt = Date.now();
+      },
+    }));
+    record.work = work.then((result) => {
+      record.result = result;
+      const nested = typeof result.result === 'object' && result.result !== null ? result.result as Record<string, unknown> : undefined;
+      const resultState = nested?.state;
+      record.state = resultState === 'completed' ? 'completed' : resultState === 'cancelled' ? 'cancelled' : 'failed';
+      const diagnostic = typeof nested?.diagnostic === 'object' && nested.diagnostic !== null
+        ? nested.diagnostic as Record<string, unknown> : undefined;
+      if (typeof diagnostic?.code === 'string') record.errorCode = diagnostic.code;
+      else if (record.state === 'failed' && typeof nested?.code === 'string') record.errorCode = nested.code;
+      record.updatedAt = Date.now();
+      record.completedAt = record.updatedAt;
+      return result;
+    }, (error: unknown) => {
+      record.state = controller.signal.aborted ? 'cancelled' : 'failed';
+      record.errorCode = stableErrorCode(error);
+      record.updatedAt = Date.now();
+      record.completedAt = record.updatedAt;
+      if (!started) ready.reject(error);
+      throw error;
+    }).finally(() => parentSignal?.removeEventListener('abort', abortParent));
+    void record.work.catch(() => undefined);
+    try { return await ready.promise; }
+    catch (error) {
+      subruns.delete(subrunId);
+      throw error;
+    }
+  }
+
+  async function persistedStatus(subrunId: string, parentRunId: string): Promise<SubrunStatus> {
+    if (deps.parentSession === undefined || !subrunId.startsWith(`${deps.sessionId}.sub-`)
+      || subrunId.length > 160 || /[\\/\u0000-\u001f\u007f]/u.test(subrunId)) {
+      throw new KernelError('subagent_not_found');
+    }
+    const child = await readSessionRecord(join(deps.directory, `${subrunId}.jsonl`));
+    if (child.header?.sessionId !== subrunId) throw new KernelError('subagent_not_found');
+    const acceptance = child.events.find(event => event.kind === 'user' && isRunAcceptance(event.run)
+      && event.run.parentage?.sessionId === deps.sessionId
+      && event.run.parentage.runId === parentRunId && event.run.parentage.subrunId === subrunId)?.run;
+    if (!isRunAcceptance(acceptance) || acceptance.parentage === undefined) throw new KernelError('subagent_not_found');
+    const receipt = runReceipts(child.events, subrunId).find(item => item.runId === acceptance.runId);
+    if (receipt === undefined) throw new KernelError('subagent_not_found');
+    const startedAt = Date.parse(acceptance.acceptedAt);
+    let result: RunResult | undefined;
+    let errorCode: string | undefined;
+    if (receipt.resultRef !== undefined) {
+      const configRoot = typeof deps.config.workspaceRoot === 'string' ? deps.config.workspaceRoot
+        : typeof deps.config.boundary === 'string' ? deps.config.boundary : process.cwd();
+      try { result = await readRunResult(deps.directory, workspaceIdentity(configRoot), subrunId, receipt); }
+      catch (error) { errorCode = stableErrorCode(error); }
+    }
+    const terminal = child.events.find(event => event.kind === 'turn' && event.userSeq === receipt.userSeq
+      && ['completed', 'failed', 'cancelled', 'interrupted'].includes(String(event.status)));
+    const state: SubrunStatus['state'] = receipt.state === 'completed' || receipt.state === 'failed' || receipt.state === 'cancelled'
+      ? receipt.state : 'unknown';
+    errorCode ??= result?.diagnostic?.code
+      ?? (typeof terminal?.code === 'string' ? terminal.code : undefined);
+    return {
+      subrunId,
+      sessionId: subrunId,
+      runId: acceptance.runId,
+      parentRunId,
+      ...(acceptance.parentage.callId === undefined ? {} : { parentCallId: acceptance.parentage.callId }),
+      state,
+      phase: null,
+      task: null,
+      pendingInteractions: { approvals: 0, questions: 0 },
+      ...(errorCode === undefined ? {} : { errorCode }),
+      ...(result === undefined ? {} : { result: {
+        state: result.state,
+        textCharacters: result.output.text?.length ?? 0,
+        validation: result.validation,
+      } }),
+      startedAt: Number.isFinite(startedAt) ? startedAt : 0,
+      updatedAt: Number.isFinite(startedAt) ? startedAt : 0,
+      ...(state === 'completed' || state === 'failed' || state === 'cancelled'
+        ? { completedAt: Number.isFinite(startedAt) ? startedAt : 0 } : {}),
+    };
+  }
+
+  async function status(subrunId: string, parentRunId: string): Promise<SubrunStatus> {
+    const record = subruns.get(subrunId);
+    if (record === undefined) return await persistedStatus(subrunId, parentRunId);
+    if (record.parentRunId !== parentRunId) throw new KernelError('subagent_not_found');
+    return viewOf(record);
+  }
+
+  async function message({ subrunId, runId, parentRunId, input }: {
+    subrunId: string; runId: string; parentRunId: string; input: string;
+  }, source: 'human' | 'controller') {
+    const record = findSubrun(subrunId, parentRunId);
+    if (record.state !== 'running' || record.runId !== runId || record.inbox === undefined) {
+      throw new KernelError('subagent_not_running');
+    }
+    return { subrunId, ...await record.inbox.accept(source, input) };
+  }
+
+  async function wait(subrunIds: readonly string[], parentRunId: string, timeoutMs: number) {
+    if (subrunIds.length < 1 || subrunIds.length > 8 || !Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 30_000) {
+      throw new KernelError('subagent_wait_invalid');
+    }
+    const records = subrunIds.map(id => subruns.get(id)).filter((record): record is SubrunRecord => record !== undefined);
+    for (const record of records) if (record.parentRunId !== parentRunId) throw new KernelError('subagent_not_found');
+    const missing = subrunIds.filter(id => !subruns.has(id));
+    for (const id of missing) await persistedStatus(id, parentRunId);
+    let timedOut = false;
+    const pending = Promise.all(records.map(record => record.work ?? Promise.resolve(record.result ?? {})));
+    if (timeoutMs === 0) timedOut = records.some(record => record.state === 'starting' || record.state === 'running');
+    else {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          pending,
+          new Promise<void>((resolve) => { timer = setTimeout(() => { timedOut = true; resolve(); }, timeoutMs); }),
+        ]);
+      } finally { if (timer !== undefined) clearTimeout(timer); }
+    }
+    return { subruns: await Promise.all(subrunIds.map(id => status(id, parentRunId))), timedOut };
+  }
+
+  async function waitForResult(subrunId: string, parentRunId?: string): Promise<unknown> {
+    const record = findSubrun(subrunId, parentRunId);
+    const resumeParent = deps.taskBudget?.()?.suspendCurrentWork();
+    try { return await record.work ?? record.result ?? viewOf(record); }
+    finally { resumeParent?.(); }
+  }
+
+  async function cancel({ subrunId, runId, parentRunId }: { subrunId: string; runId: string; parentRunId: string }) {
+    const record = findSubrun(subrunId, parentRunId);
+    if (record.state !== 'running' || record.runId !== runId) {
+      return { subrunId, runId, cancelRequested: false, state: record.state };
+    }
+    record.controller.abort(new KernelError('subagent_cancelled'));
+    record.updatedAt = Date.now();
+    return { subrunId, runId, cancelRequested: true, state: record.state };
+  }
+
+  async function settleParent(parentRunId: string, state: 'completed' | 'failed' | 'cancelled'): Promise<void> {
+    closedParents.add(parentRunId);
+    const records = [...subruns.values()].filter(record => record.parentRunId === parentRunId
+      && (record.state === 'starting' || record.state === 'running'));
+    if (state !== 'completed') {
+      for (const record of records) record.controller.abort(new KernelError('subagent_parent_cancelled'));
+    }
+    await Promise.all(records.map(record => record.work ?? Promise.resolve()));
+  }
+
+  async function finishParent(parentRunId: string): Promise<void> {
+    closedParents.add(parentRunId);
+    const records = [...subruns.values()].filter(record => record.parentRunId === parentRunId
+      && (record.state === 'starting' || record.state === 'running'));
+    await Promise.all(records.map(record => record.work ?? Promise.resolve()));
+  }
+
+  async function close(): Promise<void> {
+    closed = true;
+    for (const record of subruns.values()) {
+      if (record.parentRunId !== undefined) closedParents.add(record.parentRunId);
+      if (record.state === 'starting' || record.state === 'running') record.controller.abort(new KernelError('subagent_host_closed'));
+    }
+    await Promise.all([...subruns.values()].flatMap(record => record.work === undefined ? [] : [record.work.catch(() => undefined)]));
+  }
+
+  function interaction(runId: string, type: 'approval' | 'question', waiting: boolean): void {
+    const record = [...subruns.values()].find(item => item.runId === runId);
+    if (record === undefined) return;
+    const field = type === 'approval' ? 'pendingApprovals' : 'pendingQuestions';
+    record[field] = Math.max(0, record[field] + (waiting ? 1 : -1));
+    record.updatedAt = Date.now();
   }
 
   return {
@@ -149,7 +553,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
       register(tool: unknown): () => void;
       manifest(): readonly { readonly name: string }[];
     }) {
-      return kernel.register({
+      const subagentTool = {
         name: 'subagent',
         access: 'inherit',
         execution: 'parallel',
@@ -168,15 +572,8 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           additionalProperties: false,
           required: ['task'],
         },
-        async run(args: {
-          task?: string;
-          mode?: RequestedModeSelection;
-          outputTokens?: number;
-          thinkingEffort?: ThinkingEffort;
-          loopIterations?: number;
-          modelCalls?: number;
-          outputSchema?: Record<string, unknown>;
-        }, { signal, permission, runId, executionId, callId }: { signal?: AbortSignal; permission: PermissionContext; runId?: string; executionId?: string; callId?: string }) {
+        async run(args: SubagentRunArguments, { signal, permission, runId, executionId, callId }: SubagentCallContext,
+          lifecycle?: ChildRunLifecycle): Promise<Record<string, unknown>> {
           if (typeof args.task !== 'string' || args.task.trim() === '') {
             throw new KernelError('subagent_task_required', { detail: 'the derived agent needs a task to work on' });
           }
@@ -193,7 +590,8 @@ export function createSubagentPlugin(deps: SubagentDeps) {
           const parentTools = new Set(kernel.manifest().map(({ name }) => name));
           active += 1;
           try {
-            const id = await nextSessionId();
+            const id = lifecycle?.sessionId ?? await nextSessionId();
+            const subrunId = lifecycle?.subrunId ?? id;
             // 首行在首次写入时生成；模式选择确定后再补入模式身份。
             let modeIdentity: {
               name: string;
@@ -214,6 +612,23 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 mode: modeIdentity,
               }),
             });
+          const source = lifecycle?.source ?? 'controller';
+          const acceptance = createRunAcceptance(id, args.task, {
+            parentRunId: runId ?? null,
+            parentCallId: callId ?? null,
+            mode: args.mode ?? null,
+            outputTokens: args.outputTokens ?? null,
+            thinkingEffort: args.thinkingEffort ?? null,
+            loopIterations: args.loopIterations ?? null,
+            modelCalls: args.modelCalls ?? null,
+            outputSchema: args.outputSchema ?? null,
+          }, source === 'human' ? 'human' : 'controller:subagent', undefined, undefined,
+          runId === undefined ? undefined : {
+            sessionId: deps.sessionId, runId, subrunId,
+            ...(callId === undefined ? {} : { callId }),
+          });
+          const steering = createRunSteeringInbox(session, acceptance.runId);
+          let childRunResult: RunResult | undefined;
             let disposeAssembly: (() => void) | undefined;
             let closeMcp: (() => Promise<void>) | undefined;
             let disposeResultTool: (() => void) | undefined;
@@ -311,6 +726,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 resolveImage: media.read,
                 telemetry: deps.telemetry,
                 sessionId: id,
+                onProgress: lifecycle?.onProgress,
                 ...(runId === undefined ? {} : { parentRunId: runId }),
                 ...(executionId === undefined ? {} : { parentExecutionId: executionId }),
                 ...(callId === undefined ? {} : { parentCallId: callId }),
@@ -325,9 +741,47 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 }),
               });
               let result: Awaited<ReturnType<typeof loop.run>>;
-              const resumeParent = deps.taskBudget?.()?.suspendCurrentWork();
               try {
-                result = await loop.run(args.task, { signal, task: deps.taskBudget?.(),
+                result = await loop.run(args.task, {
+                  signal,
+                  task: deps.taskBudget?.(),
+                  runId: acceptance.runId,
+                  user: { origin: source, run: acceptance },
+                  steering,
+                  onAccepted: () => {
+                    steering.activate();
+                    lifecycle?.onStarted({
+                      subrunId: lifecycle.subrunId,
+                      sessionId: id,
+                      runId: acceptance.runId,
+                      ...(runId === undefined ? {} : { parentRunId: runId }),
+                      ...(callId === undefined ? {} : { parentCallId: callId }),
+                      path: session.path,
+                      inbox: steering,
+                      session,
+                    });
+                  },
+                  persistTerminal: async (status, summary, fields) => {
+                    const validation = status === 'completed'
+                      ? outputContract === undefined ? { status: 'not_requested' as const }
+                        : { status: 'valid' as const, schemaDigest: outputContract.digest }
+                      : outputContract === undefined ? { status: 'not_requested' as const }
+                        : { status: 'invalid' as const, schemaDigest: outputContract.digest,
+                            errors: ['The child run ended before a valid structured result was submitted.'] };
+                    childRunResult = status === 'completed'
+                      ? completedRunResult(acceptance.runId, id, {
+                        ...summary,
+                        ...(typeof fields.completedBy === 'string' ? { completedBy: fields.completedBy } : {}),
+                      }, {
+                        ...(structuredSubmitted ? { structured: structuredResult } : {}),
+                        validation,
+                      })
+                      : failedRunResult(acceptance.runId, id,
+                        typeof fields.code === 'string' ? fields.code : 'subagent_failed',
+                        fields.diagnostics as KernelError['diagnostics'], validation, summary);
+                    return await publishRunResult(session.directory, workspaceIdentity(boundaryOf(deps.config)), id,
+                      acceptance.runId, childRunResult);
+                  },
                   validateCompletion: () => assertDelegationCompletion(outputContract, structuredSubmitted) });
               } catch (error) {
                 // Record-lock and Session I/O failures mean the child record may be unreliable; do not turn them into a normal child result.
@@ -354,7 +808,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                   mode: resolvedMode?.name ?? null,
                   modeDigest: modeIdentity?.digest ?? null,
                   result: failedRunResult(
-                    randomUUID(),
+                    acceptance.runId,
                     id,
                     code,
                     error instanceof KernelError ? error.diagnostics : undefined,
@@ -362,7 +816,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                     summary,
                   ),
                 };
-              } finally { resumeParent?.(); }
+              }
               const validation = outputContract === undefined
                 ? { status: 'not_requested' as const }
                 : { status: 'valid' as const, schemaDigest: outputContract.digest };
@@ -379,7 +833,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                 limits,
                 mode: resolvedMode?.name ?? null,
                 modeDigest: modeIdentity?.digest ?? null,
-                result: completedRunResult(randomUUID(), id, result, {
+                result: childRunResult ?? completedRunResult(acceptance.runId, id, result, {
                   ...(structuredSubmitted ? { structured: structuredResult } : {}),
                   validation,
                 }),
@@ -404,7 +858,93 @@ export function createSubagentPlugin(deps: SubagentDeps) {
             active -= 1;
           }
         },
-      });
+      };
+      executeSubagent = subagentTool.run;
+      const unregister = [
+        kernel.register({
+          ...subagentTool,
+          run: async (args: SubagentRunArguments, context: SubagentCallContext) => {
+            const child = await start(args, context, 'controller');
+            return await waitForResult(child.subrunId, child.parentRunId);
+          },
+        }),
+        kernel.register({
+          name: 'subagent_start',
+          access: 'inherit',
+          execution: 'parallel',
+          description: 'Start one independent child Run and return its stable subrun, Session, and Run IDs. Use subagent_status, subagent_message, subagent_wait, or subagent_cancel to control it. The parent waits for active children before its own completion.',
+          parameters: subagentTool.parameters,
+          run: async (args: SubagentRunArguments, context: SubagentCallContext) => await start(args, context, 'controller'),
+        }),
+        kernel.register({
+          name: 'subagent_status',
+          access: 'read',
+          execution: 'parallel',
+          description: 'Read the live status of a child Run started by this parent Run.',
+          parameters: { type: 'object', properties: { subrunId: { type: 'string', minLength: 1, maxLength: 160 } }, required: ['subrunId'] },
+          run: async (args: { subrunId: string }, context: SubagentCallContext) => {
+            if (context.runId === undefined) throw new KernelError('subagent_parent_run_unavailable');
+            return await status(args.subrunId, context.runId);
+          },
+        }),
+        kernel.register({
+          name: 'subagent_message',
+          access: 'inherit',
+          execution: 'parallel',
+          description: 'Send bounded steering to one active child Run using its expected Run ID.',
+          parameters: { type: 'object', properties: {
+            subrunId: { type: 'string', minLength: 1, maxLength: 160 },
+            runId: { type: 'string', minLength: 1, maxLength: 160 },
+            input: { type: 'string', minLength: 1, maxLength: 65_536 },
+          }, required: ['subrunId', 'runId', 'input'] },
+          run: async (args: { subrunId: string; runId: string; input: string }, context: SubagentCallContext) => {
+            if (context.runId === undefined) throw new KernelError('subagent_parent_run_unavailable');
+            return await message({ ...args, parentRunId: context.runId }, 'controller');
+          },
+        }),
+        kernel.register({
+          name: 'subagent_wait',
+          access: 'read',
+          execution: 'parallel',
+          description: 'Wait for one or more child Runs. A timeout returns their current status and does not cancel them.',
+          parameters: { type: 'object', properties: {
+            subrunIds: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string', minLength: 1, maxLength: 160 } },
+            timeoutMs: { type: 'integer', minimum: 1, maximum: 30_000 },
+          }, required: ['subrunIds'] },
+          run: async (args: { subrunIds: string[]; timeoutMs?: number }, context: SubagentCallContext) => {
+            if (context.runId === undefined) throw new KernelError('subagent_parent_run_unavailable');
+            const waited = await wait(args.subrunIds, context.runId, args.timeoutMs ?? 30_000);
+            if (waited.timedOut) return waited;
+            const results = await Promise.all(args.subrunIds.map(id => waitForResult(id, context.runId!)));
+            return { timedOut: false, subruns: waited.subruns.map((item, index) => ({ ...item, result: results[index] })) };
+          },
+        }),
+        kernel.register({
+          name: 'subagent_cancel',
+          access: 'inherit',
+          execution: 'parallel',
+          description: 'Request cancellation for one child Run. Other child Runs continue independently.',
+          parameters: { type: 'object', properties: {
+            subrunId: { type: 'string', minLength: 1, maxLength: 160 },
+            runId: { type: 'string', minLength: 1, maxLength: 160 },
+          }, required: ['subrunId', 'runId'] },
+          run: async (args: { subrunId: string; runId: string }, context: SubagentCallContext) => {
+            if (context.runId === undefined) throw new KernelError('subagent_parent_run_unavailable');
+            return await cancel({ ...args, parentRunId: context.runId });
+          },
+        }),
+      ];
+      return () => { for (const dispose of unregister.reverse()) dispose(); };
     },
+    start,
+    status,
+    message,
+    wait,
+    waitForResult,
+    cancel,
+    settleParent,
+    finishParent,
+    close,
+    interaction,
   };
 }

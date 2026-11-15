@@ -20,7 +20,7 @@ export interface RunProvenance {
 }
 
 export interface RunAcceptance {
-  readonly version: 1 | 2;
+  readonly version: 1 | 2 | 3;
   readonly sessionId: string;
   readonly runId: string;
   readonly payloadDigest: string;
@@ -31,6 +31,15 @@ export interface RunAcceptance {
   readonly via?: string;
   /** 版本 2 起存在。 */
   readonly resolvedBy?: string;
+  /** Version 3 child runs persist their parent binding for read-only recovery. */
+  readonly parentage?: RunParentage;
+}
+
+export interface RunParentage {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly subrunId: string;
+  readonly callId?: string;
 }
 export interface RunResultRef { readonly version: 1; readonly name: string; readonly bytes: number; readonly sha256: string }
 export interface DurableRunReceipt {
@@ -57,22 +66,39 @@ export function runPayloadDigest(input: string, delegation: unknown): string {
   return digest(Buffer.from(canonical({ version: 1, input, delegation: delegation ?? null })));
 }
 export function createRunAcceptance(sessionId: string, input: string, delegation: unknown, callerScope: string, requestKey?: string,
-  provenance?: RunProvenance): RunAcceptance {
+  provenance?: RunProvenance, parentage?: RunParentage): RunAcceptance {
   if (sessionId.length < 1 || sessionId.length > 160 || /[\\/]/u.test(sessionId)) throw new KernelError('run_session_invalid');
   if (requestKey !== undefined && !REQUEST_KEY.test(requestKey)) throw new KernelError('run_request_key_invalid');
   if (!/^[A-Za-z0-9._:-]{1,256}$/u.test(callerScope)) throw new KernelError('run_caller_scope_invalid');
   if (provenance !== undefined && (!PROVENANCE.test(provenance.via) || !PROVENANCE.test(provenance.resolvedBy))) {
     throw new KernelError('run_provenance_invalid');
   }
-  return { version: provenance === undefined ? 1 : 2, sessionId, runId: randomUUID(), callerScope,
+  if (parentage !== undefined && !validParentage(parentage, sessionId)) throw new KernelError('run_parentage_invalid');
+  return { version: parentage !== undefined ? 3 : provenance === undefined ? 1 : 2, sessionId, runId: randomUUID(), callerScope,
     payloadDigest: runPayloadDigest(input, delegation),
     ...(requestKey === undefined ? {} : { requestKey }), acceptedAt: new Date().toISOString(),
-    ...(provenance === undefined ? {} : { via: provenance.via, resolvedBy: provenance.resolvedBy }) };
+    ...(provenance === undefined ? {} : { via: provenance.via, resolvedBy: provenance.resolvedBy }),
+    ...(parentage === undefined ? {} : { parentage }) };
 }
+
+function validParentage(value: unknown, childSessionId: string): value is RunParentage {
+  if (!record(value) || Object.keys(value).some(key => !['sessionId', 'runId', 'subrunId', 'callId'].includes(key))) return false;
+  const parentSessionId = value.sessionId;
+  const parentRunId = value.runId;
+  const subrunId = value.subrunId;
+  const callId = value.callId;
+  return typeof parentSessionId === 'string' && parentSessionId.length > 0 && parentSessionId.length <= 160
+    && !/[\\/\u0000-\u001f\u007f]/u.test(parentSessionId) && parentSessionId !== childSessionId
+    && typeof parentRunId === 'string' && RUN_ID.test(parentRunId)
+    && typeof subrunId === 'string' && subrunId === childSessionId
+    && (callId === undefined || (typeof callId === 'string' && callId.length > 0 && callId.length <= 256
+      && !/[\u0000-\u001f\u007f]/u.test(callId)));
+}
+
 export function isRunAcceptance(value: unknown): value is RunAcceptance {
   if (!record(value)) return false;
-  return Object.keys(value).every(key => ['version', 'sessionId', 'runId', 'payloadDigest', 'callerScope', 'requestKey', 'acceptedAt', 'via', 'resolvedBy'].includes(key))
-    && (value.version === 1 || value.version === 2)
+  return Object.keys(value).every(key => ['version', 'sessionId', 'runId', 'payloadDigest', 'callerScope', 'requestKey', 'acceptedAt', 'via', 'resolvedBy', 'parentage'].includes(key))
+    && (value.version === 1 || value.version === 2 || value.version === 3)
     && typeof value.sessionId === 'string' && value.sessionId.length > 0
     && value.sessionId.length <= 160 && !/[\\/]/u.test(value.sessionId)
     && typeof value.runId === 'string' && RUN_ID.test(value.runId)
@@ -81,9 +107,14 @@ export function isRunAcceptance(value: unknown): value is RunAcceptance {
     && (value.requestKey === undefined || (typeof value.requestKey === 'string' && REQUEST_KEY.test(value.requestKey)))
     && typeof value.acceptedAt === 'string' && Number.isFinite(Date.parse(value.acceptedAt))
     && (value.version === 1
-      ? value.via === undefined && value.resolvedBy === undefined
-      : typeof value.via === 'string' && PROVENANCE.test(value.via)
-        && typeof value.resolvedBy === 'string' && PROVENANCE.test(value.resolvedBy));
+      ? value.via === undefined && value.resolvedBy === undefined && value.parentage === undefined
+      : value.version === 2
+        ? typeof value.via === 'string' && PROVENANCE.test(value.via)
+          && typeof value.resolvedBy === 'string' && PROVENANCE.test(value.resolvedBy) && value.parentage === undefined
+        : validParentage(value.parentage, value.sessionId)
+          && ((value.via === undefined && value.resolvedBy === undefined)
+            || (typeof value.via === 'string' && PROVENANCE.test(value.via)
+              && typeof value.resolvedBy === 'string' && PROVENANCE.test(value.resolvedBy))));
 }
 export function isRunResultRef(value: unknown, runId: string): value is RunResultRef {
   return record(value) && Object.keys(value).every(key => ['version', 'name', 'bytes', 'sha256'].includes(key))

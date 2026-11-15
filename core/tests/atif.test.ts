@@ -40,7 +40,9 @@ const liguleOf = (extra: Record<string, unknown> | undefined): LiguleExtra => ex
 const metricsOf = (trajectory: AtifTrajectory): LiguleMetrics =>
   trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls)!.metrics as LiguleMetrics;
 
-async function makeSession({ unknown = false, overflowCompaction = false }: { unknown?: boolean; overflowCompaction?: boolean } = {}) {
+async function makeSession({ unknown = false, overflowCompaction = false, steering = false }: {
+  unknown?: boolean; overflowCompaction?: boolean; steering?: boolean;
+} = {}) {
   const testplace = resolve('testplace');
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'ligule-atif-'));
@@ -61,6 +63,12 @@ async function makeSession({ unknown = false, overflowCompaction = false }: { un
       : { kind: 'result', failed: false, content: 'private file contents' } });
   await session.append({ kind: 'tool', tool: 'write', callId: 'call-2', args: { path: 'result.txt', content: 'private parameter' },
     result: { kind: 'refusal', failed: true, code: 'permission_denied', reason: 'private refusal detail', content: '' } });
+  if (steering) {
+    await session.append({ kind: 'runInput', mode: 'steer', state: 'accepted', inputId: 'steer-1', runId: acceptance.runId,
+      source: 'human', text: 'keep this route', acceptedAt: '2026-11-15T00:00:01.000Z' });
+    await session.append({ kind: 'runInput', mode: 'steer', state: 'applied', inputId: 'steer-1', runId: acceptance.runId,
+      appliedAt: '2026-11-15T00:00:02.000Z' });
+  }
   await session.append({ kind: 'assistant', text: 'Done with private details.', toolCalls: [] });
   await session.append({ kind: 'turn', ignorable: true, status: 'failed', userSeq: user.seq,
     runId: acceptance.runId, code: 'run_failed' });
@@ -99,6 +107,37 @@ test('exports one real Session turn as ATIF v1.8 with private content redacted',
     assert.equal(liguleOf(agent.observation!.results[1].extra).error_code, 'permission_denied');
     assert.equal(JSON.stringify(trajectory).includes('private'), false);
     assert.equal(JSON.stringify(trajectory).includes('C:\\secret'), false);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('ATIF keeps nested extension tool records out of the parent tool observation', async () => {
+  const fixture = await makeSession();
+  try {
+    await fixture.session.append({ kind: 'tool', tool: 'exec', callId: 'nested-call', parentCallId: 'call-1',
+      args: { command: 'node nested-child.mjs' },
+      result: { kind: 'result', failed: false, content: 'nested-only-result' } });
+    const trajectory = sessionTurnToAtif(await fixture.session.read(), source(fixture.acceptance, fixture.user));
+    const agent = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls)!;
+    assert.deepEqual(agent.observation!.results.map((result) => result.source_call_id), ['call-1', 'call-2']);
+    assert.equal(JSON.stringify(trajectory).includes('nested-only-result'), false);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('ATIF preserves applied steering as a separate user step with its recorded source', async () => {
+  const fixture = await makeSession({ steering: true });
+  try {
+    const trajectory = sessionTurnToAtif(await fixture.session.read(), source(fixture.acceptance, fixture.user), {
+      includeSensitiveContent: true,
+    });
+    const steering = trajectory.steps.find((step) => step.source === 'user' && step.message === 'keep this route');
+    assert.ok(steering);
+    assert.deepEqual((steering.extra?.ligule as { run_input?: unknown }).run_input, {
+      input_id: 'steer-1', source: 'human', run_id: fixture.acceptance.runId,
+    });
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }

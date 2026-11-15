@@ -21,6 +21,7 @@ export type AgentControlRequest =
   | { readonly action: 'status'; readonly after: number; readonly limit: number; readonly waitMs: number }
   | { readonly action: 'configuration' }
   | { readonly action: 'send'; readonly input: string }
+  | { readonly action: 'steer'; readonly runId: string; readonly input: string }
   | { readonly action: 'details'; readonly requestId: string }
   | { readonly action: 'reply'; readonly requestId: string; readonly type: 'approval'; readonly decision: 'allow' | 'deny'; readonly rememberScope?: 'session' | 'project' | 'user'; readonly rememberTarget?: 'file' | 'workspace' | 'tool' | 'command' }
   | { readonly action: 'reply'; readonly requestId: string; readonly type: 'question'; readonly answers: unknown }
@@ -110,6 +111,12 @@ function validRequest(input: unknown): AgentControlRequest {
         throw new KernelError('agent_control_request_invalid');
       }
       return { action: 'send', input: value.input };
+    case 'steer':
+      if (typeof value.runId !== 'string' || !SESSION_ID.test(value.runId)
+        || typeof value.input !== 'string' || value.input.trim() === '' || value.input.length > 65_536) {
+        throw new KernelError('agent_control_request_invalid');
+      }
+      return { action: 'steer', runId: value.runId, input: value.input };
     case 'reply':
       if (typeof value.requestId !== 'string' || value.requestId.length < 1 || value.requestId.length > 160) {
         throw new KernelError('agent_control_request_invalid');

@@ -28,9 +28,14 @@ export interface ToolContext {
   readonly target?: NetworkTarget;
   readonly shell?: ShellSelection;
   readonly scriptBinding?: ScriptBinding;
+  readonly sessionId?: string;
   readonly runId?: string;
   readonly executionId?: string;
+  readonly userSeq?: number;
   readonly callId?: string;
+  readonly parentCallId?: string;
+  readonly parentRunId?: string;
+  readonly parentExecutionId?: string;
 }
 
 type BivariantToolCallback<TArgs, TResult> = {
@@ -120,13 +125,21 @@ export interface Kernel {
   catalog(): ToolCatalogEntry[];
   validateCall(name: string, args: unknown): { readonly code?: 'tool_not_found' | 'tool_args_invalid'; readonly detail?: string };
   restrict(names: readonly string[]): () => void;
-  call(name: string, args?: unknown, options?: { readonly callId?: string; readonly signal?: AbortSignal; readonly runId?: string; readonly executionId?: string }): Promise<unknown>;
+  call(name: string, args?: unknown, options?: {
+    readonly callId?: string; readonly signal?: AbortSignal; readonly sessionId?: string; readonly runId?: string;
+    readonly executionId?: string; readonly userSeq?: number; readonly parentCallId?: string;
+    readonly parentRunId?: string; readonly parentExecutionId?: string;
+  }): Promise<unknown>;
 }
 
 interface ToolEvent extends Record<string, unknown> {
   kind: 'tool';
   tool: string;
   callId?: string;
+  parentCallId?: string;
+  sessionId?: string;
+  runId?: string;
+  executionId?: string;
   args: unknown;
   shell?: { kind: ShellKind; executable: string; segments?: string[]; tail?: string };
   verdict?: Record<string, unknown>;
@@ -369,9 +382,14 @@ export function createKernel(options: KernelOptions = {}): Kernel {
     // 每种失败都返回稳定错误码，供调用方分支处理。
     // 工具从 context 读取配置快照和日志接口；取消信号由循环或适配器传入。
     // 所有调用都经过权限判定，并将拒绝、失败和成功结果写入会话记录。
-    async call(name: string, args?: unknown, options: { readonly callId?: string; readonly signal?: AbortSignal; readonly runId?: string; readonly executionId?: string } = {}) {
+    async call(name: string, args?: unknown, options: {
+      readonly callId?: string; readonly signal?: AbortSignal; readonly sessionId?: string; readonly runId?: string;
+      readonly executionId?: string; readonly userSeq?: number; readonly parentCallId?: string;
+      readonly parentRunId?: string; readonly parentExecutionId?: string;
+    } = {}) {
       // `options.callId` 用于将工具结果关联到模型发起的调用。
-      const entry: ToolEvent = { kind: 'tool', tool: name, callId: options.callId, args };
+      const entry: ToolEvent = { kind: 'tool', tool: name, callId: options.callId, parentCallId: options.parentCallId,
+        sessionId: options.sessionId, runId: options.runId, executionId: options.executionId, args };
       const tool = tools.get(name);
       if (!tool) {
         // 即使工具未登记也要记录失败结果，确保本轮中的每个模型调用都有对应结果。
@@ -561,11 +579,17 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       };
       let success: ReturnType<typeof resultOf>;
       try {
-          const runTool = (runPermission: PermissionContext, runArgs: unknown = args) => tool.run(runArgs, { ...context, permission: runPermission, signal: options.signal, target: network, shell,
+          const runTool = (runPermission: PermissionContext, runArgs: unknown = args) => tool.run(runArgs, { ...context,
+            permission: runPermission, signal: options.signal, target: network, shell,
             ...(preflightResult === undefined ? {} : { preflightResult }),
+            ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
             ...(options.runId === undefined ? {} : { runId: options.runId }),
             ...(options.executionId === undefined ? {} : { executionId: options.executionId }),
+            ...(options.userSeq === undefined ? {} : { userSeq: options.userSeq }),
             ...(options.callId === undefined ? {} : { callId: options.callId }),
+            ...(options.parentCallId === undefined ? {} : { parentCallId: options.parentCallId }),
+            ...(options.parentRunId === undefined ? {} : { parentRunId: options.parentRunId }),
+            ...(options.parentExecutionId === undefined ? {} : { parentExecutionId: options.parentExecutionId }),
             ...(approvedScriptBinding === undefined ? {} : { scriptBinding: approvedScriptBinding }) });
           if (['create', 'write', 'edit', 'delete'].includes(name) && typeof args.path === 'string') {
             const target = await resolveWithin(boundaryOf(config), args.path, { forWrite: true, cwd: workingDirectoryOf(config) });

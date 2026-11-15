@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createSessionLog } from '../dist/index.js';
 import { parseSessionEvents } from '../dist/session/format.js';
 import type { SessionEvent } from '../dist/session/format.js';
+import { createRunAcceptance } from '../dist/session/run.js';
 import { estimateRequest, usageEvent } from '../dist/session/usage.js';
 
 async function withDirectory<TResult>(run: (directory: string) => TResult | Promise<TResult>): Promise<TResult> {
@@ -33,7 +34,7 @@ test('a new record starts with a line that names the format, the project and the
     const lines = (await readFile(session.path, 'utf8')).split('\n').filter((line) => line !== '').map((line) => JSON.parse(line) as Record<string, unknown>);
     assert.deepEqual(lines[0], {
       kind: 'session',
-      formatVersion: 2,
+      formatVersion: 4,
       sessionId: 'run-1',
       projectRoot: '/repo',
       createdAt: lines[0].createdAt,
@@ -58,6 +59,61 @@ test('session policy events must be ignorable and contain a valid restore snapsh
   const legacyNever = { seq: 0, kind: 'sessionPolicy', ignorable: true, override: 'never', consecutive: 3, total: 3, forcedToAsk: true };
   assert.equal(parseSessionEvents([header, none] as unknown as SessionEvent[]).events[0].override, 'none');
   assert.equal(parseSessionEvents([header, legacyNever] as unknown as SessionEvent[]).events[0].override, 'never', 'stored legacy never keeps its old identity');
+});
+
+test('run steering events require format 3 and keep accepted input separate from application', () => {
+  const run = createRunAcceptance('run-input', 'start the task', null, 'human');
+  const header = { kind: 'session', formatVersion: 3, sessionId: 'run-input', projectRoot: '' };
+  const user = { seq: 0, kind: 'user', text: 'start the task', run };
+  const accepted = {
+    seq: 1, kind: 'runInput', mode: 'steer', state: 'accepted', inputId: 'input-1', runId: run.runId,
+    source: 'human', text: 'keep the existing route', acceptedAt: '2026-11-15T00:00:00.000Z',
+  };
+  const applied = {
+    seq: 2, kind: 'runInput', mode: 'steer', state: 'applied', inputId: 'input-1', runId: run.runId,
+    appliedAt: '2026-11-15T00:00:01.000Z',
+  };
+  assert.deepEqual(parseSessionEvents([header, user, accepted, applied] as unknown as SessionEvent[])
+    .events.filter((event) => event.kind === 'runInput').map((event) => event.state), ['accepted', 'applied']);
+  assert.throws(() => parseSessionEvents([header, user, accepted, applied, {
+    ...applied, seq: 3, appliedAt: '2026-11-15T00:00:02.000Z',
+  }] as unknown as SessionEvent[]), { code: 'session_run_input_transition_invalid' });
+  const cancelled = {
+    seq: 2, kind: 'runInput', mode: 'steer', state: 'cancelled', inputId: 'input-1', runId: run.runId,
+    cancelledAt: '2026-11-15T00:00:01.000Z',
+  };
+  assert.deepEqual(parseSessionEvents([header, user, accepted, cancelled] as unknown as SessionEvent[])
+    .events.filter((event) => event.kind === 'runInput').map((event) => event.state), ['accepted', 'cancelled']);
+  assert.throws(() => parseSessionEvents([header, user, accepted, {
+    seq: 2, kind: 'turn', ignorable: true, status: 'cancelled', userSeq: 0, runId: run.runId,
+  }] as unknown as SessionEvent[]), { code: 'session_run_input_pending' });
+  assert.throws(() => parseSessionEvents([{ ...header, formatVersion: 2 }, user, accepted] as unknown as SessionEvent[]), {
+    code: 'session_event_version_unsupported',
+  });
+  const excess = Array.from({ length: 17 }, (_, index) => ({
+    seq: index + 1, kind: 'runInput', mode: 'steer', state: 'accepted', inputId: `input-${index}`,
+    runId: run.runId, source: 'human', text: `input ${index}`, acceptedAt: '2026-11-15T00:00:00.000Z',
+  }));
+  assert.throws(() => parseSessionEvents([header, user, ...excess] as unknown as SessionEvent[]), {
+    code: 'session_run_input_limit_exceeded',
+  });
+});
+
+test('a child Run Acceptance carries durable parent identity and requires Session format 4', () => {
+  const acceptance = createRunAcceptance('parent.sub-1', 'inspect child', { parentRunId: 'parent-run' }, 'controller:subagent', undefined, undefined, {
+    sessionId: 'parent', runId: '123e4567-e89b-42d3-a456-426614174000', subrunId: 'parent.sub-1', callId: 'tool-call-1',
+  });
+  assert.equal(acceptance.version, 3);
+  assert.deepEqual(acceptance.parentage, {
+    sessionId: 'parent', runId: '123e4567-e89b-42d3-a456-426614174000', subrunId: 'parent.sub-1', callId: 'tool-call-1',
+  });
+  const user = { seq: 0, kind: 'user', text: 'inspect child', run: acceptance };
+  assert.deepEqual(parseSessionEvents([
+    { kind: 'session', formatVersion: 4, sessionId: 'parent.sub-1', projectRoot: '' }, user,
+  ] as unknown as SessionEvent[]).events[0].run, acceptance);
+  assert.throws(() => parseSessionEvents([
+    { kind: 'session', formatVersion: 3, sessionId: 'parent.sub-1', projectRoot: '' }, user,
+  ] as unknown as SessionEvent[]), { code: 'session_run_acceptance_version_unsupported' });
 });
 
 test('session MCP trust events are ignorable and validate the server identity', () => {
@@ -136,11 +192,11 @@ test('a record written before the first line existed still reads and continues',
 test('a record from a newer format is refused instead of half read', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'future.jsonl');
-    await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 3, sessionId: 'future', projectRoot: '/repo', createdAt: 'x' })}\n${tool(0, 'one')}\n`);
+    await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 5, sessionId: 'future', projectRoot: '/repo', createdAt: 'x' })}\n${tool(0, 'one')}\n`);
     await assert.rejects(() => createSessionLog({ directory, id: 'future' }).read(), (error) => {
       const failure = error as { code?: string; detail: string };
       assert.equal(failure.code, 'session_version_unsupported');
-      assert.match(failure.detail, /record is version 3/);
+      assert.match(failure.detail, /record is version 5/);
       return true;
     });
   });

@@ -18,6 +18,7 @@ import { createInteractivePermissionContext } from '../capability/permission-cap
 
 const id = { type: 'string', minLength: 1, maxLength: 160 };
 const root = { type: 'string', minLength: 1, maxLength: 4096, description: 'Absolute project root authorized when this server started.' };
+const callId = { type: 'string', minLength: 1, maxLength: 256 };
 const providerDiagnostic = { type: 'object', additionalProperties: false, properties: {
   category: { type: 'string', enum: ['authentication', 'rate_limit', 'client', 'server', 'http', 'transport', 'stream', 'invalid_response', 'cancelled'] },
   status: { type: 'integer', minimum: 100, maximum: 599 },
@@ -78,6 +79,19 @@ const durableReceiptOutput = object({
 const runPageOutput = object({ runId: id, json: { type: 'string', maxLength: 8192 }, offset: { type: 'integer', minimum: 0 },
   nextOffset: { type: ['integer', 'null'] }, totalCharacters: { type: 'integer', minimum: 0 },
 }, ['runId', 'json', 'offset', 'nextOffset', 'totalCharacters']);
+const subrunReferenceOutput = object({ subrunId: id, sessionId: id, runId: id, parentRunId: id, parentCallId: callId },
+  ['subrunId', 'sessionId', 'runId', 'parentRunId']);
+const subrunStatusOutput = object({
+  subrunId: id, sessionId: id, runId: id, parentRunId: id, parentCallId: callId,
+  state: { type: 'string', enum: ['starting', 'running', 'completed', 'failed', 'cancelled', 'unknown'] },
+  phase: { type: ['string', 'null'], maxLength: 64 },
+  task: { type: ['object', 'null'], additionalProperties: true },
+  pendingInteractions: object({ approvals: { type: 'integer', minimum: 0 }, questions: { type: 'integer', minimum: 0 } }, ['approvals', 'questions']),
+  errorCode: { type: 'string', maxLength: 80 },
+  result: object({ state: { type: 'string', maxLength: 32 }, textCharacters: { type: 'integer', minimum: 0 },
+    validation: { type: 'object', additionalProperties: true } }, ['state', 'textCharacters']),
+  startedAt: { type: 'number', minimum: 0 }, updatedAt: { type: 'number', minimum: 0 }, completedAt: { type: 'number', minimum: 0 },
+}, ['subrunId', 'sessionId', 'runId', 'parentRunId', 'state', 'phase', 'task', 'pendingInteractions', 'startedAt', 'updatedAt']);
 const operationProperties = {
   operationId: id, sessionId: id, state: { type: 'string', enum: ['running', 'done', 'failed', 'cancelled'] },
   reused: { type: 'boolean' }, receipt: durableReceiptOutput,
@@ -329,6 +343,25 @@ const tools: Tool[] = [
     inputSchema: object({ operationId: id, timeoutMs: { type: 'integer', minimum: 0, maximum: 300_000, default: 60_000 } }, ['operationId']), outputSchema: awaitOutput },
   { name: 'ligule_run_cancel', description: 'Cancel this known operation and wait for Host cleanup. Reports terminated only after it settles. Completed operations keep their outcome; other sessions are unaffected.',
     inputSchema: object({ operationId: id }, ['operationId']), outputSchema: object({ ...operationProperties, terminated: { type: 'boolean' } }, ['operationId', 'sessionId', 'state', 'terminated']) },
+  { name: 'ligule_subrun_start', description: 'Start one child Run under this session’s expected active parentRunId. The same Host-owned manager, Permission, Policy and shared task budget are used; this is not an independent background job.',
+    inputSchema: object({ sessionId: id, parentRunId: id, task: { type: 'string', minLength: 1, maxLength: 65536 } }, ['sessionId', 'parentRunId', 'task']), outputSchema: subrunReferenceOutput },
+  { name: 'ligule_subrun_status', description: 'Read a child Run owned by this parent Run. After Host restart, status is read from the persisted child Session without replaying work.',
+    inputSchema: object({ sessionId: id, parentRunId: id, subrunId: id }, ['sessionId', 'parentRunId', 'subrunId']), outputSchema: subrunStatusOutput },
+  { name: 'ligule_subrun_message', description: 'Send bounded steering to one active child Run. The Host derives source from this connection and checks both child IDs.',
+    inputSchema: object({ sessionId: id, parentRunId: id, subrunId: id, runId: id, input: { type: 'string', minLength: 1, maxLength: 65536 } },
+      ['sessionId', 'parentRunId', 'subrunId', 'runId', 'input']),
+    outputSchema: object({ subrunId: id, inputId: id, runId: id, state: { type: 'string', enum: ['accepted'] },
+      source: { type: 'string', enum: ['human', 'controller'] }, pendingCount: { type: 'integer', minimum: 0 } },
+      ['subrunId', 'inputId', 'runId', 'state', 'source', 'pendingCount']) },
+  { name: 'ligule_subrun_wait', description: 'Wait for one to eight children. A timeout returns current status without cancelling any child; the wait is capped at 30 seconds.',
+    inputSchema: object({ sessionId: id, parentRunId: id, subrunIds: { type: 'array', minItems: 1, maxItems: 8, items: id },
+      timeoutMs: { type: 'integer', minimum: 1, maximum: 30_000, default: 30_000 } }, ['sessionId', 'parentRunId', 'subrunIds']),
+    outputSchema: object({ subruns: { type: 'array', maxItems: 8, items: subrunStatusOutput }, timedOut: { type: 'boolean' } }, ['subruns', 'timedOut']) },
+  { name: 'ligule_subrun_cancel', description: 'Request cancellation of one child Run by both child IDs. The response reports the request; use status or wait to confirm settlement.',
+    inputSchema: object({ sessionId: id, parentRunId: id, subrunId: id, runId: id }, ['sessionId', 'parentRunId', 'subrunId', 'runId']),
+    outputSchema: object({ subrunId: id, runId: id, cancelRequested: { type: 'boolean' },
+      state: { type: 'string', enum: ['starting', 'running', 'completed', 'failed', 'cancelled', 'unknown'] } },
+      ['subrunId', 'runId', 'cancelRequested', 'state']) },
   { name: 'ligule_session_read', description: 'Read real persistent records, newest page first (records inside a page are chronological). Use nextBefore as before for older pages. Each json field is a record JSON fragment, at most 8192 UTF-16 characters. If nextOffset is non-null, call with at=that seq and offset=nextOffset until null, concatenating fragments before JSON.parse. at and before are exclusive. This preserves complete large records without unbounded responses.',
     inputSchema: object({ sessionId: id, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 }, before: { type: 'integer', minimum: 1 }, at: { type: 'integer', minimum: 1 }, offset: { type: 'integer', minimum: 0, default: 0 } }, ['sessionId']),
     outputSchema: object({ sessionId: id, nextBefore: { type: ['integer', 'null'] }, hasMore: { type: 'boolean' }, provisionalOutput, provisionalOutputError: { type: ['string', 'null'] }, records: { type: 'array', maxItems: 50, items: object({ seq: { type: 'integer' }, kind: { type: 'string' }, json: { type: 'string', maxLength: 8192 }, offset: { type: 'integer' }, nextOffset: { type: ['integer', 'null'] }, totalCharacters: { type: 'integer' } }, ['seq', 'kind', 'json', 'offset', 'nextOffset', 'totalCharacters']) } }, ['sessionId', 'records', 'nextBefore', 'hasMore']) },
@@ -347,6 +380,10 @@ interface Arguments {
   delegation?: DelegationSpec;
   requestKey?: string;
   runId?: string;
+  parentRunId?: string;
+  subrunId?: string;
+  subrunIds?: string[];
+  task?: string;
   input?: string;
   initial?: McpInitialSettings;
   changes?: McpSessionChanges;
@@ -410,9 +447,9 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
     capabilities: { tools: {}, logging: {} },
     instructions: grant === undefined
       ? operatorEnabled
-        ? 'One local stdio operator for the explicitly authorized project. This server was launched with --operator, so session-only settings and replies to real pending approvals/questions are available. Policy decisions still run in Host; hard denials cannot be overridden. Use ligule_run to delegate and wait in one call, or run_start/await/status/cancel for separate control. Idle sessions can be explicitly closed after queued messages are cleared. Notifications are best-effort. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
-        : 'One local stdio controller for the explicitly authorized project. Session creation/open/close/list, run, run_start/await/status/cancel, session configuration reads, message sending and record paging are available. Ordinary approvals and questions wait for the local Desktop/TUI user; MCP replies and settings changes require the explicit --operator flag. Idle sessions can be explicitly closed after queued messages are cleared. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
-      : `One local stdio controller for project ${grant.projectRoot}, bounded by grant ${grant.id} (${grant.maxPermissionProfile}, network up to ${grant.maxNetwork}, policies: ${grant.allowedPolicies.join(', ')}). The grant is not remote identity authentication and does not override OS sandbox limits or hard Policy denials.${operatorEnabled ? ' --operator also allows ordinary approved interactions.' : ' Ordinary approvals and questions wait for the local Desktop/TUI user; MCP replies and settings changes are disabled.'} Idle sessions can be explicitly closed after queued messages are cleared. Use ligule_run to delegate and wait in one call. Disconnect cancels active runs and releases locks.`,
+        ? 'One local stdio operator for the explicitly authorized project. This server was launched with --operator, so session-only settings and replies to real pending approvals/questions are available. Policy decisions still run in Host; hard denials cannot be overridden. Use ligule_run to delegate and wait in one call, or run_start/await/status/cancel for separate control. Use ligule_subrun_* to control child Runs under an active parent. Idle sessions can be explicitly closed after queued messages are cleared. Notifications are best-effort. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
+        : 'One local stdio controller for the explicitly authorized project. Session creation/open/close/list, run, run_start/await/status/cancel, child subrun controls, session configuration reads, message sending and record paging are available. Ordinary approvals and questions wait for the local Desktop/TUI user; MCP replies and settings changes require the explicit --operator flag. Idle sessions can be explicitly closed after queued messages are cleared. Disconnect cancels active runs and releases locks. Operation IDs and queued messages are process-local; Session JSONL persists.'
+      : `One local stdio controller for project ${grant.projectRoot}, bounded by grant ${grant.id} (${grant.maxPermissionProfile}, network up to ${grant.maxNetwork}, policies: ${grant.allowedPolicies.join(', ')}). The grant is not remote identity authentication and does not override OS sandbox limits or hard Policy denials.${operatorEnabled ? ' --operator also allows ordinary approved interactions.' : ' Ordinary approvals and questions wait for the local Desktop/TUI user; MCP replies and settings changes are disabled.'} Idle sessions can be explicitly closed after queued messages are cleared. Use ligule_run to delegate and ligule_subrun_* to control children under an active parent. Disconnect cancels active runs and releases locks.`,
   });
   const control = createControl(host, authorizedRoot, {
     operator: operatorEnabled,
@@ -479,6 +516,11 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
         case 'ligule_run_status': result = control.status(input.operationId!, input.after ?? 0, input.limit ?? 20); break;
         case 'ligule_run_await': result = await control.await(input.operationId!, input.timeoutMs ?? 60_000); break;
         case 'ligule_run_cancel': result = await control.cancel(input.operationId!); break;
+        case 'ligule_subrun_start': result = await control.subrunStart(input.sessionId!, input.parentRunId!, input.task!); break;
+        case 'ligule_subrun_status': result = await control.subrunStatus(input.sessionId!, input.parentRunId!, input.subrunId!); break;
+        case 'ligule_subrun_message': result = await control.subrunMessage(input.sessionId!, input.parentRunId!, input.subrunId!, input.runId!, input.input!); break;
+        case 'ligule_subrun_wait': result = await control.subrunWait(input.sessionId!, input.parentRunId!, input.subrunIds!, input.timeoutMs ?? 30_000); break;
+        case 'ligule_subrun_cancel': result = await control.subrunCancel(input.sessionId!, input.parentRunId!, input.subrunId!, input.runId!); break;
         case 'ligule_session_read': result = await control.read(input.sessionId!, input.before, input.limit ?? 20, input.at, input.offset); break;
   case 'ligule_usage_get': result = await control.usage(input.sessionId!); break;
         default: throw new KernelError('tool_unknown');

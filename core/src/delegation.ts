@@ -164,7 +164,10 @@ export interface RunResult {
   readonly diagnostic?: { readonly code: string; readonly provider?: ProviderDiagnostic };
 }
 
-const CANCELLED_CODES = new Set(['ask_user_cancelled', 'exec_cancelled', 'loop_cancelled', 'provider_cancelled', 'task_cancelled']);
+const CANCELLED_CODES = new Set([
+  'ask_user_cancelled', 'exec_cancelled', 'loop_cancelled', 'provider_cancelled', 'task_cancelled',
+  'subagent_cancelled', 'subagent_parent_cancelled', 'subagent_host_closed',
+]);
 
 function stopReasonForCode(code: string): RunStopReason {
   if (CANCELLED_CODES.has(code)) return 'cancelled';

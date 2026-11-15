@@ -164,6 +164,7 @@ export function sessionTurnToAtif(
   const resultEvents = new Map<string, SessionEvent>();
   const callOwner = new Map<string, number>();
   const assistantSteps = new Map<string, AtifStep>();
+  const acceptedRunInputs = new Map<string, SessionEvent>();
   const steps: AtifStep[] = [];
   const missing: string[] = [];
   let stepId = 0;
@@ -223,11 +224,37 @@ export function sessionTurnToAtif(
     }
 
     if (event.kind === 'tool') {
+      if (typeof event.parentCallId === 'string') continue;
       if (typeof event.callId !== 'string' || !callOwner.has(event.callId)) throw new TypeError('atif_tool_result_without_call');
       if (resultEvents.has(event.callId)) throw new TypeError('atif_tool_result_duplicate');
       const owner = callOwner.get(event.callId)!;
       if (owner < previousAssistantSeq) throw new TypeError('atif_tool_result_order_invalid');
       resultEvents.set(event.callId, event);
+      continue;
+    }
+
+    if (event.kind === 'runInput') {
+      if (typeof event.inputId !== 'string' || event.runId !== runId) throw new TypeError('atif_run_input_invalid');
+      if (event.state === 'accepted') {
+        acceptedRunInputs.set(event.inputId, event);
+      } else if (event.state === 'applied') {
+        const accepted = acceptedRunInputs.get(event.inputId);
+        if (accepted === undefined || (accepted.source !== 'human' && accepted.source !== 'controller')
+          || typeof accepted.text !== 'string') throw new TypeError('atif_run_input_transition_invalid');
+        const runInput = {
+          input_id: event.inputId,
+          source: accepted.source,
+          run_id: runId,
+        };
+        steps.push({
+          step_id: ++stepId,
+          source: 'user',
+          ...(typeof event.appliedAt === 'string' && Number.isFinite(Date.parse(event.appliedAt)) ? { timestamp: event.appliedAt } : {}),
+          message: includeSensitiveContent ? accepted.text : REDACTED,
+          extra: { ligule: { run_input: runInput, ...(!includeSensitiveContent ? { content_redacted: true } : {}) } },
+        });
+        acceptedRunInputs.delete(event.inputId);
+      }
       continue;
     }
 

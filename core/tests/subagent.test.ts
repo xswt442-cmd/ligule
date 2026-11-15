@@ -51,6 +51,7 @@ type RecordedEvent = {
   readonly kind?: string;
   readonly sessionId?: string;
   readonly text?: string;
+  readonly run?: { readonly runId?: string };
   readonly tool?: string;
   readonly status?: string;
   readonly code?: string;
@@ -226,7 +227,13 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
   assert.equal(provider.requests[1].system.startsWith('shared static prefix'), true, '静态前缀沿用父的那一份（D9）');
 
   const files = await readdir(session.directory);
-  assert.deepEqual(files.sort(), ['parent.jsonl', 'parent.sub-1.jsonl']);
+  assert.deepEqual(files.sort(), ['parent.jsonl', 'parent.sub-1.jsonl', `run-${result.result.runId}.result.json`].sort());
+  const persisted = JSON.parse(await readFile(join(session.directory, `run-${result.result.runId}.result.json`), 'utf8')) as {
+    runId: string; sessionId: string; result: { state: string };
+  };
+  assert.equal(persisted.runId, result.result.runId);
+  assert.equal(persisted.sessionId, result.sessionId);
+  assert.equal(persisted.result.state, 'completed');
   const side = await readEvents(join(session.directory, 'parent.sub-1.jsonl'));
   // 分支记录首行说明父会话和派生关系。
   assert.equal(side[0].kind, 'session');
@@ -234,6 +241,7 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
   const sideEvents = side.filter((event) => event.kind !== 'session');
   assert.equal(sideEvents[0].kind, 'user');
   assert.equal(sideEvents[0].text, 'delete the thing');
+  assert.equal((sideEvents[0].run as { runId?: string }).runId, result.result.runId);
   const denied = sideEvents.find((event) => event.kind === 'tool' && event.tool === 'exec');
   assert.equal(denied!.result.code, 'policy_denied');
   const parent = await readEvents(join(session.directory, 'parent.jsonl'));
@@ -736,4 +744,125 @@ test('cancelling a parent run returns the cancelled child Session reference', as
   const childReference = parentEvents.find((event) => event.kind === 'tool' && event.tool === 'subagent');
   assert.equal(childReference!.result.content.sessionId, result.sessionId);
   assert.equal(childReference!.result.content.result!.state, 'cancelled');
+});
+
+test('the model-callable subagent controls start, inspect, steer, wait, and cancel children', { timeout: 15_000 }, async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary, loop: { iterations: 8, modelCalls: 16, maxConcurrentSubagents: 3 } } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-controls-'), id: 'controlled-parent' });
+  const parentRunId = '123e4567-e89b-42d3-a456-426614174000';
+  const requests: ModelRequest[] = [];
+  let childCalls = 0;
+  let releaseMessageChild!: () => void;
+  let markMessageChildStarted!: () => void;
+  let markCancellationChildStarted!: () => void;
+  let markClosingChildStarted!: () => void;
+  let cancellationChildCount = 0;
+  const messageGate = new Promise<void>((resolve) => { releaseMessageChild = resolve; });
+  const messageChildStarted = new Promise<void>((resolve) => { markMessageChildStarted = () => resolve(); });
+  const cancellationChildStarted = new Promise<void>((resolve) => { markCancellationChildStarted = () => resolve(); });
+  const closingChildStarted = new Promise<void>((resolve) => { markClosingChildStarted = () => resolve(); });
+  const provider = {
+    name: 'subagent-controls',
+    model: 'subagent-controls',
+    capabilities: {},
+    async *stream(request: ModelRequest, { signal }: { readonly signal?: AbortSignal }): AsyncGenerator<ProviderEvent> {
+      requests.push(request);
+      const userText = request.messages.filter((message) => message.role === 'user').map((message) => message.text).join('\n');
+      if (userText.includes('message child')) {
+        childCalls += 1;
+        if (childCalls === 1) {
+          markMessageChildStarted();
+          await messageGate;
+          yield { type: 'tool-call', id: 'message-child-read', name: 'read', args: { path: 'note.txt' } };
+          return;
+        }
+        yield { type: 'text', text: 'message child finished' };
+        return;
+      }
+      if (userText.includes('cancel child')) {
+        cancellationChildCount += 1;
+        if (cancellationChildCount === 1) markCancellationChildStarted();
+        else markClosingChildStarted();
+        if (signal?.aborted) throw new KernelError('provider_cancelled');
+        await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+        throw new KernelError('provider_cancelled');
+      }
+      yield { type: 'text', text: 'unexpected child task' };
+    },
+  };
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  minimalPlugin.setup(kernel);
+  const runtime = createSubagentPlugin({
+    config, provider, chain, prompt: { staticPrefix: '' }, directory: session.directory,
+    sessionId: 'controlled-parent', plugins: [minimalPlugin], parentSession: session,
+  });
+  const unregister = runtime.setup(kernel);
+
+  try {
+    const child = await kernel.call('subagent_start', { task: 'message child' }, {
+      sessionId: 'controlled-parent', runId: parentRunId, callId: 'parent-start-call',
+    }) as { subrunId: string; sessionId: string; runId: string };
+    await messageChildStarted;
+    const status = await kernel.call('subagent_status', { subrunId: child.subrunId }, {
+      sessionId: 'controlled-parent', runId: parentRunId,
+    }) as { state: string; runId: string };
+    assert.equal(status.state, 'running');
+    assert.equal(status.runId, child.runId);
+    const accepted = await kernel.call('subagent_message', {
+      subrunId: child.subrunId, runId: child.runId, input: 'Use the updated requirement in the next safe step.',
+    }, { sessionId: 'controlled-parent', runId: parentRunId }) as { source: string; state: string };
+    assert.equal(accepted.source, 'controller');
+    assert.equal(accepted.state, 'accepted');
+    const timedOut = await kernel.call('subagent_wait', { subrunIds: [child.subrunId], timeoutMs: 20 }, {
+      sessionId: 'controlled-parent', runId: parentRunId,
+    }) as { timedOut: boolean; subruns: { state: string }[] };
+    assert.equal(timedOut.timedOut, true);
+    assert.equal(timedOut.subruns[0]?.state, 'running');
+
+    releaseMessageChild();
+    const waited = await kernel.call('subagent_wait', { subrunIds: [child.subrunId], timeoutMs: 5_000 }, {
+      sessionId: 'controlled-parent', runId: parentRunId,
+    }) as { timedOut: boolean; subruns: { state: string }[] };
+    assert.equal(waited.timedOut, false);
+    assert.equal(waited.subruns[0]?.state, 'completed');
+    assert.ok(requests.some((request) => request.messages.some((message) => message.role === 'user'
+      && message.text.includes('Use the updated requirement'))), 'the accepted message reaches a later child model request');
+
+    const cancellationChild = await kernel.call('subagent_start', { task: 'cancel child' }, {
+      sessionId: 'controlled-parent', runId: parentRunId, callId: 'parent-cancel-start-call',
+    }) as { subrunId: string; runId: string };
+    await cancellationChildStarted;
+    const cancellation = await kernel.call('subagent_cancel', {
+      subrunId: cancellationChild.subrunId, runId: cancellationChild.runId,
+    }, { sessionId: 'controlled-parent', runId: parentRunId }) as { cancelRequested: boolean; state: string };
+    assert.equal(cancellation.cancelRequested, true);
+    assert.equal(cancellation.state, 'running');
+    const cancelled = await kernel.call('subagent_wait', { subrunIds: [cancellationChild.subrunId], timeoutMs: 5_000 }, {
+      sessionId: 'controlled-parent', runId: parentRunId,
+    }) as { timedOut: boolean; subruns: { state: string }[] };
+    assert.equal(cancelled.timedOut, false);
+    assert.equal(cancelled.subruns[0]?.state, 'cancelled');
+    await runtime.finishParent(parentRunId);
+    await assert.rejects(kernel.call('subagent_start', { task: 'late child after parent completion' }, {
+      sessionId: 'controlled-parent', runId: parentRunId,
+    }), { code: 'subagent_parent_not_active' });
+    const closingChild = await runtime.start({ task: 'cancel child during manager close' }, {
+      runId: '223e4567-e89b-42d3-a456-426614174001', permission: fullAccess,
+    });
+    await closingChildStarted;
+    await runtime.close();
+    const closingEvents = await readEvents(join(session.directory, `${closingChild.sessionId}.jsonl`));
+    assert.ok(closingEvents.some((event) => event.kind === 'turn' && event.status === 'cancelled'),
+      'manager close waits for an active child to persist its cancelled terminal state');
+    await assert.rejects(runtime.start({ task: 'late child after Host close' }, { permission: fullAccess, runId: parentRunId }), {
+      code: 'subagent_host_closed',
+    });
+  } finally {
+    releaseMessageChild();
+    await runtime.close();
+    unregister();
+    await session.close();
+  }
 });

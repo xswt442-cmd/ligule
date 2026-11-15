@@ -40,7 +40,10 @@ if (missing.length > 0) throw new Error(`stub_model_prerequisite_missing:${missi
 const PROOF_FILES = [
   { name: 'model-denial-proof.txt', content: 'DENIED' },
   { name: 'model-allow-proof.txt', content: 'ALLOWED' },
+  { name: 'model-steer-proof.txt', content: 'SHOULD_NOT_WRITE' },
 ];
+const DESKTOP_STEER_PROMPT = 'desktop-steer-proof';
+const DESKTOP_STEER_INSTRUCTION = 'Keep the proof file absent.';
 const providerLabel = '本地 stub 模型';
 const externalControlGapOnly = process.argv.includes('--external-control-gap-only');
 const externalControlOnly = externalControlGapOnly || process.argv.includes('--external-control-only');
@@ -82,6 +85,7 @@ const server = createServer(async (request, response) => {
       const sessionQuestionFollowups = providerRequests.filter(item => item.sessionQuestionTurn && item.followup);
       jsonResponse(response, 200, {
         requests: providerRequests.length,
+        steeringRequests: providerRequests.filter(item => item.steeringInputSeen).length,
         hang: hangRequests,
         skillMcpProof,
         externalFetchCount,
@@ -121,6 +125,13 @@ const server = createServer(async (request, response) => {
   const followup = messages.at(-1)?.role === 'tool';
   const sessionQuestionTurn = messages.some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('desktop-session-question-draft'));
   const sessionQuestionAnswer = sessionQuestionTurn && followup ? String(messages.at(-1)?.content ?? '') : '';
+  const steerPromptIndex = messages.findLastIndex(message => message.role === 'user'
+    && typeof message.content === 'string' && message.content.includes(DESKTOP_STEER_PROMPT));
+  const latestUserIndex = messages.findLastIndex(message => message.role === 'user');
+  const desktopSteerTurn = steerPromptIndex >= 0 && (latestUserIndex === steerPromptIndex
+    || (latestUserIndex > steerPromptIndex && String(messages[latestUserIndex]?.content ?? '').includes(DESKTOP_STEER_INSTRUCTION)));
+  const desktopSteerToolReturned = desktopSteerTurn && messages.slice(steerPromptIndex + 1, latestUserIndex + 1)
+    .some(message => message.role === 'tool');
   const externalQuestionTurn = messages.some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('desktop-external-control-question'));
   const externalApprovalTurn = messages.some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('desktop-external-control-approval'));
   const externalGapTurn = prompt.includes('desktop-external-control-gap');
@@ -143,6 +154,7 @@ const server = createServer(async (request, response) => {
     ...(externalGapTurn ? { gapStreamChunks: 180 } : {}),
     skillMcpStep: workflowStep < 0 ? null : workflowStep,
     ...(workflowStep < 0 ? {} : { skillMcpProof: { ...skillMcpProof } }),
+    steeringInputSeen: desktopSteerTurn && String(messages[latestUserIndex]?.content ?? '').includes(DESKTOP_STEER_INSTRUCTION),
     hung: hangRequests,
   });
   // 保持连接打开但不返回响应，使 Host 持续等待模型结果。
@@ -156,6 +168,11 @@ const server = createServer(async (request, response) => {
   };
   if (prompt.includes('desktop-code-copy-proof')) {
     streamChunk(response, { choices: [{ index: 0, delta: { content: '```js\nconsole.log("原始代码🙂 <img src=x onerror=alert(1)>");\n```' } }] });
+    finish('stop');
+    return;
+  }
+  if (desktopSteerToolReturned) {
+    streamChunk(response, { choices: [{ index: 0, delta: { content: '已按当前运行中的补充指令结束。' } }] });
     finish('stop');
     return;
   }

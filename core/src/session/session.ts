@@ -48,9 +48,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function projectModelView(events: readonly SessionEvent[], blocks: readonly Pick<CompactionBlock, 'fromSeq' | 'toSeq' | 'text'>[] = []): unknown[] {
   const view = [];
+  const acceptedRunInputs = new Map<string, string>();
   let blockIndex = 0;
   let reasoning = '';
   for (const event of events) {
+    if (event.kind === 'runInput' && event.state === 'accepted'
+      && typeof event.inputId === 'string' && typeof event.text === 'string') {
+      acceptedRunInputs.set(event.inputId, event.text);
+    }
     while (blockIndex < blocks.length && event.seq > blocks[blockIndex].toSeq) blockIndex += 1;
     const block = blocks[blockIndex];
     if (block !== undefined && event.seq >= block.fromSeq) {
@@ -67,7 +72,11 @@ export function projectModelView(events: readonly SessionEvent[], blocks: readon
       view.push({ role: 'assistant', text: event.text, toolCalls: event.toolCalls,
         ...(assistantReasoning === '' ? {} : { reasoning: assistantReasoning }) });
       reasoning = '';
+    } else if (event.kind === 'runInput' && event.state === 'applied' && typeof event.inputId === 'string') {
+      const text = acceptedRunInputs.get(event.inputId);
+      if (text !== undefined) view.push({ role: 'user', text });
     } else if (event.kind === 'tool') {
+      if (typeof event.parentCallId === 'string') continue;
       if (!isRecord(event.result)) throw new TypeError('a tool event has no result object');
       const result = event.result;
       const content = result.content === '' && result.failed ? `${result.code}: ${result.reason ?? 'no output'}` : result.content;

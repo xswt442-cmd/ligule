@@ -2,9 +2,11 @@
 // 临时目录里的模块是真的 ESM 文件，用真的动态 import 跑；内核、判定链、提示词组装也都是真的。
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import {
   createConfig, createKernel, createPermissionContext, extensionSources, loadAssembly, loadExtensions, minimalPlugin,
@@ -15,6 +17,7 @@ import type { Host } from '../dist/host/host.js';
 import type { ModelRequest } from '../dist/kernel/loop.js';
 import type { PolicyMode } from '../dist/kernel/policy.js';
 import { testHostProvider } from './helpers/provider.ts';
+import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 
 type ExtensionFragment = { name: string; text: string; source: string };
 type ExtensionLoadOptions = Parameters<typeof loadExtensions>[1] & { config?: Record<string, never> };
@@ -297,4 +300,154 @@ test('a mode naming a fragment nobody registered fails at the request, not silen
     connection.request('session.create', {}).catch((error: unknown) => error)) as { code: string; detail: string };
   assert.equal(failure.code, 'mode_prompt_unavailable');
   assert.match(failure.detail, /absent/);
+});
+
+test('P10 nested extension request inherits cancellation from its active Host Run', { timeout: 20_000 }, async () => {
+  const root = await directoryWith({
+    'nested-extension.mjs': `import { writeFileSync } from 'node:fs';
+      import { join } from 'node:path';
+      export default function nested(host) {
+      host.registerTool({
+        name: 'extension_nested_exec',
+        description: 'Run the nested cancellation fixture.',
+        access: 'read',
+        parameters: { type: 'object', properties: { directory: { type: 'string' } }, required: ['directory'] },
+        run: async ({ directory }, context) => {
+          writeFileSync(join(directory, 'nested-parent-signal.txt'), context.signal === undefined ? 'missing' : 'present');
+          context.signal?.addEventListener('abort', () => writeFileSync(join(directory, 'nested-parent-aborted.txt'), 'aborted'), { once: true });
+          return await host.request('exec', { command: 'node nested-child.mjs' });
+        },
+      });
+    }`,
+  });
+  try {
+    await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+      const startedPath = join(projectDirectory, 'nested-started.txt');
+      const parentSignalPath = join(projectDirectory, 'nested-parent-signal.txt');
+      const parentAbortedPath = join(projectDirectory, 'nested-parent-aborted.txt');
+      const completedPath = join(projectDirectory, 'nested-completed.txt');
+      await client.request('workspace.trust', {
+        projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
+      });
+      client.onRequest((message) => message.method === 'approval.request' ? { decision: 'allow' } : undefined);
+      const running = client.request('run.start', {
+        sessionId,
+        input: JSON.stringify({ tool: 'extension_nested_exec', args: { directory: projectDirectory } }),
+      }).then(() => undefined, (error: unknown) => error);
+
+      await waitFor(() => existsSync(startedPath), { within: 5_000, every: 20 });
+      await waitFor(() => existsSync(parentSignalPath), { within: 1_000, every: 20 });
+      const parentSignal = await readFile(parentSignalPath, 'utf8');
+      const before = await client.request('status.get', { sessionId }) as {
+        task?: { modelCalls: number; executionElapsedMs: number; executionPaused: boolean } | null;
+      };
+      assert.ok(before.task);
+      await delay(350);
+      const during = await client.request('status.get', { sessionId }) as {
+        task?: { modelCalls: number; executionElapsedMs: number; executionPaused: boolean } | null;
+      };
+      assert.ok(during.task);
+      assert.equal(during.task.modelCalls, before.task.modelCalls, 'the delayed nested tool does not start another model request');
+      assert.equal(during.task.executionPaused, false, 'nested tool work remains active, not paused');
+      assert.ok(during.task.executionElapsedMs - before.task.executionElapsedMs >= 250,
+        'the shared Run budget continues to count nested tool work');
+      assert.deepEqual(await client.request('run.cancel', { sessionId }), { cancelled: true });
+      await waitFor(() => existsSync(parentAbortedPath), { within: 1_000, every: 20 });
+      await running;
+      await delay(2_200);
+
+      assert.equal(parentSignal, 'present', 'Host must pass the active Run signal to the outer extension tool');
+      assert.equal(await readFile(parentAbortedPath, 'utf8'), 'aborted', 'run.cancel must abort the active extension tool');
+      assert.equal(existsSync(completedPath), false,
+        `the nested exec process must stop with its parent Run (parentSignal=${parentSignal})`);
+      const record = await client.request('session.read', { sessionId }) as { events: {
+        kind?: string; tool?: string; callId?: string; parentCallId?: string; run?: { runId?: string }; runId?: string;
+      }[] };
+      const outer = record.events.find((event) => event.kind === 'tool' && event.tool === 'extension_nested_exec');
+      const nested = record.events.find((event) => event.kind === 'tool' && event.tool === 'exec');
+      const runId = record.events.find((event) => event.kind === 'user')?.run?.runId;
+      assert.ok(outer?.callId);
+      assert.ok(nested?.callId);
+      assert.equal(nested.parentCallId, outer.callId);
+      assert.equal(nested.runId, runId);
+    }, {
+      extensions: { paths: [join(root, 'nested-extension.mjs')], ignored: [] },
+      permission: fullAccess,
+      interactive: true,
+      permissionControl: true,
+      modeName: 'p10-nested',
+      setup: async ({ projectDirectory, homeDirectory }) => {
+        await writeFile(join(projectDirectory, 'nested-child.mjs'), [
+          "import { writeFileSync } from 'node:fs';",
+          "writeFileSync('nested-started.txt', 'started');",
+          'await new Promise((resolve) => setTimeout(resolve, 1600));',
+          "writeFileSync('nested-completed.txt', 'completed');",
+        ].join('\n'));
+        const directories = modeDirectories(projectDirectory, shippedModes, homeDirectory);
+        await mkdir(directories.user, { recursive: true });
+        await writeFile(join(directories.user, 'p10-nested.toml'), 'tools = "*"\nprompt = []\n');
+      },
+      testDirectory: 'testplace/tmp',
+      config: { limits: { execTimeoutMs: 8_000 } },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('P10 an extension event cannot start a tool call without an active execution context', { timeout: 15_000 }, async () => {
+  const root = await directoryWith({});
+  const resultPath = join(root, 'extension-request-result.txt');
+  const extensionPath = join(root, 'outside-run.mjs');
+  await writeFile(extensionPath, `import { writeFileSync } from 'node:fs';
+    export default function outsideRun(host) {
+      host.registerTool({
+        name: 'extension_event_probe',
+        description: 'Complete the local event-context fixture.',
+        access: 'read',
+        parameters: { type: 'object', properties: {} },
+        run: async () => ({ text: 'done' }),
+      });
+      host.onEvent((event) => {
+        if (event.kind !== 'tool' || event.tool !== 'extension_event_probe') return;
+        void host.request('exec', { command: 'node nested-child.mjs' }).then(
+          () => writeFileSync(${JSON.stringify(resultPath)}, 'completed'),
+          (error) => writeFileSync(${JSON.stringify(resultPath)}, String(error?.code ?? 'failed')),
+        );
+      });
+    }`);
+  try {
+    await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+      await writeFile(join(projectDirectory, 'nested-child.mjs'), [
+        "import { writeFileSync } from 'node:fs';",
+        "writeFileSync('outside-child-started.txt', 'started');",
+      ].join('\n'));
+      await client.request('workspace.trust', {
+        projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
+      });
+      client.onRequest((message) => message.method === 'approval.request' ? { decision: 'allow' } : undefined);
+      await client.request('run.start', {
+        sessionId, input: JSON.stringify({ tool: 'extension_event_probe', args: {} }),
+      });
+      await waitFor(() => existsSync(resultPath), { within: 2_000, every: 20 });
+
+      assert.equal(await readFile(resultPath, 'utf8'), 'extension_request_context_unavailable');
+      assert.equal(existsSync(join(projectDirectory, 'outside-child-started.txt')), false,
+        'an event listener must not start a command under the Run that happens to be active');
+    }, {
+      extensions: { paths: [extensionPath], ignored: [] },
+      permission: fullAccess,
+      interactive: true,
+      permissionControl: true,
+      modeName: 'p10-event',
+      setup: async ({ projectDirectory, homeDirectory }) => {
+        const directories = modeDirectories(projectDirectory, shippedModes, homeDirectory);
+        await mkdir(directories.user, { recursive: true });
+        await writeFile(join(directories.user, 'p10-event.toml'), 'tools = "*"\nprompt = []\n');
+      },
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

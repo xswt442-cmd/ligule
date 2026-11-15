@@ -108,11 +108,15 @@ flowchart LR
 
 `ligule mcp-server --project <绝对项目根>` 通过 [MCP 适配器](../../core/src/host/mcp-server.ts) 暴露本地控制工具。[控制门面](../../core/src/host/control.ts) 调用同一 Host，维护进程内 operation 状态，并将会话操作限制在启动时授权的项目内。默认模式拒绝需要审批的操作；明确启用 `--operator` 后，客户端可答复真实待决的审批与提问，并修改受支持的会话设置，但不能覆盖硬拒绝。可信 TUI/Desktop 可创建项目绑定的 [Agent Control Grant](../../core/src/host/agent-control.ts)；`--grant <id>` 将会话 Permission、网络和 Policy 限制在 Grant 的默认值与上限内，Host 会在请求时核验撤销、到期和项目绑定。连接关闭时会取消运行并释放会话锁；Session JSONL 持久保存会话记录，operation ID 和消息队列只在当前进程内有效。使用方法见 [Agent Control（MCP）指南](../agent-control/guide.zh-CN.md)。
 
+活动 Run 可通过 `run.steer` 接收有界的运行中输入；外控界面使用同一 Host 路径的 `session.control` `steer` action。Host 绑定目标 `runId`，从可信连接推导来源，且不接受调用方自报 Human。Session format v3 及之后的必需 `runInput` 事件分别记录接受和应用；模型投影与 Reviewer 证据只采用已应用输入。输入在工具组收束后、下一次 Provider 请求前应用；自然完成会同步关闭输入准入，避免竞态丢失。等待中的审批或问题会被取消，迟到答复不能作用于旧动作。v0–v2 Session 仍可读取，但不接受 `run.steer`。
+
 ### 委派执行与外控会话
 
 一次运行可带有 `DelegationSpec`，其中的 `mode` 和 `outputSchema` 由共享的[委派契约](../../core/src/delegation.ts)校验。内部 `subagent` 工具与 MCP 的 `ligule_run` / `ligule_run_start` 共用结构化输出验证和 `RunResult` 结果类型；外部 MCP 运行仍使用其原会话，不会自动创建子会话。
 
-内部子代理在同一 Host 进程中创建派生 Kernel、Loop 和独立 Session JSONL，记录 ID 为父 Session 的 `.sub-N`。子代理继承父会话的配置、Provider、插件工具、Permission 与 Policy 判定实例，但不注册 `subagent` 工具；每个父轮最多同时运行三个。子模式只能收窄父模式可用工具，模型调用次数、输出、思考和循环预算不能超过父上限。子任务的 RunResult 和 Session 引用作为父工具结果返回，因此失败或取消的子记录仍可查看。
+内部子代理在同一 Host 进程中创建派生 Kernel、Loop 和独立 Session JSONL，记录 ID 为父 Session 的 `.sub-N`。子代理继承父会话的配置、Provider、插件工具、Permission 与 Policy 判定实例，但不注册 `subagent` 工具；每个父轮默认最多同时运行三个，可通过 `[loop].maxConcurrentSubagents` 调整到最多八个。子模式只能收窄父模式可用工具，模型调用次数、输出、思考和循环预算不能超过父上限。子任务的 RunResult 和 Session 引用作为父工具结果返回，因此失败或取消的子记录仍可查看。
+
+等待式 `subagent` 工具继续保留。`subagent_start/status/message/wait/cancel` 与 Host `subrun.start/status/message/wait/cancel` 方法共用同一管理器和子 Session。子 Session ID 同时作为稳定的 `subrunId`；Session format v4 的 Run Acceptance 会保存父 Session、父 Run 和可选工具调用身份。Host 重启后可以从持久子 Session 与结果 sidecar 只读查询；中断的子任务标为 `unknown`，不会重放。等待超时不会取消子任务。父 Run 完成时先关闭新的子任务准入并等待活动子任务；父失败、取消或 Host 关闭时会取消并等待子任务写下终态。
 
 外部客户端通过本地 stdio MCP 进入 Control 门面，再由它操作授权项目中的 Host Session。可信 TUI/Desktop 通过本地 Agent Control IPC 观察状态、回答交互或接管任务；Host 仍是 Session 的写入者，锁阻止另一个 Host 并发写同一记录。答复结果和控制事件以 `source=human` 或 `source=controller` 区分本机用户与 MCP 操控者；只有本机用户答复可以保存审批记忆。接管会取消当前外控轮次、清空尚未发送的外部队列、释放 Host 会话锁并发出所有权转移事件。撤销工作区信任会使当前 Host 停止基于该信任启动的受管进程；其他 Host 通过共享信任记录定期复核并停止相关进程。Session JSONL 保存消息和工具事件；operation ID、事件缓存、待处理请求和消息队列属于 Control 进程内状态。服务重启后，如需实时状态、交互、记录读取或继续工作，应重新接回持久 Session，且旧运行编号不可继续使用；授权项目中的持久回执则可直接用 `ligule_run_get` 只读查询，无需打开 Session 写入方。`run.wait` 必须明确指定 origin，但该字段本身不授予权限：可信本地 UI 可读取本 Session 的 human 与 controller 回执；经过认证的 Agent Control 桥接可读取 human 回执和当前 Grant 的 controller 回执；其他 Host 只能读取自己的 controller scope。Host 根据持久化 Run 归属并结合调用方上下文判定权限。若 `requestKey` 在多个可见 scope 中都匹配，返回 `run_request_key_ambiguous`；调用方应使用唯一的 `runId` 选择回执。Host 返回结果前会检查对应回执。
 

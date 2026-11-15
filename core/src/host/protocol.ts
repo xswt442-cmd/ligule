@@ -36,6 +36,11 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly delegation?: DelegationSpec;
   readonly requestKey?: string;
   readonly runId?: string;
+  readonly parentRunId?: string;
+  readonly subrunId?: string;
+  readonly subrunIds?: string[];
+  readonly timeoutMs?: number;
+  readonly task?: string;
   readonly artifactKey?: string;
   readonly offset?: number;
   readonly directory?: string;
@@ -271,16 +276,17 @@ export const METHODS = Object.freeze({
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
   'session.control': {
-    description: 'Send a human action to the local Host that currently owns this externally controlled Session. The same Host remains its only writer; the local action can read its configuration, observe, message, answer, change permission while idle, cancel, or take over.',
+    description: 'Send a human action to the local Host that currently owns this externally controlled Session. The same Host remains its only writer; the local action can read its configuration, observe, send a follow-up, steer the expected active Run, answer, change permission while idle, cancel, or take over.',
     parameters: { type: 'object', properties: {
       projectRoot: { type: 'string', description: 'the exact workspace root that owns the session' },
       sessionId: SESSION_ID,
       request: { type: 'object', additionalProperties: false, properties: {
-        action: { type: 'string', enum: ['status', 'configuration', 'details', 'send', 'reply', 'permission', 'cancel', 'takeover'] },
+        action: { type: 'string', enum: ['status', 'configuration', 'details', 'send', 'steer', 'reply', 'permission', 'cancel', 'takeover'] },
         after: { type: 'integer', minimum: 0 },
         limit: { type: 'integer', minimum: 1, maximum: 50 },
         waitMs: { type: 'integer', minimum: 0, maximum: 30000 },
         input: { type: 'string', minLength: 1, maxLength: 65536 },
+        runId: SESSION_ID,
         requestId: SESSION_ID,
         type: { type: 'string', enum: ['approval', 'question'] },
         decision: { type: 'string', enum: ['allow', 'deny'] },
@@ -409,6 +415,49 @@ export const METHODS = Object.freeze({
   'run.cancel': {
     description: 'Stop the round this session is running; the call answering run.start reports loop_cancelled between model calls and provider_cancelled while one is in flight',
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
+  },
+  'run.steer': {
+    description: 'Persist one bounded input for the expected active Run; the Host derives the source from the trusted connection and applies it at the next safe model or tool-group boundary',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID,
+      runId: SESSION_ID,
+      input: { type: 'string', minLength: 1, maxLength: 65536 },
+    }, required: ['sessionId', 'runId', 'input'] },
+  },
+  'subrun.start': {
+    description: 'Start one child Run under the expected active parent Run using the same Host-owned subagent manager and parent Permission/Policy.',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID,
+      parentRunId: SESSION_ID,
+      task: { type: 'string', minLength: 1, maxLength: 65536 },
+    }, required: ['sessionId', 'parentRunId', 'task'] },
+  },
+  'subrun.status': {
+    description: 'Read a child Run owned by the parent Run, including phase, shared budget snapshot, pending interaction counts, and terminal summary.',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID, parentRunId: SESSION_ID, subrunId: SESSION_ID,
+    }, required: ['sessionId', 'parentRunId', 'subrunId'] },
+  },
+  'subrun.message': {
+    description: 'Send bounded steering to one active child Run identified by its subrun and expected Run IDs; source is derived from the trusted Host connection.',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID, parentRunId: SESSION_ID, subrunId: SESSION_ID, runId: SESSION_ID,
+      input: { type: 'string', minLength: 1, maxLength: 65536 },
+    }, required: ['sessionId', 'parentRunId', 'subrunId', 'runId', 'input'] },
+  },
+  'subrun.wait': {
+    description: 'Wait for one or more child Runs. A timeout returns current status and never cancels the children.',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID, parentRunId: SESSION_ID,
+      subrunIds: { type: 'array', minItems: 1, maxItems: 8, items: SESSION_ID },
+      timeoutMs: { type: 'integer', minimum: 0, maximum: 30000 },
+    }, required: ['sessionId', 'parentRunId', 'subrunIds'] },
+  },
+  'subrun.cancel': {
+    description: 'Request cancellation for one child Run. The response distinguishes the cancel request from actual settlement.',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID, parentRunId: SESSION_ID, subrunId: SESSION_ID, runId: SESSION_ID,
+    }, required: ['sessionId', 'parentRunId', 'subrunId', 'runId'] },
   },
   'status.get': {
     description: 'Read the Host state for this session, including its live phase and model output budget when a run is active',

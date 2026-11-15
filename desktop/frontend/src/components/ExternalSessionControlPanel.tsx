@@ -385,6 +385,31 @@ export function ExternalSessionComposer({ client, sessionId, projectRoot, draft,
     } finally { setBusy(false); }
   }
 
+  async function steer(): Promise<void> {
+    const submittedDraft = draft;
+    const submittedRevision = draftRevision;
+    const runId = status?.activeRunId;
+    if (submittedDraft.trim() === '' || busy || typeof runId !== 'string' || runId === '') return;
+    setBusy(true);
+    try {
+      const accepted = await client.call('session.control', {
+        projectRoot,
+        sessionId,
+        request: { action: 'steer', runId, input: submittedDraft },
+      }, 15_000) as { pendingCount: number; cancelledInteractions: number };
+      onDraftSent(submittedRevision);
+      setNote({
+        text: t(
+          `输入已加入当前运行，待应用 ${accepted.pendingCount} 条${accepted.cancelledInteractions > 0 ? `；已取消 ${accepted.cancelledInteractions} 个等待答复` : ''}`,
+          `Input added to the active run; ${accepted.pendingCount} pending${accepted.cancelledInteractions > 0 ? `; cancelled ${accepted.cancelledInteractions} pending interactions` : ''}`,
+        ),
+        bad: false,
+      });
+    } catch (error) {
+      setNote({ text: t(`当前运行未收到输入：${code(error)}`, `The active run did not receive the input: ${code(error)}`), bad: true });
+    } finally { setBusy(false); }
+  }
+
   const grant = status?.delegation ?? null;
   const modelName = status?.selectedModel ?? status?.model ?? t('未知', 'Unknown');
   const modelProvider = status?.serviceId;
@@ -445,6 +470,9 @@ export function ExternalSessionComposer({ client, sessionId, projectRoot, draft,
     <div className="composer-bar external-session-composer-bar">
       <span className="external-session-route">{t('发送目标', 'Sending to')} · {grant?.name ?? t('外控 Agent', 'external agent')}</span>
       <span className="bar-spacer" />
+      {typeof status?.activeRunId === 'string' && status.activeRunId !== '' && <button className="steer-button" type="button"
+        title={t('加入当前运行', 'Add to active run')} aria-label={t('加入当前运行', 'Add to active run')}
+        disabled={busy || draft.trim() === ''} onClick={() => void steer()}>{t('当前运行', 'Active run')}</button>}
       <button className="send" type="button" title={t('发送给外控 Agent', 'Send to the external agent')} aria-label={t('发送', 'Send')}
         disabled={busy || draft.trim() === ''} onClick={() => void send()}><Icon name="send" size={19} /></button>
     </div>

@@ -56,6 +56,10 @@ Windows 路径示例：
 - `ligule_usage_get`：读取本控制器拥有的会话的 Token 用量，按主 Agent 与复审两份账返回。（返回的是已报告数值的合计：`requests` 计所有请求，缺报的请求只进 `unknownInputRequests`/`unknownOutputRequests`，两者都为 0 时这两个数才算完整。）
 - `ligule_run_cancel`：按 `operationId` 取消相应任务。
 
+`ligule_session_send` 始终用于下一轮消息队列。可信 TUI/Desktop 可通过认证的本地 Agent Control 通道调用 `session.control` 的 `steer` action，将输入绑定到明确的活动 `runId`。Host 从连接推导 Human/Controller 来源；steering 不会答复审批或问题，等待中的交互会被取消，迟到答复不会放行原操作。旧 Session 格式仍可读取，但 v0–v2 会话不能接收 steering。
+
+已打开的父会话可通过 `ligule_subrun_start/status/message/wait/cancel` 管理当前 Run 创建的子运行，或直接调用 Host `subrun.*` 方法。Host 按父 Run 作用域核对权限，并与模型工具共用同一子任务管理器。消息的来源由连接推导，消息同时核对子运行 ID 和目标 Run ID。`wait` 单次最多等待 30 秒，超时只返回状态、不取消子任务；`cancel` 只提出取消请求，之后可用 `status` 或 `wait` 核对是否已收束。Host 重启后，已落盘的子任务可只读查询；未确认终态的运行标为 `unknown`，不会被重放。
+
 推荐顺序是开始或继续工作前先创建或接回会话，再读取 `ligule_session_configure`。若希望服务端等待，可用 `ligule_run`；若要立即取回控制权，则用 `ligule_run_start`，之后通过 `ligule_run_await` 等待或用 `ligule_run_status` 轮询。两种等待超时都不会取消任务；根据 `phase`、`waitingFor` 和 `pendingInteractions` 继续等待或审阅后答复。完成后用 `ligule_session_read` 查看新增记录。状态通知通过 MCP logging 尽力发送；通知不可用时轮询仍可读取同一状态。需要停止时调用 `ligule_run_cancel`。工具参数以运行中的 `tools/list` schema 为准。进程重启后，可直接使用已有 `sessionId` 和 `runId`（或 `requestKey`）调用 `ligule_run_get`；无需先 `ligule_session_open`，也不会取得 Session 写锁。
 
 ## 操控者授权与会话设置

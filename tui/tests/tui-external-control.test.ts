@@ -119,6 +119,10 @@ test('TUI observes an externally locked session, answers a question, sends guida
         events = [{ cursor: 1, kind: 'session.event', at: Date.now(), sessionId, operationId: currentOperation, eventKind: 'assistant', eventSeq: 4 }];
         return { sessionId, accepted: true, queued: false, operationId: currentOperation, state: 'running', queue: [], queuePaused: false, currentOperationId: currentOperation };
       }
+      if (request.action === 'configuration') return { sessionId, activeRunId: 'external-steer-run' };
+      if (request.action === 'steer') {
+        return { inputId: 'external-steer-input', runId: request.runId, state: 'accepted', source: 'human', pendingCount: 1, cancelledInteractions: 0 };
+      }
       if (request.action === 'takeover') {
         await session.close();
         await runtime.unregister(sessionId);
@@ -160,6 +164,12 @@ test('TUI observes an externally locked session, answers a question, sends guida
       assert.deepEqual(actions.find((action) => action.action === 'reply')!.answers, [{ id: 'q1', selected: [], custom: 'north' }]);
       await wait(() => output().includes('Submitted 1/1 answers') || output().includes('已提交 1/1 个回答'));
       await wait(() => !frame().includes('Choose a route'));
+
+      await type('/steer Preserve the public route.');
+      await wait(() => actions.some((action) => action.action === 'steer'));
+      assert.deepEqual(actions.find((action) => action.action === 'steer'), {
+        action: 'steer', runId: 'external-steer-run', input: 'Preserve the public route.',
+      });
 
       await type('Please keep the northern route.');
       await wait(() => actions.some((action) => action.action === 'send' && action.input === 'Please keep the northern route.'));

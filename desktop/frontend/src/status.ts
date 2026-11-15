@@ -15,6 +15,7 @@ export type Usage = {
 export type Status = {
   sessionId: string;
   running: boolean;
+  activeRunId?: string | null;
   permission?: SessionPermission;
   screenCapture?: { enabled: boolean; source: 'none' | 'startup' | 'trusted-ui' | 'grant'; changeAllowed?: boolean };
   browser?: BrowserStatus;

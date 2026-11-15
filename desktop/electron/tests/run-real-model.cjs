@@ -305,6 +305,11 @@ async function createApplication() {
             resultHasSessionQuestionOption: JSON.stringify(event.result?.content?.answers ?? null).includes('"selected":["north"]'),
             resultHasSessionQuestionDraft: JSON.stringify(event.result?.content?.answers ?? null).includes('"custom":"desktop-session-question-draft-answer"'),
             resultCode: event.result?.code,
+            ...(event.kind === 'runInput' ? {
+              runInputState: event.state,
+              runInputSource: event.source,
+              runInputTextMatchesExpected: event.text === 'Keep the proof file absent.',
+            } : {}),
           }));
         }
         window.__realModelFrames.push(safe);
@@ -1155,6 +1160,42 @@ async function runChecks() {
 
   const stubControl = process.env.LIGULE_STUB_CONTROL;
   if (typeof stubControl === 'string' && stubControl !== '') {
+    await check(`${providerLabel}运行中输入`, async () => {
+      if (typeof sessionId !== 'string') throw Object.assign(new Error('steer_session_unavailable'), { code: 'steer_session_unavailable' });
+      const target = join(workspaceRoot, 'model-steer-proof.txt');
+      await require('node:fs/promises').rm(target, { force: true });
+      const previousApprovals = await evaluate(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').length`);
+      await enterAndSend('desktop-steer-proof: 请求创建 model-steer-proof.txt，并等审批。');
+      await waitFor(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').length > ${previousApprovals}`, 60_000, 'steer_approval_not_requested');
+      const approval = await evaluate(`window.__realModelFrames.filter(frame => frame.method === 'approval.request').at(-1) ?? null`);
+      assert.equal(approval?.approvalTool, 'create', 'steer_test_did_not_reach_create_approval');
+      await waitFor(`document.querySelector('.approval .row-tool')?.textContent.trim() === 'create'`, 10_000, 'steer_approval_card_missing');
+      await evaluate(`(() => {
+        const input = document.querySelector('textarea.composer-input');
+        if (!(input instanceof HTMLTextAreaElement)) return false;
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(input, 'Keep the proof file absent.');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+      await waitFor(`document.querySelector('.composer-bar button.steer-button') !== null`, 5_000, 'steer_button_missing');
+      await clickWithMouse('.composer-bar button.steer-button', 'steer_button_not_clickable');
+      await waitFor(`document.body.innerText.includes('输入已加入当前运行')`, 10_000, 'steer_acceptance_not_shown');
+      const summary = await waitForSessionIdle(30_000, 'steer_turn_did_not_finish');
+      assert.equal(await require('node:fs/promises').access(target).then(() => true, () => false), false,
+        'steering_did_not_cancel_the_pending_write_approval');
+      const record = await requestHost('session.read', { sessionId, fullResults: true });
+      const inputs = record.events.filter(event => event.kind === 'runInput');
+      assert.deepEqual(inputs.map(event => event.runInputState), ['accepted', 'applied'], 'steering_lifecycle_events_invalid');
+      assert.equal(inputs[0].runInputSource, 'human', 'local Desktop input source was not bound to the trusted window');
+      assert.equal(inputs[0].runInputTextMatchesExpected, true, 'the accepted input text changed');
+      assert.equal(summary.tools.some(item => item.tool === 'create' && item.kind === 'refusal'), true,
+        'pending write approval was not closed as refused');
+      const stubState = await fetch(`${stubControl}/state`).then(response => response.json());
+      assert.ok(stubState.steeringRequests > 0, 'the next Provider request did not contain the accepted steering input');
+      return '真实 Electron 窗口在写入审批等待时发送 / 当前运行输入；Host 取消待决审批，迟到动作没有创建文件，后续 Provider 请求收到已应用输入';
+    });
+
     await check(`${providerLabel}代码复制与界面语言`, async () => {
       await enterAndSend('desktop-code-copy-proof');
       await waitForSessionIdle(30_000, 'code_copy_turn_did_not_finish');

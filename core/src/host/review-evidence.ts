@@ -125,6 +125,7 @@ export async function selectReviewEvidence(
   const constraints: EvidenceItem[] = [];
   const revoked: EvidenceItem[] = [];
   const history: EvidenceItem[] = [];
+  const acceptedRunInputs = new Map<string, { readonly seq: number; readonly runId: string; readonly source: 'human' | 'controller'; readonly text: string }>();
   let previousPermission: { profile?: unknown; network?: unknown } | undefined;
 
   for (const event of events) {
@@ -138,6 +139,20 @@ export async function selectReviewEvidence(
       // 不能和人类禁令并列为授权事实。
       const item: EvidenceItem = { seq, source: constraintSource(event), text };
       constraints.push(item);
+      continue;
+    }
+    if (kind === 'runInput') {
+      if (typeof event.inputId !== 'string' || typeof event.runId !== 'string') continue;
+      if (event.state === 'accepted' && (event.source === 'human' || event.source === 'controller')
+        && typeof event.text === 'string' && event.text.trim() !== '') {
+        acceptedRunInputs.set(event.inputId, { seq, runId: event.runId, source: event.source, text: event.text });
+      } else if (event.state === 'applied') {
+        const accepted = acceptedRunInputs.get(event.inputId);
+        if (accepted !== undefined && accepted.runId === event.runId) {
+          constraints.push({ seq: accepted.seq, source: accepted.source === 'human' ? 'user' : 'controller', text: accepted.text });
+          acceptedRunInputs.delete(event.inputId);
+        }
+      }
       continue;
     }
     if (kind === 'sessionPermission') {

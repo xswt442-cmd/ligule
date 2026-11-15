@@ -6,7 +6,7 @@ import { isCanonicalTodoItems } from './todo.js';
 import { checkedImageReferences } from './media.js';
 import { isRunAcceptance, isRunResultRef } from './run.js';
 
-export const SESSION_FORMAT_VERSION = 2;
+export const SESSION_FORMAT_VERSION = 4;
 
 export interface SessionModeIdentity {
   name: string;
@@ -96,7 +96,7 @@ function checkedSessionHeader(event: SessionEvent, version: number): SessionHead
 const WRITTEN_KINDS = [
   'session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection',
   'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule',
-  'compaction', 'todoWrite', 'image', 'screenCapture', 'policyReview',
+  'compaction', 'todoWrite', 'image', 'screenCapture', 'policyReview', 'runInput',
 ];
 
 // 会话里保存的审批档位。返回 `unknown` 表示值无法解释，调用方必须拒绝该记录。
@@ -145,6 +145,8 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
   const runIds = new Set<string>();
   const requestKeys = new Set<string>();
   const imageCalls = new Set<string>();
+  const runInputIds = new Set<string>();
+  const pendingRunInputs = new Map<string, { readonly runId: string }>();
   const events: SessionEvent[] = [];
   for (const [index, event] of objects.entries()) {
     const kind = typeof event.kind === 'string' ? event.kind : '';
@@ -173,6 +175,42 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
     }
     if ((kind === 'sessionPermission' || kind === 'sessionPolicy') && formatVersion < 2) {
       throw new KernelRuntimeError('session_event_version_unsupported', { detail: `${kind} requires format version 2` });
+    }
+    if (kind === 'runInput') {
+      if (formatVersion < 3) {
+        throw new KernelRuntimeError('session_event_version_unsupported', { detail: 'runInput requires format version 3' });
+      }
+      const inputId = event.inputId;
+      const runId = event.runId;
+      const state = event.state;
+      if (event.ignorable === true || event.mode !== 'steer'
+        || typeof inputId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(inputId)
+        || typeof runId !== 'string' || runId !== currentRunId || currentTurnFinished) {
+        throw new KernelRuntimeError('session_run_input_event_invalid');
+      }
+      if (state === 'accepted') {
+        if (runInputIds.has(inputId)
+          || !['human', 'controller'].includes(String(event.source))
+          || typeof event.text !== 'string' || event.text.trim() === '' || event.text.length > 65_536
+          || typeof event.acceptedAt !== 'string' || !Number.isFinite(Date.parse(event.acceptedAt))) {
+          throw new KernelRuntimeError('session_run_input_event_invalid');
+        }
+        if (pendingRunInputs.size >= 16) {
+          throw new KernelRuntimeError('session_run_input_limit_exceeded');
+        }
+        runInputIds.add(inputId);
+        pendingRunInputs.set(inputId, { runId });
+      } else if (state === 'applied' || state === 'cancelled' || state === 'invalidated') {
+        const accepted = pendingRunInputs.get(inputId);
+        const timestamp = event[`${state}At`];
+        if (accepted?.runId !== runId
+          || typeof timestamp !== 'string' || !Number.isFinite(Date.parse(timestamp))) {
+          throw new KernelRuntimeError('session_run_input_transition_invalid');
+        }
+        pendingRunInputs.delete(inputId);
+      } else {
+        throw new KernelRuntimeError('session_run_input_event_invalid');
+      }
     }
     if (kind === 'sessionPolicy') {
       if (event.ignorable !== true) throw new KernelRuntimeError('session_policy_ignorable_required');
@@ -207,6 +245,9 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
     }
     if (kind === 'user' && event.run !== undefined) {
       const inherited = header?.branchOf !== undefined && event.seq <= header.branchAt!;
+      if (isRunAcceptance(event.run) && event.run.version === 3 && formatVersion < 4) {
+        throw new KernelRuntimeError('session_run_acceptance_version_unsupported', { detail: 'Run Acceptance version 3 requires Session format version 4' });
+      }
       if (!isRunAcceptance(event.run) || (header?.sessionId !== event.run.sessionId && !inherited)
         || runIds.has(event.run.runId)
         || (event.run.requestKey !== undefined
@@ -227,6 +268,11 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         || (event.resultRef !== undefined && !isRunResultRef(event.resultRef, event.runId))) {
         throw new KernelRuntimeError('session_run_result_reference_invalid');
       }
+    }
+    if (kind === 'turn' && event.runId === currentRunId && event.userSeq === currentUserSeq
+      && ['completed', 'failed', 'cancelled', 'interrupted'].includes(String(event.status))
+      && [...pendingRunInputs.values()].some(input => input.runId === currentRunId)) {
+      throw new KernelRuntimeError('session_run_input_pending');
     }
     if (kind === 'image') {
       if (event.ignorable === true || typeof event.callId !== 'string' || event.callId === '') throw new KernelRuntimeError('session_image_reference_invalid');
@@ -297,6 +343,10 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
       && event.source !== 'turn' && event.source !== 'summary') {
       // 来源决定这条读数能不能用来校准窗口；同样是封闭枚举，不认识的来源不能进记录。
       throw new KernelRuntimeError('session_usage_event_invalid');
+    }
+    if (kind === 'user' && currentRunId !== undefined
+      && [...pendingRunInputs.values()].some(input => input.runId === currentRunId)) {
+      throw new KernelRuntimeError('session_run_input_pending');
     }
     events.push(event);
     if (kind === 'user') {

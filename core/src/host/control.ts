@@ -811,6 +811,7 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       case 'configuration': return await host.handle({ method: 'status.get', params: { sessionId } }, bridgeConnection);
       case 'details': return await host.handle({ method: 'approval.details', params: { sessionId, requestId: request.requestId } }, bridgeConnection);
       case 'send': return send(sessionId, 'send', request.input, undefined, 'human', bridgeConnection);
+      case 'steer': return await host.handle({ method: 'run.steer', params: { sessionId, runId: request.runId, input: request.input } }, bridgeConnection);
       case 'reply': return replyInteraction({
         sessionId,
         requestId: request.requestId,
@@ -939,6 +940,28 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
         projectRoot, sessionId, runId: receipt.runId, offset,
       } }, channel)));
       return { receipt, result: page };
+    },
+    async subrunStart(sessionId: string, parentRunId: string, task: string) {
+      writable(sessionId);
+      return record(await tracked(host.handle({ method: 'subrun.start', params: { sessionId, parentRunId, task } }, connection)));
+    },
+    async subrunStatus(sessionId: string, parentRunId: string, subrunId: string) {
+      owned(sessionId);
+      return record(await tracked(host.handle({ method: 'subrun.status', params: { sessionId, parentRunId, subrunId } }, connection)));
+    },
+    async subrunMessage(sessionId: string, parentRunId: string, subrunId: string, runId: string, input: string) {
+      writable(sessionId);
+      return record(await tracked(host.handle({ method: 'subrun.message', params: { sessionId, parentRunId, subrunId, runId, input } }, connection)));
+    },
+    async subrunWait(sessionId: string, parentRunId: string, subrunIds: readonly string[], timeoutMs = 30_000) {
+      owned(sessionId);
+      return record(await tracked(host.handle({ method: 'subrun.wait', params: {
+        sessionId, parentRunId, subrunIds, timeoutMs,
+      } }, connection)));
+    },
+    async subrunCancel(sessionId: string, parentRunId: string, subrunId: string, runId: string) {
+      writable(sessionId);
+      return record(await tracked(host.handle({ method: 'subrun.cancel', params: { sessionId, parentRunId, subrunId, runId } }, connection)));
     },
     cancel: (operationId: string) => cancelOperation(operationId),
     invalidate(code: string): Promise<void> {

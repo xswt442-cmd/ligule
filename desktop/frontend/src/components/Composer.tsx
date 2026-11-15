@@ -26,6 +26,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   onDraftChange, onCaretChange, onWalkChange, onDraftKeyDown, onSelectWorkspace, onToggleQueue, onRecoverQueueItem,
   onPickMention, onSelectModel, onSetThinking, onManageModel, onOpenSecurity, onSessionMenuChange, onSetMode, onSetPolicy,
   onInitialPermissionChange, onPermissionStatus, onStop, onSend,
+  onSteer,
 }: {
   client: Client;
   sessionId: string | null;
@@ -70,6 +71,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   onPermissionStatus: (status: Status) => void;
   onStop: () => void;
   onSend: () => void;
+  onSteer: () => void;
 }) {
   const t = useText();
   const disabled = closing || reading || starting || !settingsReady || (sessionId !== null && inputOwner !== sessionId);
@@ -160,6 +162,8 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
         <span className="bar-spacer" />
         <ScreenCaptureControl key={`screen:${sessionId ?? '$new'}`} client={client} sessionId={sessionId} status={status}
           disabled={disabled} running={running} onStatus={onPermissionStatus} />
+        {running && draft.trim() !== '' && <button className="steer-button" type="button" title={t('加入当前运行', 'Add to active run')}
+          disabled={disabled} onClick={onSteer}>{t('当前运行', 'Active run')}</button>}
         {running && <button className="icon-button stop-button" type="button" title={t('停止本轮', 'Stop this turn')} aria-label={t('停止本轮', 'Stop this turn')} onClick={onStop}><Icon name="stop" size={15} /></button>}
         <button className="send" type="button" title={running ? t('加入队列', 'Add to queue') : t('发送', 'Send')} aria-label={t('发送', 'Send')} disabled={disabled || draft.trim() === ''} onClick={onSend}><Icon name="send" size={19} /></button>
       </div>

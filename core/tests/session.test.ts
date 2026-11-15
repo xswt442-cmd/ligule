@@ -5,8 +5,11 @@ import { join } from 'node:path';
 import {
   createConfig, createDecisionChain, createKernel, createPermissionContext, createSessionLog, execTool, readTool, refusalOf,
 } from '../dist/index.js';
+import { createRunAcceptance } from '../dist/session/run.js';
 import type { KernelOptions } from '../dist/kernel/kernel.js';
+import { projectModelView } from '../dist/session/session.js';
 import type { SessionLog } from '../dist/session/session.js';
+import type { SessionEvent } from '../dist/session/format.js';
 
 type ToolEvent = {
   kind?: string;
@@ -67,6 +70,61 @@ test('what the model sees is rebuildable from the log, byte for byte', async () 
     const second = await reopened.append({ kind: 'tool', tool: 'exec', args: {}, result: { content: 'next' } });
     assert.equal(second.seq, 1, 'a reopened log continues the sequence');
   });
+});
+
+test('nested extension tool results stay in the Session but out of the parent model conversation', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'nested-model-view' });
+    await session.append({ kind: 'user', text: 'run the extension' });
+    await session.append({ kind: 'assistant', text: '', toolCalls: [
+      { id: 'outer-call', name: 'extension_nested_exec', args: {} },
+    ] });
+    await session.append({ kind: 'tool', tool: 'exec', callId: 'inner-call', parentCallId: 'outer-call', runId: 'run-1',
+      args: { command: 'node nested-child.mjs' }, result: { kind: 'result', failed: false, content: 'inner result' } });
+    await session.append({ kind: 'tool', tool: 'extension_nested_exec', callId: 'outer-call', args: {},
+      result: { kind: 'result', failed: false, content: 'outer result' } });
+
+    const view = await session.modelView() as { role: string; id?: string; content?: string }[];
+    assert.deepEqual(view.filter((message) => message.role === 'tool').map((message) => [message.id, message.content]), [
+      ['outer-call', 'outer result'],
+    ]);
+    assert.ok((await session.read()).some((event) => event.kind === 'tool' && event.callId === 'inner-call'),
+      'the nested call remains available in the authoritative Session record');
+  });
+});
+
+test('an applied steering input joins its current Run model view only after application', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'steering-model-view' });
+    const run = createRunAcceptance('steering-model-view', 'start the task', null, 'human');
+    await session.append({ kind: 'user', text: 'start the task', run });
+    await session.append({ kind: 'runInput', mode: 'steer', state: 'accepted', inputId: 'steer-1', runId: run.runId,
+      source: 'human', text: 'keep the existing route', acceptedAt: '2026-11-15T00:00:00.000Z' });
+    assert.deepEqual(await session.modelView(), [{ role: 'user', text: 'start the task' }],
+      'accepted text must not reach the model before the Loop applies it');
+    await session.append({ kind: 'runInput', mode: 'steer', state: 'applied', inputId: 'steer-1', runId: run.runId,
+      appliedAt: '2026-11-15T00:00:01.000Z' });
+    assert.deepEqual(await session.modelView(), [
+      { role: 'user', text: 'start the task' },
+      { role: 'user', text: 'keep the existing route' },
+    ]);
+  });
+});
+
+test('applied steering remains visible when compaction covers only its accepted event', () => {
+  const run = createRunAcceptance('steering-compaction-view', 'start the task', null, 'human');
+  const events = [
+    { seq: 0, kind: 'user', text: 'start the task', run },
+    { seq: 1, kind: 'runInput', mode: 'steer', state: 'accepted', inputId: 'steer-compact', runId: run.runId,
+      source: 'human', text: 'preserve the public route', acceptedAt: '2026-11-15T00:00:00.000Z' },
+    { seq: 2, kind: 'runInput', mode: 'steer', state: 'applied', inputId: 'steer-compact', runId: run.runId,
+      appliedAt: '2026-11-15T00:00:01.000Z' },
+  ] as unknown as SessionEvent[];
+  assert.deepEqual(projectModelView(events, [{ fromSeq: 1, toSeq: 1, text: 'earlier context' }]), [
+    { role: 'user', text: 'start the task' },
+    { role: 'user', text: 'earlier context' },
+    { role: 'user', text: 'preserve the public route' },
+  ]);
 });
 
 test('session policy snapshots are retained in the log but excluded from the model view', async () => {

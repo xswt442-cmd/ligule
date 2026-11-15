@@ -126,11 +126,12 @@ async function connect(projectRoot: string, home: string, grantId: string | unde
   return { client, transport, stderr: () => stderr, childClosedAt: () => childClosedAtNs };
 }
 
-async function startModelServer({ questionFirst = true, outputChunks = 1, toolCalls = [], reviewerReply }: {
+async function startModelServer({ questionFirst = true, outputChunks = 1, toolCalls = [], reviewerReply, beforeResponse }: {
   questionFirst?: boolean;
   outputChunks?: number;
   toolCalls?: readonly LocalToolCall[];
   reviewerReply?: string;
+  beforeResponse?: (body: LocalChatRequest, requestNumber: number) => void | Promise<void>;
 } = {}) {
   const requests: unknown[] = [];
   let call = 0;
@@ -140,6 +141,7 @@ async function startModelServer({ questionFirst = true, outputChunks = 1, toolCa
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as LocalChatRequest;
     requests.push(body);
     call += 1;
+    await beforeResponse?.(body, call);
     const messages = body.messages ?? [];
     const latestUserIndex = messages.findLastIndex((message) => message.role === 'user');
     const latestUser = messages[latestUserIndex];
@@ -440,6 +442,135 @@ test('a granted Controller cannot turn a path-specific deny into an approval', a
       assert.equal(reviewerCalls.length, 0, '显式文件拒绝规则应在 Reviewer 路由前结束判定');
     } finally {
       await client.close();
+      await model.close();
+    }
+  });
+});
+
+test('stdio MCP child controls use the Host manager and preserve wait, steering, and cancellation semantics', { timeout: 40_000 }, async () => {
+  await fixture(async ({ projectRoot, home }) => {
+    await writeFile(join(projectRoot, 'note.txt'), 'child read fixture');
+    let releaseMessageChild!: () => void;
+    let releaseCancelChild!: () => void;
+    let markMessageChild!: () => void;
+    let markCancelChild!: () => void;
+    const messageGate = new Promise<void>((resolve) => { releaseMessageChild = resolve; });
+    const cancelGate = new Promise<void>((resolve) => { releaseCancelChild = resolve; });
+    const messageChildStarted = new Promise<void>((resolve) => { markMessageChild = resolve; });
+    const cancelChildStarted = new Promise<void>((resolve) => { markCancelChild = resolve; });
+    const model = await startModelServer({
+      questionFirst: true,
+      toolCalls: [{ inputTag: 'mcp-child', name: 'read', args: { path: 'note.txt' } }],
+      beforeResponse: async (body) => {
+        const text = JSON.stringify(body.messages);
+        if (text.includes('mcp-child')) { markMessageChild(); await messageGate; }
+        if (text.includes('mcp-cancel-child')) { markCancelChild(); await cancelGate; }
+      },
+    });
+    const previousHome = process.env.LIGULE_HOME;
+    process.env.LIGULE_HOME = home;
+    let client: Client | undefined;
+    let stderr = () => '';
+    try {
+      await writeFile(join(home, 'config.toml'), [
+        '[model]', 'api = "chat-completions"', `baseURL = "${model.baseURL}"`,
+        'model = "agent-control-test-model"', 'apiKeyEnv = "LIGULE_AGENT_CONTROL_TEST_KEY"',
+        '[loop]', 'iterations = 8', 'modelCalls = 16', 'maxConcurrentSubagents = 3',
+        '[policy]', 'mode = "auto"', '',
+      ].join('\n'));
+      await setTrusted(projectRoot, true, join(home, 'tui-trust.json'));
+      const connected = await connect(projectRoot, home, undefined, true, { LIGULE_AGENT_CONTROL_TEST_KEY: 'test-key' });
+      client = connected.client;
+      stderr = connected.stderr;
+      const names = (await client.listTools()).tools.map((tool) => tool.name);
+      for (const name of ['ligule_subrun_start', 'ligule_subrun_status', 'ligule_subrun_message', 'ligule_subrun_wait', 'ligule_subrun_cancel']) {
+        assert.ok(names.includes(name), `missing MCP control ${name}`);
+      }
+
+      const made = await callTool(client, 'ligule_session_create', {
+        projectRoot,
+        initial: { mode: 'full' },
+      });
+      assert.equal(made.isError, undefined, `${JSON.stringify(made)}\n${stderr()}`);
+      const sessionId = made.structuredContent.sessionId;
+      const parent = await callTool(client, 'ligule_run_start', { sessionId, input: 'parent waits for a local answer' });
+      assert.equal(parent.isError, undefined, `${JSON.stringify(parent)}\n${stderr()}`);
+      const parentRunId = parent.structuredContent.receipt?.runId;
+      assert.equal(typeof parentRunId, 'string');
+      const operationId = parent.structuredContent.operationId;
+      const waitingQuestion = await withTimeout((async () => {
+        for (;;) {
+          const current = await callTool(client!, 'ligule_run_status', { operationId });
+          if (current.structuredContent.pendingInteractions?.some((item) => item.type === 'question')) return current;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      })(), 'parent_question_pending', 10_000);
+      const parentQuestion = waitingQuestion.structuredContent.pendingInteractions!.find((item) => item.type === 'question')! as { type: string; requestId: string };
+
+      const child = await callTool(client, 'ligule_subrun_start', {
+        sessionId, parentRunId, task: 'mcp-child inspect the fixture',
+      }) as unknown as { isError?: boolean; structuredContent: { subrunId: string; sessionId: string; runId: string } };
+      assert.equal(child.isError, undefined, `${JSON.stringify(child)}\n${stderr()}`);
+      await withTimeout(messageChildStarted, 'child_provider_started', 10_000);
+      const input = await callTool(client, 'ligule_subrun_message', {
+        sessionId, parentRunId, subrunId: child.structuredContent.subrunId, runId: child.structuredContent.runId,
+        input: 'Apply the updated child guidance at the next safe step.',
+      }) as unknown as { isError?: boolean; structuredContent: { source: string; state: string } };
+      assert.equal(input.isError, undefined, `${JSON.stringify(input)}\n${stderr()}`);
+      assert.equal(input.structuredContent.source, 'controller');
+      assert.equal(input.structuredContent.state, 'accepted');
+      const timeout = await callTool(client, 'ligule_subrun_wait', {
+        sessionId, parentRunId, subrunIds: [child.structuredContent.subrunId], timeoutMs: 20,
+      }) as unknown as { isError?: boolean; structuredContent: { timedOut: boolean; subruns: { state: string }[] } };
+      assert.equal(timeout.structuredContent.timedOut, true);
+      assert.equal(timeout.structuredContent.subruns[0]?.state, 'running');
+      releaseMessageChild();
+      const childDone = await callTool(client, 'ligule_subrun_wait', {
+        sessionId, parentRunId, subrunIds: [child.structuredContent.subrunId], timeoutMs: 10_000,
+      }) as unknown as { isError?: boolean; structuredContent: { timedOut: boolean; subruns: { state: string }[] } };
+      assert.equal(childDone.isError, undefined, `${JSON.stringify(childDone)}\n${stderr()}`);
+      assert.equal(childDone.structuredContent.timedOut, false);
+      assert.equal(childDone.structuredContent.subruns[0]?.state, 'completed');
+      assert.ok(model.requests.some((request) => JSON.stringify(request).includes('Apply the updated child guidance')),
+        'the message must appear in a later Provider request');
+      const childStatus = await callTool(client, 'ligule_subrun_status', {
+        sessionId, parentRunId, subrunId: child.structuredContent.subrunId,
+      });
+      assert.equal(childStatus.isError, undefined, `${JSON.stringify(childStatus)}\n${stderr()}`);
+      assert.equal(childStatus.structuredContent.state, 'completed');
+
+      const cancelledChild = await callTool(client, 'ligule_subrun_start', {
+        sessionId, parentRunId, task: 'mcp-cancel-child wait for cancellation',
+      }) as unknown as { isError?: boolean; structuredContent: { subrunId: string; runId: string } };
+      assert.equal(cancelledChild.isError, undefined, `${JSON.stringify(cancelledChild)}\n${stderr()}`);
+      await withTimeout(cancelChildStarted, 'cancellable_child_provider_started', 10_000);
+      const cancelRequest = await callTool(client, 'ligule_subrun_cancel', {
+        sessionId, parentRunId, subrunId: cancelledChild.structuredContent.subrunId, runId: cancelledChild.structuredContent.runId,
+      }) as unknown as { isError?: boolean; structuredContent: { cancelRequested: boolean; state: string } };
+      assert.equal(cancelRequest.isError, undefined, `${JSON.stringify(cancelRequest)}\n${stderr()}`);
+      assert.equal(cancelRequest.structuredContent.cancelRequested, true);
+      assert.equal(cancelRequest.structuredContent.state, 'running');
+      releaseCancelChild();
+      const childCancelled = await callTool(client, 'ligule_subrun_wait', {
+        sessionId, parentRunId, subrunIds: [cancelledChild.structuredContent.subrunId], timeoutMs: 10_000,
+      }) as unknown as { isError?: boolean; structuredContent: { timedOut: boolean; subruns: { state: string }[] } };
+      assert.equal(childCancelled.isError, undefined, `${JSON.stringify(childCancelled)}\n${stderr()}`);
+      assert.equal(childCancelled.structuredContent.timedOut, false);
+      assert.equal(childCancelled.structuredContent.subruns[0]?.state, 'cancelled');
+
+      const answered = await callTool(client, 'ligule_interaction_reply', {
+        sessionId, requestId: parentQuestion.requestId, type: 'question', answers: [{ id: 'q1', selected: ['north'] }],
+      });
+      assert.equal(answered.isError, undefined, `${JSON.stringify(answered)}\n${stderr()}`);
+      const parentDone = await callTool(client, 'ligule_run_await', { operationId, timeoutMs: 10_000 });
+      assert.equal(parentDone.isError, undefined, `${JSON.stringify(parentDone)}\n${stderr()}`);
+      assert.equal(parentDone.structuredContent.state, 'done');
+    } finally {
+      releaseMessageChild();
+      releaseCancelChild();
+      await client?.close().catch(() => undefined);
+      if (previousHome === undefined) delete process.env.LIGULE_HOME;
+      else process.env.LIGULE_HOME = previousHome;
       await model.close();
     }
   });

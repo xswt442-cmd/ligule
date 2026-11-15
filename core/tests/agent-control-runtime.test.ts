@@ -48,6 +48,17 @@ test('a registered local controller accepts scoped status and human actions', as
       assert.deepEqual(sent, { sessionId, action: 'send' });
       assert.equal((calls[1].request as { input?: string }).input, 'Continue with the next step.');
 
+      const steered = await requestAgentControl(projectRoot, sessionId, {
+        action: 'steer', runId: 'run-1', input: 'Keep the public route unchanged.',
+      });
+      assert.deepEqual(steered, { sessionId, action: 'steer' });
+      assert.deepEqual(calls[2].request, {
+        action: 'steer', runId: 'run-1', input: 'Keep the public route unchanged.',
+      });
+      await assert.rejects(requestAgentControl(projectRoot, sessionId, {
+        action: 'steer', runId: '' as string, input: 'missing target',
+      }), { code: 'agent_control_request_invalid' });
+
       await assert.rejects(
         requestAgentControl(otherProject, sessionId, { action: 'status', after: 0, limit: 10, waitMs: 0 }),
         { code: 'control_project_forbidden' },

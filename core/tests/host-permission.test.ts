@@ -511,11 +511,13 @@ test('trusted Windows project commands can install without scripts, build, and r
       approvals.push(message.params);
       return { decision: 'allow' };
     });
+    let latestToolResult: unknown;
     const runExec = async (command: string) => {
       const accepted = await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) }) as { runId: string };
       await client.request('run.wait', { sessionId, runId: accepted.runId, origin: 'human' });
       const toolResult = ((await client.request('session.read', { sessionId })) as SessionReadView).events
         .filter((event) => event.kind === 'tool' && event.tool === 'exec').at(-1)!.result;
+      latestToolResult = toolResult;
       assert.notEqual(toolResult.failed, true, JSON.stringify({ command, toolResult, approvals }));
       assert.equal(toolResult.content.exitCode, 0, JSON.stringify({ command, toolResult, approvals }));
       return toolResult.content.text;
@@ -528,12 +530,16 @@ test('trusted Windows project commands can install without scripts, build, and r
     assert.equal(executionPaths.corepack, join(executionPaths.temp, 'corepack'));
     assert.equal(executionPaths.local, join(executionPaths.profile, 'AppData', 'Local'));
     assert.equal(executionPaths.roaming, join(executionPaths.profile, 'AppData', 'Roaming'));
-    await runExec('pnpm install --ignore-scripts');
+    // Use Corepack's Windows entry point so this fixture exercises its pinned packageManager,
+    // rather than whichever global pnpm shim happens to appear first on PATH.
+    await runExec('corepack pnpm install --ignore-scripts');
     assert.equal(existsSync(join(projectDirectory, 'install-script-ran')), false, 'the package preinstall hook must not run when scripts are disabled');
-    await runExec('pnpm run build');
-    assert.equal(await readFile(join(projectDirectory, 'build-output.txt'), 'utf8'), 'build-ok');
+    const buildOutput = await runExec('corepack pnpm run build');
+    const buildOutputPath = join(projectDirectory, 'build-output.txt');
+    assert.ok(existsSync(buildOutputPath), `pnpm run build exited successfully without creating its output file: ${JSON.stringify({ buildOutput, latestToolResult, approvals })}`);
+    assert.equal(await readFile(buildOutputPath, 'utf8'), 'build-ok');
 
-    const devRun = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'pnpm run dev' } }) });
+    const devRun = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'corepack pnpm run dev' } }) });
     const devOutcome = devRun.then(() => undefined, (error) => error);
     const serverStatePath = join(projectDirectory, 'server-state.json');
     await waitFor(() => existsSync(serverStatePath), { within: 60_000, every: 25 });

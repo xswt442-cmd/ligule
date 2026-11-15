@@ -8,6 +8,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { KernelError } from '../kernel/error.js';
 import { SETTLE_GRACE_MS, settleWithin } from '../kernel/settle.js';
 import { createTaskBudget, type TaskBudget } from '../kernel/task-budget.js';
+import { currentKernelExecutionContext, withKernelExecutionContext, withoutKernelExecutionContext } from '../kernel/execution-context.js';
 import { rememberRunSummary } from '../kernel/run-summary.js';
 import {
   assertDelegationCompletion, createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
@@ -68,7 +69,7 @@ import { createManagedProcessRegistry, managedProcessPlugin, type ManagedProcess
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
 import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
-import { createLoop, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase, type LoopResult } from '../kernel/loop.js';
+import { createLoop, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase, type LoopResult, type LoopSteeringInbox } from '../kernel/loop.js';
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createTodoWritePlugin } from '../tools/todo-write.js';
@@ -86,11 +87,12 @@ import { previewStorageGarbage, applyStorageGarbage, type StorageGcCandidate } f
 import { checkedImageReferences, IMAGE_LIMITS, type ImageReference } from '../media.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
-import { createSubagentPlugin } from '../tools/subagent.js';
+import { createSubagentPlugin, type SubagentRuntime } from '../tools/subagent.js';
 import { createCompactPlugin } from '../tools/compact.js';
 import { createCustomToolsPlugin, discoverCustomTools, type CustomToolDiagnostic } from '../tools/custom.js';
 import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
+import { createRunSteeringInbox, type RunSteeringInbox } from '../kernel/run-steering.js';
 import { discoverModels } from '../model/discovery.js';
 import { apiRoot } from '../model/http.js';
 import { thinkingCapabilityOf } from '../model/thinking.js';
@@ -270,6 +272,9 @@ interface HostSessionBase {
   /** 配置启用时才存在；未启用时 `auto` 行为与 P9.5 完全一致。 */
   reviewer?: SessionReviewer;
   activeRunId?: string;
+  runSteering?: RunSteeringInbox;
+  runInputRevision?: number;
+  subagents?: SubagentRuntime;
   readonly id: string;
   readonly search: SearchStatus;
   readonly browser: BrowserSupport;
@@ -329,6 +334,7 @@ interface HostSessionState extends HostSessionBase {
   readonly customToolNames: string[];
   readonly templates: TemplateRegistry;
   readonly loop: ReturnType<typeof createLoop>;
+  readonly subagents: SubagentRuntime;
   readonly runDelegated: (input: string, options: DelegatedRunOptions) => Promise<DelegatedRunResult>;
   compaction: ReturnType<typeof createCompaction> | null;
   readonly rebuildCompaction: (model: Record<string, unknown>) => ReturnType<typeof createCompaction> | null;
@@ -349,6 +355,7 @@ interface DelegatedRunOptions {
   readonly delegation?: DelegationSpec;
   readonly acceptance?: RunAcceptance;
   readonly onAccepted?: (userSeq: number) => void;
+  readonly steering?: LoopSteeringInbox;
 }
 
 interface DelegatedRunResult extends LoopResult {
@@ -1307,7 +1314,7 @@ export function createHost({
         ['managedProcessesClosed', () => state.managedProcesses.close()],
         ['mcpClosed', async () => { await state.mcp.close(); await state.browser.closeSession(state.id); }],
         ['extensionsDisposed', () => state.extensions.dispose()],
-        ['assemblyDisposed', () => state.assembly.dispose()],
+        ['assemblyDisposed', async () => { try { await state.subagents.close(); } finally { await state.assembly.dispose(); } }],
       ] as const;
       for (const [field, release] of resources) {
         if (progress![field]) continue;
@@ -1673,7 +1680,7 @@ export function createHost({
       }),
     }), (event) => {
       connection.notify({ notify: 'event', sessionId: id, event });
-      for (const listener of listeners) listener(event);
+      for (const listener of listeners) withoutKernelExecutionContext(() => listener(event));
     });
     const inheritedImages = recover ? (await session.read()).flatMap(event =>
       event.kind === 'tool' && isRecord(event.result) && event.result.images !== undefined
@@ -2008,6 +2015,8 @@ export function createHost({
           ? ['session', ...(state.environment.store === undefined ? [] : ['project' as const, 'user' as const])]
           : [];
         const requestId = randomUUID();
+        const requestSteeringRevision = state.runInputRevision ?? 0;
+        const childRunId = currentKernelExecutionContext()?.runId;
         let summary;
         try {
           summary = summarizeApproval({
@@ -2027,6 +2036,7 @@ export function createHost({
           settle = () => { approvalActive = false; resolve({ decision: 'cancelled', code: 'policy_approval_cancelled' }); };
         });
         state.asks.add(settle);
+        if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'approval', true);
         const endInteraction = state.taskBudget?.startInteraction();
         updateWaitingForUser(state as HostSessionState, connection, true, 'approval');
         const approvalStartedAt = telemetryContext === undefined ? 0n : process.hrtime.bigint();
@@ -2047,7 +2057,9 @@ export function createHost({
               rememberScopes,
               ...(scriptBinding === undefined ? {} : { scriptBinding }),
             }).then(async (value) => {
-              if (!approvalActive) return { decision: 'cancelled' as const, code: 'policy_approval_cancelled' };
+              if (!approvalActive || requestSteeringRevision !== (state.runInputRevision ?? 0)) {
+                return { decision: 'cancelled' as const, code: 'policy_approval_cancelled' };
+              }
               const response = isRecord(value) ? value : value === true ? { decision: 'allow' } : value === false ? { decision: 'deny' } : {};
               const source = response.source === 'controller' ? 'controller' as const : 'human' as const;
               if (response.decision === 'allow') {
@@ -2119,6 +2131,7 @@ export function createHost({
           endInteraction?.();
           pendingApprovalDetails.delete(requestId);
           state.asks.delete(settle);
+          if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'approval', false);
           updateWaitingForUser(state as HostSessionState, connection, false, 'approval');
         }
       },
@@ -2225,17 +2238,25 @@ export function createHost({
     // 提问和审批走不同流程；只有支持交互回答的客户端才注册提问工具。
     const asked = interactive === false ? [] : [createAskUserPlugin({
       ask: async (questions) => {
+        const questionSteeringRevision = state.runInputRevision ?? 0;
+        const childRunId = currentKernelExecutionContext()?.runId;
         let settle = (): void => {};
         const cancelled = new Promise<'cancelled'>((resolve) => {
           settle = () => resolve('cancelled');
         });
         state.asks.add(settle);
+        if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'question', true);
         const endInteraction = state.taskBudget?.startInteraction();
         updateWaitingForUser(state as HostSessionState, connection, true, 'input');
         try {
           const outcome = await Promise.race([
             // 交互等待受整次任务累计等待预算约束。
-            connection.request(QUESTION_METHOD, { sessionId: id, projectRoot: env.projectRoot, questions }),
+            connection.request(QUESTION_METHOD, { sessionId: id, projectRoot: env.projectRoot, questions }).then((value) => {
+              if (questionSteeringRevision !== (state.runInputRevision ?? 0)) {
+                throw new KernelError('ask_user_cancelled', { detail: `${id}: the question was superseded by steering input` });
+              }
+              return value;
+            }),
             cancelled,
           ]);
           if (outcome === 'cancelled') {
@@ -2250,26 +2271,12 @@ export function createHost({
         } finally {
           endInteraction?.();
           state.asks.delete(settle);
+          if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'question', false);
           updateWaitingForUser(state as HostSessionState, connection, false, 'input');
         }
       },
     })];
-    const assembly = loadAssembly(kernel, [...basePlugins, createMcpPlugin(mcp, mcpAuthorization, { media,
-      sourceFor: server => server === BROWSER_SERVER ? 'browser' : undefined }), createTodoWritePlugin({ session }),
-      createReadImagePlugin({ media, supportsImages: () => live.imageInput === true }),
-      createReadDocumentPlugin({ media, supportsImages: () => live.imageInput === true }),
-      createPresentPlugin({ sessionId: id, workspaceRoot: env.projectRoot, session }),
-      createScreenshotPlugin({ media, supportsImages: () => live.imageInput === true, authorize: authorizeScreenCapture }),
-      managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
-      // 压缩实例随所选模型重建；工具经取值函数读取当前实例。派生子会话不注册此工具，
-      // 子会话仍由自身构建的自动压缩管理预算。
-      compaction: () => state.compaction ?? null,
-      session,
-      directory,
-      id,
-    }),
-      ...(customToolPlugin === undefined ? [] : [customToolPlugin]),
-      createSubagentPlugin({
+    const subagents = createSubagentPlugin({
       config,
       fileWriteQueue,
       provider: live,
@@ -2297,7 +2304,24 @@ export function createHost({
       promptFragments: () => fragments,
       promptFragmentBytes: limitsOf(config).promptFragmentBytes,
       loopLimits: sessionLoopLimits(state),
-    })]);
+      parentSession: session,
+    });
+    const assembly = loadAssembly(kernel, [...basePlugins, createMcpPlugin(mcp, mcpAuthorization, { media,
+      sourceFor: server => server === BROWSER_SERVER ? 'browser' : undefined }), createTodoWritePlugin({ session }),
+      createReadImagePlugin({ media, supportsImages: () => live.imageInput === true }),
+      createReadDocumentPlugin({ media, supportsImages: () => live.imageInput === true }),
+      createPresentPlugin({ sessionId: id, workspaceRoot: env.projectRoot, session }),
+      createScreenshotPlugin({ media, supportsImages: () => live.imageInput === true, authorize: authorizeScreenCapture }),
+      managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
+      // 压缩实例随所选模型重建；工具经取值函数读取当前实例。派生子会话不注册此工具，
+      // 子会话仍由自身构建的自动压缩管理预算。
+      compaction: () => state.compaction ?? null,
+      session,
+      directory,
+      id,
+    }),
+      ...(customToolPlugin === undefined ? [] : [customToolPlugin]),
+      subagents]);
     cleanup.push(() => assembly.dispose());
     // 加载器已按字节预算处理项目指令片段，这里直接登记，避免重复截断。
     const maxBytes = config.instructions?.maxBytes ?? DEFAULT_INSTRUCTION_BYTES;
@@ -2346,7 +2370,31 @@ export function createHost({
         };
       },
       // 能力请求通过 Kernel 执行，以应用参数校验、权限判定和会话记录。
-      request: (tool, args) => kernel.call(tool, args),
+      request: async (tool, args) => {
+        const parent = currentKernelExecutionContext();
+        if (parent === undefined || !parent.scope.active) throw new KernelError('extension_request_context_unavailable');
+        if (parent.signal.aborted) {
+          const reason = parent.signal.reason;
+          throw reason instanceof KernelError ? reason : new KernelError('loop_cancelled', { cause: reason });
+        }
+        const callId = randomUUID();
+        const child = { ...parent, callId, parentCallId: parent.callId, scope: { active: true } };
+        try {
+          return await withKernelExecutionContext(child, () => kernel.call(tool, args, {
+            signal: parent.signal,
+            callId,
+            parentCallId: parent.callId,
+            ...(parent.sessionId === undefined ? {} : { sessionId: parent.sessionId }),
+            ...(parent.runId === undefined ? {} : { runId: parent.runId }),
+            ...(parent.executionId === undefined ? {} : { executionId: parent.executionId }),
+            ...(parent.userSeq === undefined ? {} : { userSeq: parent.userSeq }),
+            ...(parent.parentRunId === undefined ? {} : { parentRunId: parent.parentRunId }),
+            ...(parent.parentExecutionId === undefined ? {} : { parentExecutionId: parent.parentExecutionId }),
+          }));
+        } finally {
+          child.scope.active = false;
+        }
+      },
     });
     cleanup.push(() => installedExtensions.dispose());
     for (const diagnostic of installedExtensions.diagnostics) {
@@ -2519,13 +2567,18 @@ export function createHost({
         // 复审装配把用户原文当作仍然有效的指令；它不会进入主 Agent 的模型投影。
         // `maxPerRun` 是每轮上限：新一轮开始就重置，长会话里复审不会提前失效。
         state.reviewer?.beginRun();
+        const subagents = state.subagents;
+        if (subagents === undefined) throw new KernelError('subagent_runtime_unavailable');
         const result = await loop.run(input, {
           signal: budget.signal,
           task: budget,
+          ...(options.steering === undefined ? {} : { steering: options.steering }),
           onAccepted: options.onAccepted,
           user: { ...options.user, ...(options.acceptance === undefined ? {} : { run: options.acceptance }) },
           ...(options.acceptance === undefined ? {} : {
             runId: options.acceptance.runId,
+            settleSubruns: async (status) => await subagents.settleParent(options.acceptance!.runId, status),
+            finishSubruns: async () => await subagents.finishParent(options.acceptance!.runId),
             persistTerminal: async (status, summary, fields) => {
               const runId = options.acceptance!.runId;
               const result = status === 'completed'
@@ -2578,7 +2631,7 @@ export function createHost({
     // 当前轮次和待处理审批都限定在所属会话内。
     const customToolNames = customTools.tools.map((tool) => tool.name).filter((name) => !customTools.diagnostics.some((diagnostic) =>
       diagnostic.code === 'custom_tool_name_conflicts_with_registered_tool' && diagnostic.path === customTools.sources[name]));
-    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, customToolDiagnostics: customTools.diagnostics,
+    return Object.assign(state, { chain, kernel, assembly, subagents, extensions: installedExtensions, customToolDiagnostics: customTools.diagnostics,
       customToolNames,
       mcp, loop, runDelegated, templates, compaction, rebuildCompaction });
     } catch (error) {
@@ -2966,6 +3019,9 @@ export function createHost({
     delegation: DelegationSpec | undefined, acceptance: RunAcceptance, connection: HostClientConnection,
     onAccepted?: (userSeq: number) => void): Promise<DelegatedRunResult> {
     if (state.running !== undefined) throw new KernelError('run_already_running');
+    const steering = createRunSteeringInbox(state.session, acceptance.runId);
+    state.runSteering = steering;
+    state.runInputRevision = 0;
     state.activeRunId = acceptance.runId;
     try {
       return await execute(state, async (signal, report) => {
@@ -2977,9 +3033,13 @@ export function createHost({
           text = expanded.text;
           user = { ...user, raw: input, arguments: expanded.arguments, source: expanded.source, digest: expanded.digest };
         }
-        return await state.runDelegated(text, { signal, user, onProgress: report, delegation, acceptance, onAccepted });
+        return await state.runDelegated(text, {
+          signal, user, onProgress: report, delegation, acceptance, steering,
+          onAccepted: (userSeq) => { steering.activate(); onAccepted?.(userSeq); },
+        });
       }, connection);
     } finally {
+      if (state.runSteering === steering) state.runSteering = undefined;
       if (state.activeRunId === acceptance.runId) state.activeRunId = undefined;
     }
   }
@@ -3002,6 +3062,12 @@ export function createHost({
       const bridge = connection !== undefined && connection[TRUSTED_AGENT_CONTROL_ORIGIN] === true;
       const controllerScope = controllerScopeOf(grant?.id);
       const runScopes = runScopesOf(controlTrust, bridge, controllerScope);
+      const requireSubrunParent = async (state: HostSessionState, parentRunId: string): Promise<void> => {
+        const events = await state.session.read();
+        const scope = runAcceptanceScope(events, sessionId, parentRunId);
+        if (scope === undefined || (runScopes !== undefined && !runScopes.includes(scope))) throw new KernelError('run_not_found');
+        if (grant !== undefined) assertGrantSessionScope(grant, state);
+      };
 
       switch (message.method) {
         case 'workspace.trust': {
@@ -3807,6 +3873,72 @@ export function createHost({
           await state.managedProcesses.stopAll();
           return { cancelled: true };
         }
+        case 'run.steer': {
+          const state = open(sessionId);
+          const runId = requiredString(message.params.runId, 'runId');
+          if (state.activeRunId !== runId) throw new KernelError('run_steer_target_mismatch');
+          if (grant !== undefined) assertGrantSessionScope(grant, state);
+          const header = await state.session.header();
+          if (header?.formatVersion === undefined || header.formatVersion < 3) throw new KernelError('run_steer_session_format_unsupported');
+          const steering = state.runSteering;
+          if (steering === undefined) throw new KernelError('run_steer_not_ready');
+          const source = runOriginOf(undefined, 'human', mayRecordHumanRun(controlTrust, bridge));
+          let cancelledInteractions = 0;
+          const accepted = await steering.accept(source, requiredString(message.params.input, 'input'), () => {
+            state.runInputRevision = (state.runInputRevision ?? 0) + 1;
+            cancelledInteractions = state.asks.size;
+            for (const settle of [...state.asks]) settle();
+          });
+          return { ...accepted, cancelledInteractions };
+        }
+        case 'subrun.start': {
+          const state = open(sessionId);
+          const parentRunId = requiredString(message.params.parentRunId, 'parentRunId');
+          await requireSubrunParent(state, parentRunId);
+          if (state.activeRunId !== parentRunId || state.running === undefined) throw new KernelError('subagent_parent_not_active');
+          const source = runOriginOf(undefined, 'human', mayRecordHumanRun(controlTrust, bridge));
+          return await state.subagents.start({ task: requiredString(message.params.task, 'task') }, {
+            signal: state.running.signal,
+            permission: state.permission,
+            runId: parentRunId,
+          }, source);
+        }
+        case 'subrun.status': {
+          const state = open(sessionId);
+          const parentRunId = requiredString(message.params.parentRunId, 'parentRunId');
+          await requireSubrunParent(state, parentRunId);
+          return await state.subagents.status(requiredString(message.params.subrunId, 'subrunId'), parentRunId);
+        }
+        case 'subrun.message': {
+          const state = open(sessionId);
+          const parentRunId = requiredString(message.params.parentRunId, 'parentRunId');
+          await requireSubrunParent(state, parentRunId);
+          const source = runOriginOf(undefined, 'human', mayRecordHumanRun(controlTrust, bridge));
+          return await state.subagents.message({
+            subrunId: requiredString(message.params.subrunId, 'subrunId'),
+            runId: requiredString(message.params.runId, 'runId'),
+            parentRunId,
+            input: requiredString(message.params.input, 'input'),
+          }, source);
+        }
+        case 'subrun.wait': {
+          const state = open(sessionId);
+          const parentRunId = requiredString(message.params.parentRunId, 'parentRunId');
+          await requireSubrunParent(state, parentRunId);
+          const subrunIds = message.params.subrunIds;
+          if (!Array.isArray(subrunIds)) throw new KernelError('protocol_args_invalid');
+          return await state.subagents.wait(subrunIds as string[], parentRunId, message.params.timeoutMs ?? 30_000);
+        }
+        case 'subrun.cancel': {
+          const state = open(sessionId);
+          const parentRunId = requiredString(message.params.parentRunId, 'parentRunId');
+          await requireSubrunParent(state, parentRunId);
+          return await state.subagents.cancel({
+            subrunId: requiredString(message.params.subrunId, 'subrunId'),
+            runId: requiredString(message.params.runId, 'runId'),
+            parentRunId,
+          });
+        }
         case 'policy.set': {
           // 只修改会话级策略覆盖，不改写配置中的默认值。
           const mode = requiredString(message.params.mode, 'mode');
@@ -3867,6 +3999,7 @@ export function createHost({
           return {
             sessionId,
             running: state.running !== undefined,
+            activeRunId: state.activeRunId ?? null,
             progress: progressSnapshotOf(state),
             // 只返回当前模式可用的工具，不返回全部已登记工具。
             tools: state.kernel.manifest().map((entry) => entry.name),
