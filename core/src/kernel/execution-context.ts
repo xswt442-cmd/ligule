@@ -9,11 +9,13 @@ export interface KernelExecutionContext {
   readonly callId: string;
   readonly sessionId?: string;
   readonly runId?: string;
+  readonly source?: 'human' | 'controller';
   readonly executionId?: string;
   readonly userSeq?: number;
   readonly parentCallId?: string;
   readonly parentRunId?: string;
   readonly parentExecutionId?: string;
+  readonly extensionHookPhase?: 'prepareRequest' | 'beforeTool' | 'afterTool' | 'completeRun';
   readonly scope: KernelExecutionScope;
 }
 

@@ -17,7 +17,8 @@ async function sdkFrom(root) {
   return { Client, StdioClientTransport };
 }
 
-export async function connectMcp({ cliPath, projectRoot, dataRoot, apiKeyName, apiKey, sdkRoot, cwd = projectRoot, operator = false }) {
+export async function connectMcp({ cliPath, projectRoot, dataRoot, apiKeyName, apiKey, sdkRoot, cwd = projectRoot, operator = false,
+  grantId = /** @type {string | undefined} */ (undefined) }) {
   const cli = absolute(cliPath, 'LIGULE_MCP_CLI');
   const project = absolute(projectRoot, 'LIGULE_MCP_PROJECT_ROOT');
   const home = absolute(dataRoot, 'LIGULE_MCP_HOME');
@@ -35,7 +36,7 @@ export async function connectMcp({ cliPath, projectRoot, dataRoot, apiKeyName, a
   };
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [cli, 'mcp-server', '--project', project, ...(operator ? ['--operator'] : [])],
+    args: [cli, 'mcp-server', '--project', project, ...(grantId === undefined ? [] : ['--grant', grantId]), ...(operator ? ['--operator'] : [])],
     cwd: absolute(cwd, 'LIGULE_MCP_CWD'),
     env: serverEnvironment,
     stderr: 'pipe',

@@ -4,12 +4,11 @@ import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import {
-  createConfig, createKernel, createPermissionContext, extensionSources, loadAssembly, loadExtensions, minimalPlugin,
+  createConfig, createKernel, createPermissionContext, createSessionLog, extensionSources, loadAssembly, loadExtensions, minimalPlugin,
 } from '../dist/index.js';
 import type { ToolDefinition } from '../dist/kernel/kernel.js';
 import type { Connection } from '../dist/host/connection.js';
@@ -23,6 +22,8 @@ type ExtensionFragment = { name: string; text: string; source: string };
 type ExtensionLoadOptions = Parameters<typeof loadExtensions>[1] & { config?: Record<string, never> };
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
+const projectContextExtension = fileURLToPath(new URL('../examples/extensions/project-context.mjs', import.meta.url));
+const projectAuditExtension = fileURLToPath(new URL('../examples/extensions/project-audit.mjs', import.meta.url));
 const fullAccess = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
 });
@@ -30,7 +31,9 @@ const fullAccess = createPermissionContext('full-access', 'unrestricted', {
 // 每一条测试都要一份真的临时目录（扩展文件是被真动态 import 的），跑完一起收掉。
 const created: string[] = [];
 async function directoryWith(files: Record<string, string>): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'ligule-extensions-'));
+  const temporaryRoot = join(process.cwd(), 'testplace', 'tmp');
+  await mkdir(temporaryRoot, { recursive: true });
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-extensions-'));
   created.push(root);
   for (const [name, text] of Object.entries(files)) await writeFile(join(root, name), text);
   return root;
@@ -113,7 +116,7 @@ test('the extension state registry round-trips and treats unreadable documents a
   assert.deepEqual(declared.paths, [join(installedDirectory, 'pack.js')]);
 });
 
-test('the narrow interface is the four things the contract names, and registrations reach the kernel', async () => {
+test('the narrow interface contains only declared capabilities and registrations reach their owners', async () => {
   const root = await directoryWith({
     'one.js': `export default function one(host) {
   host.registerTool({ name: 'extra', description: 'from the extension', access: 'read', parameters: { type: 'object', properties: {} }, run: async () => ({ text: 'ran' }) });
@@ -135,12 +138,76 @@ test('the narrow interface is the four things the contract names, and registrati
   };
   const loaded = await loadExtensions([join(root, 'one.js')], options);
   assert.deepEqual(loaded.loaded.map((entry) => entry.name), ['one']);
-  assert.equal((globalThis as { __seen?: string }).__seen, 'onEvent,registerPrompt,registerTool,request');
+  assert.equal((globalThis as { __seen?: string }).__seen, 'onEvent,registerHook,registerPrompt,registerTool,request');
   assert.deepEqual(kernel.list(), ['extra']);
   assert.equal(fragments[0].text, 'what the extension wants said');
-  loaded.dispose();
+  await loaded.dispose();
   assert.deepEqual(kernel.list(), []);
   assert.deepEqual(fragments, []);
+});
+
+test('extension setup can register an owned lifecycle hook', async () => {
+  const root = await directoryWith({
+    'hook.js': `export default function hook(host) {
+  globalThis.__p11HookRegistration = typeof host.registerHook;
+  globalThis.__p11RegisterHook = host.registerHook;
+  globalThis.__p11RemoveHook = host.registerHook({ phase: 'prepareRequest', name: 'project-notes', run: () => ({ context: [] }) });
+}`,
+  });
+  const kernel = createKernel({ config: createConfig({ user: { boundary: root } }) });
+  const options: ExtensionLoadOptions = {
+    config: {},
+    registerTool: (tool) => kernel.register(tool as ToolDefinition),
+    registerFragment: () => () => {},
+    addEventListener: () => () => {},
+    request: (name, args) => kernel.call(name, args),
+  };
+  try {
+    const loaded = await loadExtensions([join(root, 'hook.js')], options);
+    assert.deepEqual(loaded.diagnostics, []);
+    assert.equal((globalThis as { __p11HookRegistration?: string }).__p11HookRegistration, 'function');
+    const [registration] = loaded.hooks.forPhase('prepareRequest');
+    assert.equal(registration?.extension, 'hook');
+    assert.equal(registration?.hook.name, 'project-notes');
+    (globalThis as { __p11RemoveHook?: () => void }).__p11RemoveHook?.();
+    assert.deepEqual(loaded.hooks.forPhase('prepareRequest'), []);
+    await loaded.dispose();
+    assert.throws(() => (globalThis as { __p11RegisterHook?: (hook: unknown) => void }).__p11RegisterHook?.({
+      phase: 'prepareRequest', name: 'late', run: () => undefined,
+    }), { code: 'extension_inactive' });
+  } finally {
+    delete (globalThis as { __p11HookRegistration?: string }).__p11HookRegistration;
+    delete (globalThis as { __p11RegisterHook?: (hook: unknown) => void }).__p11RegisterHook;
+    delete (globalThis as { __p11RemoveHook?: () => void }).__p11RemoveHook;
+  }
+});
+
+test('duplicate Hook names fail only the conflicting extension and roll back its partial registrations', async () => {
+  const root = await directoryWith({
+    'first.js': `export default function first(host) {
+  host.registerHook({ phase: 'beforeTool', name: 'limit', run: () => ({ decision: 'continue' }) });
+}`,
+    'duplicate.js': `export default function duplicate(host) {
+  host.registerPrompt({ name: 'partial', text: 'must be removed' });
+  host.registerHook({ phase: 'beforeTool', name: 'limit', run: () => ({ decision: 'continue' }) });
+}`,
+  });
+  const kernel = createKernel({ config: createConfig({ user: { boundary: root } }) });
+  const fragments: ExtensionFragment[] = [];
+  const loaded = await loadExtensions([join(root, 'first.js'), join(root, 'duplicate.js')], {
+    registerTool: (tool) => kernel.register(tool as ToolDefinition),
+    registerFragment: (fragment) => { fragments.push(fragment); return () => { const index = fragments.indexOf(fragment); if (index >= 0) fragments.splice(index, 1); }; },
+    addEventListener: () => () => {},
+    request: (name, args) => kernel.call(name, args),
+  });
+  assert.deepEqual(loaded.loaded.map((extension) => extension.name), ['first']);
+  assert.deepEqual(loaded.diagnostics.map((item) => item.code), ['extension_hook_duplicate']);
+  const hooks = loaded.hooks.forPhase('beforeTool');
+  assert.equal(hooks.length, 1);
+  assert.equal(hooks[0].extension, 'first');
+  assert.equal(fragments.length, 0, 'the conflicting extension loses its partial Prompt registration');
+  await loaded.dispose();
+  assert.deepEqual(loaded.hooks.forPhase('beforeTool'), []);
 });
 
 test('a broken extension takes back its own registrations and leaves the others alone', async () => {
@@ -185,12 +252,42 @@ test('extension disposal attempts all owned cleanups in reverse order and only o
     addEventListener: (handler) => { listeners.add(handler); return () => listeners.delete(handler); },
     request: (name, args) => kernel.call(name, args),
   });
-  assert.throws(() => loaded.dispose(), (error) => error instanceof Error && error.message === 'extension disposer failed');
+  await assert.rejects(loaded.dispose(), (error) => error instanceof Error && error.message === 'extension disposer failed');
   assert.deepEqual(kernel.list(), []);
   assert.equal(fragments.size, 0);
   assert.equal(listeners.size, 0);
-  loaded.dispose();
+  await loaded.dispose();
   assert.deepEqual(kernel.list(), []);
+});
+
+test('extension disposal awaits async disposers and completes exactly once', async () => {
+  const root = await directoryWith({
+    'async-cleanup.js': `export default function asyncCleanup() {
+  return async () => {
+    globalThis.__p11DisposerCalls = (globalThis.__p11DisposerCalls || 0) + 1;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    globalThis.__p11DisposerFinished = true;
+  };
+}`,
+  });
+  const loaded = await loadExtensions([join(root, 'async-cleanup.js')], {
+    registerTool: () => () => {},
+    registerFragment: () => () => {},
+    addEventListener: () => () => {},
+    request: async () => undefined,
+  });
+  try {
+    const pending = loaded.dispose();
+    assert.equal((globalThis as { __p11DisposerFinished?: boolean }).__p11DisposerFinished, undefined);
+    await pending;
+    assert.equal((globalThis as { __p11DisposerFinished?: boolean }).__p11DisposerFinished, true);
+    assert.equal((globalThis as { __p11DisposerCalls?: number }).__p11DisposerCalls, 1);
+    await loaded.dispose();
+    assert.equal((globalThis as { __p11DisposerCalls?: number }).__p11DisposerCalls, 1);
+  } finally {
+    delete (globalThis as { __p11DisposerCalls?: number }).__p11DisposerCalls;
+    delete (globalThis as { __p11DisposerFinished?: boolean }).__p11DisposerFinished;
+  }
 });
 
 test('extension setup failure keeps its error visible when owned cleanup also fails', async () => {
@@ -216,7 +313,7 @@ test('extension setup failure keeps its error visible when owned cleanup also fa
   assert.equal(fragments.size, 0);
 });
 
-test('what an extension asks for still passes the decision chain and the record', async () => {
+test('extension requests still pass through Kernel and are unavailable after extension disposal', async () => {
   const root = await directoryWith({
     'calls.js': `export default function calls(host) {
   globalThis.__request = () => host.request('read', { path: '../outside.txt' });
@@ -232,12 +329,17 @@ test('what an extension asks for still passes the decision chain and the record'
     request: (name, args) => kernel.call(name, args),
   };
   const loaded = await loadExtensions([join(root, 'calls.js')], options);
-  loaded.dispose();
   await assert.rejects(
     () => (globalThis as unknown as { __request: () => Promise<unknown> }).__request(),
     (error) => error instanceof Error && (error as { code?: string }).code === 'path_escapes_boundary',
     'the boundary is not something an extension can step around by asking',
   );
+  await loaded.dispose();
+  await assert.rejects(
+    () => (globalThis as unknown as { __request: () => Promise<unknown> }).__request(),
+    { code: 'extension_inactive' },
+  );
+  delete (globalThis as unknown as { __request?: () => Promise<unknown> }).__request;
 });
 
 // 判据那一条：一份扩展装上一件工具与一段提示词片段，选它的模式看得见这两样；名字写错在装载那一刻就报。
@@ -448,6 +550,692 @@ test('P10 an extension event cannot start a tool call without an active executio
       testDirectory: 'testplace/tmp',
     });
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Host Session close awaits an extension async disposer', { timeout: 10_000 }, async () => {
+  const root = await directoryWith({});
+  const startedPath = join(root, 'disposer-started.txt');
+  const finishedPath = join(root, 'disposer-finished.txt');
+  const extensionPath = join(root, 'async-disposer.mjs');
+  await writeFile(extensionPath, `import { writeFileSync } from 'node:fs';
+export default function asyncDisposer() {
+  return async () => {
+    writeFileSync(${JSON.stringify(startedPath)}, 'started');
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    writeFileSync(${JSON.stringify(finishedPath)}, 'finished');
+  };
+}`);
+
+  try {
+    await withTuiHost(async ({ client, sessionId }) => {
+      await client.request('session.close', { sessionId });
+      assert.equal(await readFile(startedPath, 'utf8'), 'started');
+      assert.equal(await readFile(finishedPath, 'utf8'), 'finished', 'Host close returns only after the async disposer settles');
+    }, {
+      extensions: { paths: [extensionPath], ignored: [] },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('request preparation Hooks receive the active Run and affect the actual Provider request', { timeout: 15_000 }, async () => {
+  const root = await directoryWith({
+    'request-context.mjs': `export default function requestContext(host) {
+  host.registerHook({
+    phase: 'prepareRequest',
+    name: 'project-notes',
+    run: async (context) => {
+      const read = await context.request('read', { path: 'note.txt' });
+      let deniedWrite = '';
+      try { await context.request('create', { path: 'hook-write.txt', content: 'must stay absent' }); }
+      catch (error) { deniedWrite = error.code; }
+      const firstUser = context.messages.find((message) => message.role === 'user');
+      try { firstUser.text = 'mutated by extension'; } catch {}
+      globalThis.__p11RequestHookContext = {
+        extension: context.extension,
+        hook: context.hook,
+        sessionId: context.sessionId,
+        runId: context.runId,
+        source: context.source,
+        attempt: context.attempt,
+        hasUserMessage: context.messages.some((message) => message.role === 'user' && message.text === 'read request context'),
+        firstUserText: firstUser.text,
+        deniedWrite,
+      };
+      return { context: 'Project notes: ' + read.text };
+    },
+  });
+}`,
+  });
+  const extensionPath = join(root, 'request-context.mjs');
+  try {
+    await withTuiHost(async ({ client, sessionId, providerRequests, projectDirectory }) => {
+      await client.request('run.start', { sessionId, input: 'read request context' });
+      assert.equal(providerRequests.length, 1);
+      assert.ok(JSON.stringify(providerRequests[0]).includes('Project notes: safe hook read'),
+        'the actual Provider payload contains the Hook context');
+      const observed = (globalThis as { __p11RequestHookContext?: Record<string, unknown> }).__p11RequestHookContext;
+      assert.equal(observed?.extension, 'requestContext');
+      assert.equal(observed?.hook, 'project-notes');
+      assert.equal(observed?.sessionId, sessionId);
+      assert.equal(typeof observed?.runId, 'string');
+      assert.equal(observed?.source, 'human');
+      assert.equal(observed?.attempt, 1);
+      assert.equal(observed?.hasUserMessage, true);
+      assert.equal(observed?.firstUserText, 'read request context', 'Hook inputs are immutable snapshots');
+      assert.equal(observed?.deniedWrite, 'extension_request_read_only_required');
+      assert.equal(existsSync(join(projectDirectory, 'hook-write.txt')), false, 'request preparation exposes only read-only Kernel tools');
+      assert.ok(providerRequests[0].messages.some((message) => message.role === 'user' && message.content === 'read request context'));
+    }, {
+      extensions: { paths: [extensionPath], ignored: [] },
+      config: { policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      setup: async ({ projectDirectory }) => await writeFile(join(projectDirectory, 'note.txt'), 'safe hook read'),
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    delete (globalThis as { __p11RequestHookContext?: Record<string, unknown> }).__p11RequestHookContext;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('request preparation Hook output is bounded by the existing prompt-fragment limit', { timeout: 10_000 }, async () => {
+  const root = await directoryWith({
+    'oversize-context.mjs': `export default function oversize(host) {
+  host.registerHook({ phase: 'prepareRequest', name: 'oversize', run: () => ({ context: 'x'.repeat(8_001) }) });
+}`,
+  });
+  try {
+    await withTuiHost(async ({ client, sessionId, providerRequests }) => {
+      const accepted = await client.request('run.submit', { sessionId, input: 'reject the oversized extension context' }) as { runId: string };
+      await assert.rejects(client.request('run.wait', { sessionId, runId: accepted.runId }), { code: 'extension_hook_context_too_large' });
+      assert.equal(providerRequests.length, 0, 'the Provider must not receive an oversized prepared request');
+    }, {
+      extensions: { paths: [join(root, 'oversize-context.mjs')], ignored: [] },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      config: { policy: { mode: 'auto' } },
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('completeRun Hook can require another bounded request before the Run succeeds', { timeout: 15_000 }, async () => {
+  await withTuiHost(async ({ client, sessionId, sessionDirectory, projectDirectory, providerRequests }) => {
+      await writeFile(join(projectDirectory, 'README.md'), 'P11_EXTENSION_DEMO_CONTEXT_SOURCE: project note for the request Hook.');
+      await writeFile(join(projectDirectory, 'verification.txt'), 'PASS');
+      await client.request('run.start', { sessionId, input: 'P11_EXTENSION_DEMO' });
+      assert.equal(providerRequests.length, 2, 'a continue decision consumes another Provider request in the same Run');
+      const firstSystem = providerRequests[0].messages.find((message) => message.role === 'system')?.content;
+      const secondSystem = providerRequests[1].messages.find((message) => message.role === 'system')?.content;
+      assert.equal(typeof firstSystem, 'string');
+      assert.ok((firstSystem as string).includes('P11_EXTENSION_DEMO_CONTEXT_SOURCE'));
+      assert.equal(typeof secondSystem, 'string');
+      assert.ok((secondSystem as string).includes('P11_EXTENSION_DEMO_CHECK'));
+      const events = (await readFile(join(sessionDirectory, `${sessionId}.jsonl`), 'utf8')).split('\n').filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const reads = events.filter((event) => event.kind === 'tool' && event.tool === 'read');
+      assert.equal(reads.length, 3, 'two request-context reads and one completion check use the Kernel read tool');
+      const user = events.find((event) => event.kind === 'user' && typeof event.text === 'string'
+        && event.text.includes('P11_EXTENSION_DEMO')) as { run?: { runId?: string } } | undefined;
+      assert.equal(typeof user?.run?.runId, 'string');
+      assert.ok(reads.every((event) => event.runId === user?.run?.runId));
+      assert.ok(reads.every((event) => typeof event.parentCallId === 'string'));
+    }, {
+      extensions: { paths: [projectContextExtension], ignored: [] },
+      config: { policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      testDirectory: 'testplace/tmp',
+    });
+});
+
+test('the project-audit example routes read, search, and exec through the active Kernel Run', { timeout: 30_000 }, async () => {
+  await withTuiHost(async ({ client, sessionId, sessionDirectory, projectDirectory, providerRequests }) => {
+    await client.request('workspace.trust', {
+      projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
+    });
+    client.onRequest((message) => message.method === 'approval.request' ? { decision: 'allow' } : undefined);
+    await client.request('run.start', {
+      sessionId,
+      input: JSON.stringify({ tool: 'project_audit', args: { path: 'notes.txt', pattern: 'Needle' } }),
+    });
+    const events = (await readFile(join(sessionDirectory, `${sessionId}.jsonl`), 'utf8')).split('\n').filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const outer = events.findLast((event) => event.kind === 'tool' && event.tool === 'project_audit') as {
+      callId?: string; runId?: string;
+    } | undefined;
+    assert.equal(typeof outer?.callId, 'string');
+    const nested = events.filter((event) => event.kind === 'tool'
+      && ['read', 'search', 'exec'].includes(String(event.tool)));
+    assert.deepEqual(nested.map((event) => event.tool), ['read', 'search', 'exec']);
+    assert.ok(nested.every((event) => event.parentCallId === outer?.callId), 'each nested tool call is recorded under its extension tool');
+    assert.ok(nested.every((event) => event.runId === outer?.runId), 'nested calls remain bound to the same Run');
+    assert.ok(JSON.stringify(providerRequests).includes('Needle appears here'));
+    assert.match(JSON.stringify(providerRequests), /v\d+\.\d+\.\d+/);
+  }, {
+    extensions: { paths: [projectAuditExtension], ignored: [] },
+    config: { policy: { mode: 'ask' } },
+    permission: fullAccess,
+    interactive: true,
+    permissionControl: true,
+    modeName: 'full',
+    setup: async ({ projectDirectory }) => await writeFile(join(projectDirectory, 'notes.txt'), 'Needle appears here.\n'),
+    testDirectory: 'testplace/tmp',
+  });
+});
+
+test('the project-context example receives child Run identity and executes through the child Kernel', { timeout: 20_000 }, async () => {
+  const root = await directoryWith({
+    'observe-child.mjs': `export default function observeChild(host) {
+  globalThis.__p11ObservedCompletionRuns = [];
+  host.registerHook({ phase: 'completeRun', name: 'observe-child-scope', run: (context) => {
+    globalThis.__p11ObservedCompletionRuns.push({
+      sessionId: context.sessionId,
+      runId: context.runId,
+      source: context.source,
+      parentRunId: context.parentRunId,
+      parentCallId: context.parentCallId,
+      userSeq: context.userSeq,
+      candidate: context.candidate,
+    });
+    return { decision: 'accept' };
+  } });
+}`,
+  });
+  let requestCount = 0;
+  try {
+    await withTuiHost(async ({ client, sessionId, sessionDirectory, providerRequests }) => {
+      await client.request('run.start', {
+        sessionId,
+        input: JSON.stringify({ tool: 'subagent_start', args: { task: 'P11_EXTENSION_DEMO child task' } }),
+      });
+      assert.equal(providerRequests.length, 4, 'the parent and child each make their initial and continuation requests');
+      assert.ok(providerRequests.some((request) => JSON.stringify(request).includes('P11_EXTENSION_DEMO_CHECK')),
+        'the child completion decision reaches the child Provider request');
+      const scopes = (globalThis as { __p11ObservedCompletionRuns?: Record<string, unknown>[] }).__p11ObservedCompletionRuns ?? [];
+      const parent = scopes.find((scope) => scope.sessionId === sessionId) as {
+        runId?: string;
+      } | undefined;
+      const child = scopes.find((scope) => scope.sessionId !== sessionId) as {
+        sessionId?: string; runId?: string; source?: string; parentRunId?: string; parentCallId?: string;
+        userSeq?: number; candidate?: { fromSeq?: number; toSeq?: number; id?: string };
+      } | undefined;
+      assert.equal(typeof parent?.runId, 'string');
+      assert.equal(typeof child?.sessionId, 'string');
+      assert.notEqual(child?.sessionId, sessionId);
+      assert.equal(child?.source, 'controller');
+      assert.equal(child?.parentRunId, parent?.runId);
+      assert.equal(typeof child?.parentCallId, 'string');
+      assert.equal(child?.candidate?.fromSeq, child?.userSeq);
+      assert.ok(typeof child?.candidate?.toSeq === 'number' && child.candidate.toSeq >= child.userSeq!);
+      const childEvents = (await readFile(join(sessionDirectory, `${child!.sessionId}.jsonl`), 'utf8')).split('\n').filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const childReads = childEvents.filter((event) => event.kind === 'tool' && event.tool === 'read');
+      assert.ok(childReads.length >= 3, 'request context and completion checks use the child Session Kernel');
+      assert.ok(childReads.every((event) => event.runId === child?.runId));
+    }, {
+      extensions: { paths: [projectContextExtension, join(root, 'observe-child.mjs')], ignored: [] },
+      config: { loop: { iterations: 4, modelCalls: 4, totalModelCalls: 8 }, policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      beforeResponse: (body) => {
+        requestCount += 1;
+        if (requestCount < 3) return;
+        const lastUser = [...body.messages].reverse().find((message) => message.role === 'user');
+        if (typeof lastUser?.content === 'string' && lastUser.content.includes('"tool":"subagent_start"')) {
+          lastUser.content = 'P11 parent finishes after the child';
+        }
+      },
+      setup: async ({ projectDirectory }) => {
+        await writeFile(join(projectDirectory, 'README.md'), 'P11_EXTENSION_DEMO_CONTEXT_SOURCE: child request context.');
+        await writeFile(join(projectDirectory, 'verification.txt'), 'PASS');
+      },
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    delete (globalThis as { __p11ObservedCompletionRuns?: Record<string, unknown>[] }).__p11ObservedCompletionRuns;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('configured Hooks load when the TUI Host reopens a Session with full-access and unrestricted network', { timeout: 15_000 }, async () => {
+  await withTuiHost(async ({ client, sessionId, projectDirectory, providerRequests }) => {
+    await writeFile(join(projectDirectory, 'README.md'), 'P11_EXTENSION_DEMO_CONTEXT_SOURCE: reopen project note.');
+    await writeFile(join(projectDirectory, 'verification.txt'), 'PASS');
+    await client.request('run.start', { sessionId, input: 'P11_EXTENSION_DEMO' });
+    assert.equal(providerRequests.length, 1, 'the initial read-only Session does not load configured executable extensions');
+    await client.request('permission.set', {
+      sessionId,
+      permissionProfile: 'full-access',
+      permissionNetwork: 'unrestricted',
+      confirmFullAccess: true,
+      confirmNetwork: true,
+    });
+    await client.request('session.close', { sessionId });
+    await client.request('session.open', { projectRoot: projectDirectory, sessionId });
+    await client.request('run.start', { sessionId, input: 'P11_EXTENSION_DEMO' });
+    assert.equal(providerRequests.length, 3, 'the reopened Session runs the prepare and completion Hooks');
+    assert.ok(JSON.stringify(providerRequests.slice(1)).includes('P11_EXTENSION_DEMO_CONTEXT_SOURCE'));
+    assert.ok(JSON.stringify(providerRequests.slice(1)).includes('P11_EXTENSION_DEMO_CHECK'));
+  }, {
+    extensions: { paths: [projectContextExtension], ignored: [] },
+    permission: createPermissionContext('read-only', 'policy', fullAccess.capabilities),
+    permissionControl: true,
+    config: { policy: { mode: 'auto' } },
+    modeName: 'full',
+    testDirectory: 'testplace/tmp',
+  });
+});
+
+test('completion failure outranks an earlier continue decision and runs the remaining checks', { timeout: 15_000 }, async () => {
+  const root = await directoryWith({
+    'completion-order.mjs': `export default function completionOrder(host) {
+  globalThis.__p11CompletionOrder = [];
+  host.registerHook({ phase: 'completeRun', name: 'ask-to-continue', run: () => {
+    globalThis.__p11CompletionOrder.push('continue');
+    return { decision: 'continue', reason: 'one more check is needed' };
+  } });
+  host.registerHook({ phase: 'completeRun', name: 'reject', run: () => {
+    globalThis.__p11CompletionOrder.push('fail');
+    return { decision: 'fail', reason: 'the required artifact is missing' };
+  } });
+}`,
+  });
+  try {
+    await withTuiHost(async ({ client, sessionId, providerRequests }) => {
+      await assert.rejects(client.request('run.start', { sessionId, input: 'Finish the task.' }), (error: unknown) => {
+        assert.equal((error as { code?: string }).code, 'extension_completion_rejected');
+        assert.match((error as { detail?: string }).detail ?? '', /the required artifact is missing/);
+        return true;
+      });
+      assert.equal(providerRequests.length, 1, 'a failure must prevent the continuation request');
+      assert.deepEqual((globalThis as { __p11CompletionOrder?: string[] }).__p11CompletionOrder, ['continue', 'fail']);
+    }, {
+      extensions: { paths: [join(root, 'completion-order.mjs')], ignored: [] },
+      config: { policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    delete (globalThis as { __p11CompletionOrder?: string[] }).__p11CompletionOrder;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a later completion Hook exception overrides continuation without persisting its error text', { timeout: 15_000 }, async () => {
+  const root = await directoryWith({
+    'completion-exception.mjs': `export default function completionException(host) {
+  globalThis.__p11CompletionExceptionOrder = [];
+  host.registerHook({ phase: 'completeRun', name: 'continue-first', run: () => {
+    globalThis.__p11CompletionExceptionOrder.push('continue');
+    return { decision: 'continue', reason: 'one more check is needed' };
+  } });
+  host.registerHook({ phase: 'completeRun', name: 'throw-secret', run: () => {
+    globalThis.__p11CompletionExceptionOrder.push('throw');
+    throw new Error('private token must not be recorded');
+  } });
+}`,
+  });
+  try {
+    await withTuiHost(async ({ client, sessionId, providerRequests, sessionDirectory }) => {
+      await assert.rejects(client.request('run.start', { sessionId, input: 'Finish the task.' }), { code: 'extension_hook_failed' });
+      assert.equal(providerRequests.length, 1);
+      assert.deepEqual((globalThis as { __p11CompletionExceptionOrder?: string[] }).__p11CompletionExceptionOrder, ['continue', 'throw']);
+      const sessionText = await readFile(join(sessionDirectory, `${sessionId}.jsonl`), 'utf8');
+      assert.equal(sessionText.includes('private token must not be recorded'), false);
+    }, {
+      extensions: { paths: [join(root, 'completion-exception.mjs')], ignored: [] },
+      config: { policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    delete (globalThis as { __p11CompletionExceptionOrder?: string[] }).__p11CompletionExceptionOrder;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cancelling a running completion Hook prevents its late accept from completing the Run', { timeout: 15_000 }, async () => {
+  const root = await directoryWith({
+    'slow-completion.mjs': `export default function slowCompletion(host) {
+  globalThis.__p11SlowCompletionStarted = false;
+  globalThis.__p11SlowCompletionSettled = false;
+  host.registerHook({ phase: 'completeRun', name: 'slow-check', run: async () => {
+    globalThis.__p11SlowCompletionStarted = true;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    globalThis.__p11SlowCompletionSettled = true;
+    return { decision: 'accept' };
+  } });
+}`,
+  });
+  try {
+    await withTuiHost(async ({ client, sessionId, sessionDirectory }) => {
+      const accepted = await client.request('run.submit', { sessionId, input: 'Finish after a slow check.' }) as { runId: string };
+      await waitFor(() => (globalThis as { __p11SlowCompletionStarted?: boolean }).__p11SlowCompletionStarted === true);
+      await client.request('run.cancel', { sessionId });
+      await assert.rejects(client.request('run.wait', { sessionId, runId: accepted.runId }), (error) =>
+        ['loop_cancelled', 'task_cancelled'].includes((error as { code?: string }).code ?? ''));
+      await delay(200);
+      assert.equal((globalThis as { __p11SlowCompletionSettled?: boolean }).__p11SlowCompletionSettled, true,
+        'trusted extension code may settle after cancellation');
+      const events = (await readFile(join(sessionDirectory, `${sessionId}.jsonl`), 'utf8')).split('\n').filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const turns = events.filter((event) => event.kind === 'turn');
+      assert.equal(turns.length, 1);
+      assert.equal(turns[0].status, 'cancelled', 'the late accept cannot replace the persisted cancellation');
+    }, {
+      extensions: { paths: [join(root, 'slow-completion.mjs')], ignored: [] },
+      config: { policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    delete (globalThis as { __p11SlowCompletionStarted?: boolean }).__p11SlowCompletionStarted;
+    delete (globalThis as { __p11SlowCompletionSettled?: boolean }).__p11SlowCompletionSettled;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('completion continuation invalidates an earlier structured submission', { timeout: 15_000 }, async () => {
+  const root = await directoryWith({
+    'structured-completion.mjs': `export default function structuredCompletion(host) {
+  globalThis.__p11StructuredCompletionChecks = 0;
+  globalThis.__p11StructuredCompletionContext = undefined;
+  host.registerHook({ phase: 'completeRun', name: 'verify-submission', run: (context) => {
+    globalThis.__p11StructuredCompletionChecks += 1;
+    globalThis.__p11StructuredCompletionContext = {
+      candidate: context.candidate,
+      structuredDigest: context.structuredDigest,
+      userSeq: context.userSeq,
+    };
+    return { decision: 'continue', reason: 'Submit the structured result again after the final check.' };
+  } });
+}`,
+  });
+  try {
+    await withTuiHost(async ({ client, sessionId, providerRequests }) => {
+      await assert.rejects(client.request('run.start', {
+        sessionId,
+        input: JSON.stringify({ tool: 'ligule_delegation_result', args: { result: { answer: 'ready' } } }),
+        delegation: { outputSchema: {
+          type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false,
+        } },
+      }), { code: 'delegation_result_missing' });
+      assert.equal(providerRequests.length, 2, 'the Hook continuation must return to the Provider');
+      assert.ok(JSON.stringify(providerRequests[1]).includes('Submit the structured result again after the final check.'));
+      assert.equal((globalThis as { __p11StructuredCompletionChecks?: number }).__p11StructuredCompletionChecks, 1,
+        'the second candidate fails the existing structured-output check before another completion Hook runs');
+      const context = (globalThis as { __p11StructuredCompletionContext?: Record<string, unknown> }).__p11StructuredCompletionContext;
+      assert.equal(typeof context?.structuredDigest, 'string', 'the check is bound to a digest of the accepted structured output');
+      const candidate = context?.candidate as { fromSeq?: number; toSeq?: number } | undefined;
+      assert.equal(candidate?.fromSeq, context?.userSeq);
+      assert.ok(typeof candidate?.toSeq === 'number' && candidate.toSeq >= candidate.fromSeq!);
+    }, {
+      extensions: { paths: [join(root, 'structured-completion.mjs')], ignored: [] },
+      config: { policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      beforeResponse: (body) => {
+        if (body.messages.some((message) => message.role === 'assistant')) {
+          const lastUser = [...body.messages].reverse().find((message) => message.role === 'user');
+          if (lastUser !== undefined) lastUser.content = 'Continue without submitting another structured result.';
+        }
+      },
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    delete (globalThis as { __p11StructuredCompletionChecks?: number }).__p11StructuredCompletionChecks;
+    delete (globalThis as { __p11StructuredCompletionContext?: Record<string, unknown> }).__p11StructuredCompletionContext;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('completion continuation consumes the existing model-call budget', { timeout: 15_000 }, async () => {
+  const root = await directoryWith({
+    'completion-budget.mjs': `export default function completionBudget(host) {
+  globalThis.__p11CompletionBudgetChecks = 0;
+  host.registerHook({ phase: 'completeRun', name: 'always-continue', run: () => {
+    globalThis.__p11CompletionBudgetChecks += 1;
+    return { decision: 'continue', reason: 'one more check is required' };
+  } });
+}`,
+  });
+  try {
+    await withTuiHost(async ({ client, sessionId, providerRequests }) => {
+      await assert.rejects(client.request('run.start', { sessionId, input: 'Finish the task.' }), { code: 'loop_model_budget_exhausted' });
+      assert.equal(providerRequests.length, 1, 'the continuation cannot exceed the existing one-call Run budget');
+      assert.equal((globalThis as { __p11CompletionBudgetChecks?: number }).__p11CompletionBudgetChecks, 1);
+    }, {
+      extensions: { paths: [join(root, 'completion-budget.mjs')], ignored: [] },
+      config: { loop: { iterations: 4, modelCalls: 1 }, policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    delete (globalThis as { __p11CompletionBudgetChecks?: number }).__p11CompletionBudgetChecks;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('completion feedback across candidates stays within the existing prompt-fragment limit', { timeout: 15_000 }, async () => {
+  const root = await directoryWith({
+    'completion-context-limit.mjs': `export default function completionContextLimit(host) {
+  for (let index = 0; index < 8; index += 1) {
+    host.registerHook({ phase: 'completeRun', name: 'bounded-feedback-' + index, run: () => ({
+      decision: 'continue', reason: 'x'.repeat(500),
+    }) });
+  }
+}`,
+  });
+  try {
+    await withTuiHost(async ({ client, sessionId, providerRequests }) => {
+      await assert.rejects(client.request('run.start', { sessionId, input: 'Finish the task.' }), { code: 'extension_hook_context_too_large' });
+      assert.equal(providerRequests.length, 2, 'oversized cumulative feedback stops before another Provider request');
+      assert.ok(JSON.stringify(providerRequests[1]).includes('x'.repeat(500)), 'the first bounded continuation reaches its next request');
+    }, {
+      extensions: { paths: [join(root, 'completion-context-limit.mjs')], ignored: [] },
+      config: { policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('beforeTool Hook can add a denial without executing the tool or bypassing the Kernel record', { timeout: 15_000 }, async () => {
+  const root = await directoryWith({
+    'deny-create.mjs': `export default function denyCreate(host) {
+  globalThis.__p11LaterBeforeTool = 0;
+  host.registerHook({ phase: 'beforeTool', name: 'deny-create', run: (context) =>
+    context.tool === 'create' ? { decision: 'deny', reason: 'P11 test denial' } : { decision: 'continue' } });
+  host.registerHook({ phase: 'beforeTool', name: 'attempt-override', run: () => {
+    globalThis.__p11LaterBeforeTool += 1;
+    return { decision: 'continue' };
+  } });
+}`,
+  });
+  const extensionPath = join(root, 'deny-create.mjs');
+  try {
+    await withTuiHost(async ({ client, sessionId, sessionDirectory, projectDirectory }) => {
+      await client.request('run.start', {
+        sessionId,
+        input: JSON.stringify({ tool: 'create', args: { path: 'hook-denied.txt', content: 'must remain absent' } }),
+      });
+      assert.equal(existsSync(join(projectDirectory, 'hook-denied.txt')), false, 'the additional refusal happens before tool execution');
+      const events = (await readFile(join(sessionDirectory, `${sessionId}.jsonl`), 'utf8')).split('\n').filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const result = events.findLast((event) => event.kind === 'tool' && event.tool === 'create')?.result as {
+        failed?: boolean; code?: string;
+      } | undefined;
+      assert.equal(result?.failed, true);
+      assert.equal(result?.code, 'extension_hook_denied');
+      assert.equal((globalThis as { __p11LaterBeforeTool?: number }).__p11LaterBeforeTool, 0,
+        'a later Hook cannot override an earlier Hook refusal');
+    }, {
+      extensions: { paths: [extensionPath], ignored: [] },
+      config: { policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    delete (globalThis as { __p11LaterBeforeTool?: number }).__p11LaterBeforeTool;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('beforeTool Hook exceptions fail and persist the call without running the tool', { timeout: 15_000 }, async () => {
+  const root = await directoryWith({
+    'throw-before-tool.mjs': `export default function throwBeforeTool(host) {
+  host.registerHook({ phase: 'beforeTool', name: 'reject-create', run: (context) => {
+    if (context.tool === 'create') throw new Error('private before-tool detail');
+    return { decision: 'continue' };
+  } });
+}`,
+  });
+  try {
+    await withTuiHost(async ({ client, sessionId, sessionDirectory, projectDirectory }) => {
+      await client.request('run.start', { sessionId, input: JSON.stringify({
+        tool: 'create', args: { path: 'hook-error.txt', content: 'must stay absent' },
+      }) });
+      assert.equal(existsSync(join(projectDirectory, 'hook-error.txt')), false);
+      const sessionText = await readFile(join(sessionDirectory, `${sessionId}.jsonl`), 'utf8');
+      const events = sessionText.split('\n').filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+      const result = events.findLast((event) => event.kind === 'tool' && event.tool === 'create')?.result as {
+        code?: string; failed?: boolean;
+      } | undefined;
+      assert.equal(result?.failed, true);
+      assert.equal(result?.code, 'extension_hook_failed');
+      assert.equal(sessionText.includes('private before-tool detail'), false);
+    }, {
+      extensions: { paths: [join(root, 'throw-before-tool.mjs')], ignored: [] },
+      config: { policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a Kernel permission denial happens before beforeTool Hooks', async () => {
+  const root = await directoryWith({
+    'observe-before-tool.mjs': `export default function observeBeforeTool(host) {
+  globalThis.__p11HardDeniedBeforeToolCalls = 0;
+  host.registerHook({ phase: 'beforeTool', name: 'observe-denied-write', run: () => {
+    globalThis.__p11HardDeniedBeforeToolCalls += 1;
+    return { decision: 'continue' };
+  } });
+}`,
+  });
+  const session = createSessionLog({ directory: root, id: 'before-tool-permission-denial' });
+  let hooks: Awaited<ReturnType<typeof loadExtensions>> | undefined;
+  const kernel = createKernel({
+    config: createConfig({ user: { boundary: root } }),
+    permission: createPermissionContext('read-only', 'disabled', {
+      filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+    }),
+    session,
+    extensionHooks: () => hooks?.hooks,
+  });
+  minimalPlugin.setup(kernel);
+  try {
+    hooks = await loadExtensions([join(root, 'observe-before-tool.mjs')], {
+      registerTool: (tool) => kernel.register(tool as ToolDefinition),
+      registerFragment: () => () => {},
+      addEventListener: () => () => {},
+      request: (name, args) => kernel.call(name, args),
+    });
+    await assert.rejects(kernel.call('create', { path: 'permission-denied.txt', content: 'must not exist' }, {
+      sessionId: 'before-tool-permission-denial', runId: 'p11-permission-denial', callId: 'p11-permission-denial-call',
+    }), { code: 'permission_read_only' });
+    assert.equal((globalThis as { __p11HardDeniedBeforeToolCalls?: number }).__p11HardDeniedBeforeToolCalls, 0);
+    assert.equal(existsSync(join(root, 'permission-denied.txt')), false);
+    const event = (await session.read()).find((entry) => entry.kind === 'tool');
+    assert.equal((event?.result as { code?: string }).code, 'permission_read_only');
+  } finally {
+    await hooks?.dispose();
+    await session.close();
+    delete (globalThis as { __p11HardDeniedBeforeToolCalls?: number }).__p11HardDeniedBeforeToolCalls;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('afterTool Hook observes the persisted result and its failure cannot change execution', { timeout: 15_000 }, async () => {
+  const root = await directoryWith({
+    'observe-tool.mjs': `export default function observeTool(host) {
+  host.registerHook({ phase: 'afterTool', name: 'observe-create', run: async (context) => {
+    if (context.tool !== 'create') return;
+    globalThis.__p11AfterToolResult = {
+      sessionId: context.sessionId, runId: context.runId, source: context.source,
+      callId: context.callId, tool: context.tool, outcome: context.outcome,
+      durationMs: context.durationMs, eventSeq: context.eventSeq, result: context.result,
+    };
+    throw new Error('observer secret detail must not alter the tool result');
+  } });
+}`,
+  });
+  const extensionPath = join(root, 'observe-tool.mjs');
+  try {
+    await withTuiHost(async ({ client, sessionId, sessionDirectory, projectDirectory }) => {
+      await client.request('run.start', { sessionId, input: JSON.stringify({
+        tool: 'create', args: { path: 'observer-result.txt', content: 'created before observer' },
+      }) });
+      assert.equal(await readFile(join(projectDirectory, 'observer-result.txt'), 'utf8'), 'created before observer');
+      const observed = (globalThis as { __p11AfterToolResult?: Record<string, unknown> }).__p11AfterToolResult;
+      assert.equal(observed?.sessionId, sessionId);
+      assert.equal(typeof observed?.runId, 'string');
+      assert.equal(observed?.source, 'human');
+      assert.equal(observed?.tool, 'create');
+      assert.equal(observed?.outcome, 'completed');
+      assert.equal(typeof observed?.callId, 'string');
+      assert.equal(typeof observed?.durationMs, 'number');
+      const events = (await readFile(join(sessionDirectory, `${sessionId}.jsonl`), 'utf8')).split('\n').filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const event = events.find((entry) => entry.kind === 'tool' && entry.tool === 'create')!;
+      assert.equal(observed?.eventSeq, event.seq, 'the observer runs after its result event was persisted');
+      assert.deepEqual(JSON.parse(JSON.stringify(observed?.result)), event.result);
+      assert.equal(JSON.stringify(events).includes('observer secret detail'), false, 'observer error text is not persisted');
+    }, {
+      extensions: { paths: [extensionPath], ignored: [] },
+      config: { policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    delete (globalThis as { __p11AfterToolResult?: Record<string, unknown> }).__p11AfterToolResult;
     await rm(root, { recursive: true, force: true });
   }
 });

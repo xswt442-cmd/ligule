@@ -309,6 +309,64 @@ test('a tool the host marked as completing the run stops it without another mode
   assert.equal(provider.requests.length, 1);
 });
 
+test('a completion Hook can continue after a completing tool without replaying it or running later batch calls', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-'));
+  try {
+    const session = createSessionLog({ directory: root, id: 'completion-hook-barrier' });
+    const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
+    let completionCalls = 0;
+    let finishCalls = 0;
+    let laterCalls = 0;
+    const provider = scriptedProvider([
+      [
+        { type: 'tool-call', id: 'finish-call', name: 'finish', args: {} },
+        { type: 'tool-call', id: 'later-call', name: 'later', args: {} },
+      ],
+      [{ type: 'text', text: 'the completion check passed on the next candidate' }],
+    ]);
+    kernel.register(tool('finish', async () => { finishCalls += 1; return { text: 'candidate finished' }; }));
+    kernel.register(tool('later', async () => { laterCalls += 1; return { text: 'must not run' }; }));
+
+    const result = await createLoop({
+      kernel,
+      provider,
+      session,
+      sessionId: 'completion-hook-barrier',
+      completesRun: ['finish'],
+    }).run('complete after checking', {
+      source: 'human',
+      completeRun: async (candidate) => {
+        completionCalls += 1;
+        if (completionCalls === 1) {
+          assert.equal(candidate.completedBy, 'finish');
+          return { decision: 'continue', context: '[test/completion] inspect the saved tool outcome' };
+        }
+        assert.equal(candidate.completedBy, undefined);
+        return { decision: 'accept' };
+      },
+    });
+
+    assert.equal(result.text, 'the completion check passed on the next candidate');
+    assert.equal(result.iterations, 2);
+    assert.equal(result.modelCalls, 2);
+    assert.equal(completionCalls, 2);
+    assert.equal(finishCalls, 1, 'the completed tool is not replayed after continuation');
+    assert.equal(laterCalls, 0, 'calls after the completing tool are answered as skipped');
+    assert.ok(provider.requests[1].system.includes('inspect the saved tool outcome'));
+    const events = await session.read();
+    const finish = events.find((event) => event.kind === 'tool' && event.tool === 'finish');
+    const later = events.find((event) => event.kind === 'tool' && event.tool === 'later') as {
+      result?: { code?: string };
+    } | undefined;
+    assert.ok(finish);
+    assert.equal(later?.result?.code, 'tool_skipped');
+    assert.equal(events.filter((event) => event.kind === 'turn').length, 1);
+    assert.equal(events.at(-1)?.status, 'completed');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('a parallel completion tool is a barrier and every call receives exactly one result', async () => {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-barrier-'));
   try {

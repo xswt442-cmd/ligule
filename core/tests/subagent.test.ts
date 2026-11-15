@@ -844,6 +844,17 @@ test('the model-callable subagent controls start, inspect, steer, wait, and canc
     }) as { timedOut: boolean; subruns: { state: string }[] };
     assert.equal(cancelled.timedOut, false);
     assert.equal(cancelled.subruns[0]?.state, 'cancelled');
+
+    await runtime.settleParent(parentRunId, 'completed');
+    const continuationChild = await kernel.call('subagent_start', { task: 'message child after rejected completion candidate' }, {
+      sessionId: 'controlled-parent', runId: parentRunId,
+    }) as { subrunId: string };
+    const continuationWait = await kernel.call('subagent_wait', {
+      subrunIds: [continuationChild.subrunId], timeoutMs: 5_000,
+    }, { sessionId: 'controlled-parent', runId: parentRunId }) as { timedOut: boolean; subruns: { state: string }[] };
+    assert.equal(continuationWait.timedOut, false);
+    assert.equal(continuationWait.subruns[0]?.state, 'completed', 'settling a rejected completion candidate keeps the parent open for its continuation');
+
     await runtime.finishParent(parentRunId);
     await assert.rejects(kernel.call('subagent_start', { task: 'late child after parent completion' }, {
       sessionId: 'controlled-parent', runId: parentRunId,

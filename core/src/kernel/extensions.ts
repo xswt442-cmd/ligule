@@ -10,13 +10,267 @@ import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { KernelError } from './error.js';
+import { currentKernelExecutionContext, withKernelExecutionContext } from './execution-context.js';
+import type { KernelExecutionContext } from './execution-context.js';
+import type { TaskBudget } from './task-budget.js';
 import { dataRoot } from './config-file.js';
 
 export interface ExtensionDiagnostic {
   code: string;
   path: string;
   detail: string;
+}
+
+export type ExtensionHookPhase = 'prepareRequest' | 'beforeTool' | 'afterTool' | 'completeRun';
+export interface ExtensionHookScope {
+  readonly extension: string;
+  readonly hook: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly source: 'human' | 'controller';
+  readonly callId?: string;
+  readonly parentCallId?: string;
+  readonly parentRunId?: string;
+  readonly executionId?: string;
+  readonly parentExecutionId?: string;
+  readonly userSeq?: number;
+  readonly signal: AbortSignal;
+}
+export interface ExtensionRequestPreparationContext extends ExtensionHookScope {
+  readonly requestId: string;
+  readonly attempt: number;
+  readonly system: string;
+  readonly tools: readonly unknown[];
+  readonly messages: readonly unknown[];
+  readonly request: ExtensionHookRequest;
+}
+export type ExtensionHookRequest = (tool: string, args?: unknown) => Promise<unknown>;
+export type ExtensionRequestPreparationInput = Omit<ExtensionRequestPreparationContext, 'extension' | 'hook'>;
+export interface ExtensionRequestPreparationResult {
+  readonly context?: string;
+}
+export interface ExtensionBeforeToolContext extends ExtensionHookScope {
+  readonly callId: string;
+  readonly tool: string;
+  readonly args: Readonly<Record<string, unknown>>;
+  readonly permission: { readonly profile: string; readonly network: string };
+  readonly target?: string;
+}
+export type ExtensionBeforeToolResult =
+  | { readonly decision: 'continue' }
+  | { readonly decision: 'deny'; readonly reason: string };
+export interface ExtensionAfterToolContext extends ExtensionHookScope {
+  readonly callId: string;
+  readonly tool: string;
+  readonly outcome: 'completed' | 'failed' | 'denied';
+  readonly result: unknown;
+  readonly durationMs: number;
+  readonly eventSeq?: number;
+  readonly permission: { readonly profile: string; readonly network: string };
+  readonly target?: string;
+  readonly verdict?: Readonly<Record<string, unknown>>;
+}
+export interface ExtensionCompletionContext extends ExtensionHookScope {
+  readonly userSeq: number;
+  readonly summary: Readonly<Record<string, unknown>>;
+  readonly candidate: { readonly id: string; readonly fromSeq?: number; readonly toSeq?: number };
+  readonly structuredDigest?: string;
+  readonly completedBy?: string;
+  readonly request: ExtensionHookRequest;
+}
+export type ExtensionCompletionResult =
+  | { readonly decision: 'accept' }
+  | { readonly decision: 'continue'; readonly reason: string }
+  | { readonly decision: 'fail'; readonly reason: string };
+export type ExtensionCompletionDecision =
+  | { readonly decision: 'accept' }
+  | { readonly decision: 'continue'; readonly context: string };
+export type ExtensionCompletionInput = Omit<ExtensionCompletionContext, 'extension' | 'hook'>;
+type MaybePromise<T> = T | Promise<T>;
+export type ExtensionHook =
+  | { readonly phase: 'prepareRequest'; readonly name: string; readonly run: (context: ExtensionRequestPreparationContext) => MaybePromise<ExtensionRequestPreparationResult | void> }
+  | { readonly phase: 'beforeTool'; readonly name: string; readonly run: (context: ExtensionBeforeToolContext) => MaybePromise<ExtensionBeforeToolResult | void> }
+  | { readonly phase: 'afterTool'; readonly name: string; readonly run: (context: ExtensionAfterToolContext) => MaybePromise<void> }
+  | { readonly phase: 'completeRun'; readonly name: string; readonly run: (context: ExtensionCompletionContext) => MaybePromise<ExtensionCompletionResult | void> };
+export interface ExtensionHookRegistration {
+  readonly extension: string;
+  readonly hook: ExtensionHook;
+}
+export interface ExtensionHookRegistry {
+  forPhase(phase: ExtensionHookPhase): readonly ExtensionHookRegistration[];
+}
+
+export type ExtensionHookInvocationContext =
+  | Omit<ExtensionRequestPreparationContext, 'extension' | 'hook'>
+  | Omit<ExtensionBeforeToolContext, 'extension' | 'hook'>
+  | Omit<ExtensionAfterToolContext, 'extension' | 'hook'>
+  | Omit<ExtensionCompletionContext, 'extension' | 'hook'>;
+
+function abortReason(signal: AbortSignal): KernelError {
+  return signal.reason instanceof KernelError ? signal.reason : new KernelError('loop_cancelled', { cause: signal.reason });
+}
+
+function freezeSnapshot(value: unknown): unknown {
+  if (Array.isArray(value)) return Object.freeze(value.map(freezeSnapshot));
+  if (typeof value === 'object' && value !== null && !ArrayBuffer.isView(value)) {
+    const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const [key, item] of Object.entries(value)) snapshot[key] = freezeSnapshot(item);
+    return Object.freeze(snapshot);
+  }
+  return value;
+}
+
+/** Invoke one owned Hook under P10 execution scope and the existing per-request TaskBudget deadline. */
+export async function runExtensionHook(registration: ExtensionHookRegistration, context: ExtensionHookInvocationContext,
+  budget?: TaskBudget): Promise<unknown> {
+  if (context.signal.aborted) throw abortReason(context.signal);
+  let request: ReturnType<TaskBudget['request']> | undefined;
+  try { request = budget?.request(context.signal); }
+  catch (error) {
+    if (context.signal.aborted) throw abortReason(context.signal);
+    throw error;
+  }
+  const signal = request?.signal ?? context.signal;
+  if (signal.aborted) {
+    request?.dispose();
+    throw abortReason(signal);
+  }
+  const parent = currentKernelExecutionContext();
+  const scope = { active: true };
+  const executionContext: KernelExecutionContext = {
+    signal,
+    callId: context.callId ?? parent?.callId ?? randomUUID(),
+    sessionId: context.sessionId,
+    runId: context.runId,
+    source: context.source,
+    executionId: context.executionId ?? parent?.executionId,
+    parentRunId: context.parentRunId ?? parent?.parentRunId,
+    parentExecutionId: context.parentExecutionId ?? parent?.parentExecutionId,
+    userSeq: context.userSeq ?? parent?.userSeq,
+    parentCallId: context.parentCallId ?? parent?.parentCallId,
+    extensionHookPhase: registration.hook.phase,
+    scope,
+  };
+  const contextData: Record<string, unknown> = { ...context };
+  delete contextData.signal;
+  const requestCapability = 'request' in context ? context.request : undefined;
+  delete contextData.request;
+  const contextSnapshot = freezeSnapshot(structuredClone(contextData)) as Record<string, unknown>;
+  const hookContext = Object.freeze({
+    ...contextSnapshot,
+    extension: registration.extension,
+    hook: registration.hook.name,
+    signal,
+    ...(requestCapability === undefined ? {} : { request: requestCapability }),
+  });
+  const invoke = () => {
+    switch (registration.hook.phase) {
+      case 'prepareRequest': return registration.hook.run(hookContext as ExtensionRequestPreparationContext);
+      case 'beforeTool': return registration.hook.run(hookContext as ExtensionBeforeToolContext);
+      case 'afterTool': return registration.hook.run(hookContext as ExtensionAfterToolContext);
+      case 'completeRun': return registration.hook.run(hookContext as ExtensionCompletionContext);
+    }
+  };
+  let onAbort: (() => void) | undefined;
+  try {
+    if (signal.aborted) throw abortReason(signal);
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(abortReason(signal));
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    return await Promise.race([
+      Promise.resolve().then(() => withKernelExecutionContext(executionContext, invoke)),
+      aborted,
+    ]);
+  } catch (error) {
+    if (signal.aborted) throw abortReason(signal);
+    throw new KernelError('extension_hook_failed', { detail: `${registration.extension}/${registration.hook.name}` });
+  } finally {
+    scope.active = false;
+    if (onAbort !== undefined) signal.removeEventListener('abort', onAbort);
+    request?.dispose();
+  }
+}
+
+/** Run request-preparation Hooks in registration order and fit their labeled context to the existing prompt budget. */
+export async function prepareExtensionRequest(registry: ExtensionHookRegistry, context: ExtensionRequestPreparationInput,
+  maxBytes: number, budget?: TaskBudget): Promise<ExtensionRequestPreparationResult | undefined> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new KernelError('extension_hook_limit_invalid');
+  const contexts: string[] = [];
+  let totalBytes = 0;
+  for (const registration of registry.forPhase('prepareRequest')) {
+    const result = await runExtensionHook(registration, context, budget);
+    if (result === undefined) continue;
+    if (!isRecord(result) || Object.keys(result).some((key) => key !== 'context')
+      || (result.context !== undefined && typeof result.context !== 'string')) {
+      throw new KernelError('extension_hook_result_invalid', { detail: `${registration.extension}/${registration.hook.name}` });
+    }
+    if (result.context === undefined || result.context.trim() === '') continue;
+    const labelled = `[${registration.extension}/${registration.hook.name}]\n${result.context}`;
+    totalBytes += Buffer.byteLength(labelled, 'utf8');
+    if (totalBytes > maxBytes) {
+      throw new KernelError('extension_hook_context_too_large', { detail: `${registration.extension}/${registration.hook.name}` });
+    }
+    contexts.push(labelled);
+  }
+  return contexts.length === 0 ? undefined : { context: contexts.join('\n\n') };
+}
+
+/** Run every completion check in order; any failure takes precedence over continuation. */
+export async function completeExtensionRun(registry: ExtensionHookRegistry, context: ExtensionCompletionInput,
+  maxBytes: number, budget?: TaskBudget, previousContext = ''): Promise<ExtensionCompletionDecision> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new KernelError('extension_hook_limit_invalid');
+  const contexts = previousContext === '' ? [] : [previousContext];
+  let totalBytes = Buffer.byteLength(previousContext, 'utf8');
+  let failure: KernelError | undefined = totalBytes > maxBytes ? new KernelError('extension_hook_context_too_large') : undefined;
+  let continued = false;
+  for (const registration of registry.forPhase('completeRun')) {
+    let result: unknown;
+    try { result = await runExtensionHook(registration, context, budget); }
+    catch (error) {
+      if (context.signal.aborted) throw abortReason(context.signal);
+      failure ??= error instanceof KernelError ? error : new KernelError('extension_hook_failed');
+      continue;
+    }
+    if (result === undefined) continue;
+    if (!isRecord(result) || typeof result.decision !== 'string') {
+      failure ??= new KernelError('extension_hook_result_invalid', { detail: `${registration.extension}/${registration.hook.name}` });
+      continue;
+    }
+    if (result.decision === 'accept') {
+      if (Object.keys(result).some((key) => key !== 'decision')) {
+        failure ??= new KernelError('extension_hook_result_invalid', { detail: `${registration.extension}/${registration.hook.name}` });
+      }
+      continue;
+    }
+    if ((result.decision !== 'continue' && result.decision !== 'fail')
+      || Object.keys(result).some((key) => key !== 'decision' && key !== 'reason')
+      || typeof result.reason !== 'string' || result.reason.trim() === ''
+      || Buffer.byteLength(result.reason, 'utf8') > 512
+      || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(result.reason)) {
+      failure ??= new KernelError('extension_hook_result_invalid', { detail: `${registration.extension}/${registration.hook.name}` });
+      continue;
+    }
+    if (result.decision === 'fail') {
+      failure ??= new KernelError('extension_completion_rejected', {
+        detail: `${registration.extension}/${registration.hook.name}: ${result.reason}`,
+      });
+      continue;
+    }
+    const labelled = `[${registration.extension}/${registration.hook.name}]\n${result.reason}`;
+    const bytes = Buffer.byteLength(labelled, 'utf8') + (contexts.length === 0 ? 0 : Buffer.byteLength('\n\n', 'utf8'));
+    if (totalBytes + bytes > maxBytes) {
+      failure ??= new KernelError('extension_hook_context_too_large', { detail: `${registration.extension}/${registration.hook.name}` });
+      continue;
+    }
+    contexts.push(labelled);
+    totalBytes += bytes;
+    continued = true;
+  }
+  if (failure !== undefined) throw failure;
+  return continued ? { decision: 'continue', context: contexts.join('\n\n') } : { decision: 'accept' };
 }
 
 interface SourceLayers {
@@ -158,17 +412,68 @@ interface LoadOptions {
   importModule?: (url: string) => Promise<{ default?: unknown }>;
 }
 
+const HOOK_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
+const HOOK_PHASES: readonly ExtensionHookPhase[] = ['prepareRequest', 'beforeTool', 'afterTool', 'completeRun'];
+const MAX_EXTENSION_DIAGNOSTICS = 128;
+const MAX_EXTENSION_DIAGNOSTIC_DETAIL = 512;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function checkedExtensionHook(value: unknown): ExtensionHook {
+  if (!isRecord(value) || Object.keys(value).some((key) => !['phase', 'name', 'run'].includes(key))) {
+    throw new KernelError('extension_hook_shape_invalid');
+  }
+  if (typeof value.phase !== 'string' || !HOOK_PHASES.includes(value.phase as ExtensionHookPhase)) {
+    throw new KernelError('extension_hook_phase_invalid');
+  }
+  if (typeof value.name !== 'string' || !HOOK_NAME.test(value.name)) throw new KernelError('extension_hook_name_invalid');
+  if (typeof value.run !== 'function') throw new KernelError('extension_hook_handler_required');
+  return Object.freeze({ phase: value.phase, name: value.name, run: value.run }) as ExtensionHook;
+}
+
+function extensionIdentityOf(factoryName: string, path: string): string {
+  const candidate = factoryName === '' ? installNameOf(path) : factoryName;
+  const normalized = candidate.replace(/[^A-Za-z0-9._-]/gu, '_').slice(0, 80);
+  return normalized === '' ? 'extension' : normalized;
+}
+
 // 每个扩展只撤销自己注册的内容；加载失败时不留下部分注册，也不影响其他扩展。
 export async function loadExtensions(paths: string[], options: LoadOptions) {
   const loaded: { name: string; path: string; tools: string[] }[] = [];
   const diagnostics: ExtensionDiagnostic[] = [];
-  const undo: (() => void)[][] = [];
+  const undo: (() => void | Promise<void>)[][] = [];
+  const registeredHooks: ExtensionHookRegistration[] = [];
+  const hookNames = new Set<string>();
+  const owners = new Set<{ active: boolean }>();
+  let acceptingRegistrations = true;
+  let diagnosticsTruncated = false;
+  let disposed = false;
+  let disposePromise: Promise<void> | undefined;
 
-  function clean(owns: (() => void)[]) {
+  const hookRegistry: ExtensionHookRegistry = Object.freeze({
+    forPhase(phase: ExtensionHookPhase) {
+      return Object.freeze(registeredHooks.filter((registration) => registration.hook.phase === phase));
+    },
+  });
+
+  function addDiagnostic(diagnostic: ExtensionDiagnostic): void {
+    if (diagnostics.length < MAX_EXTENSION_DIAGNOSTICS) {
+      diagnostics.push({ ...diagnostic, detail: diagnostic.detail.slice(0, MAX_EXTENSION_DIAGNOSTIC_DETAIL) });
+      return;
+    }
+    if (!diagnosticsTruncated) {
+      diagnosticsTruncated = true;
+      diagnostics.push({ code: 'extension_diagnostics_truncated', path: '', detail: 'additional extension diagnostics were omitted' });
+    }
+  }
+
+  async function clean(owns: (() => void | Promise<void>)[]): Promise<unknown[]> {
     const errors: unknown[] = [];
     while (owns.length > 0) {
       try {
-        owns.pop()?.();
+        await owns.pop()?.();
       } catch (error) {
         errors.push(error);
       }
@@ -177,22 +482,49 @@ export async function loadExtensions(paths: string[], options: LoadOptions) {
   }
 
   for (const path of paths) {
-    const owns: (() => void)[] = [];
+    const owns: (() => void | Promise<void>)[] = [];
+    const owner = { active: true };
+    owners.add(owner);
     const tools: string[] = [];
     try {
       const imported = await (options.importModule ?? ((url: string) => import(url)))(pathToFileURL(path).href);
       const factory = imported.default;
       if (typeof factory !== 'function') throw new KernelError('extension_shape_invalid', { detail: 'the module has no default export to call' });
       const name = factory.name === '' ? path : factory.name;
+      const hookOwner = extensionIdentityOf(factory.name, path);
+      const assertActive = () => {
+        if (!acceptingRegistrations || !owner.active) throw new KernelError('extension_inactive');
+      };
+      const registerHook = (value: unknown) => {
+        assertActive();
+        const hook = checkedExtensionHook(value);
+        const key = `${hook.phase}:${hook.name}`;
+        if (hookNames.has(key)) throw new KernelError('extension_hook_duplicate', { detail: key });
+        const registration = Object.freeze({ extension: hookOwner, hook });
+        hookNames.add(key);
+        registeredHooks.push(registration);
+        let registered = true;
+        const remove = () => {
+          if (!registered) return;
+          registered = false;
+          hookNames.delete(key);
+          const index = registeredHooks.indexOf(registration);
+          if (index >= 0) registeredHooks.splice(index, 1);
+        };
+        owns.push(remove);
+        return remove;
+      };
       // 只暴露扩展 API 中声明的能力，不额外提供扩展身份或 Host 内部对象。
       const config = {
         registerTool: (tool: unknown) => {
+          assertActive();
           const remove = options.registerTool(tool);
           owns.push(remove);
           if (typeof tool === 'object' && tool !== null && 'name' in tool && typeof tool.name === 'string') tools.push(tool.name);
           return remove;
         },
         registerPrompt: (fragment: { name: string; text: string }) => {
+          assertActive();
           if (typeof fragment?.name !== 'string' || fragment.name === '') throw new KernelError('extension_fragment_name_required');
           if (typeof fragment.text !== 'string') throw new KernelError('extension_fragment_text_required');
           const remove = options.registerFragment({ name: fragment.name, text: fragment.text, source: path });
@@ -200,35 +532,43 @@ export async function loadExtensions(paths: string[], options: LoadOptions) {
           return remove;
         },
         onEvent: (handler: (event: unknown) => void) => {
+          assertActive();
           if (typeof handler !== 'function') throw new KernelError('extension_handler_required');
           const remove = options.addEventListener((event) => {
+            if (!owner.active) return;
             try {
               handler(event);
             } catch (error) {
-              // 将扩展抛出的未知错误记录为诊断并继续处理；Kernel 自身错误仍按独立错误路径抛出。
-              diagnostics.push({ code: 'extension_handler_failed', path, detail: error instanceof Error ? error.message : String(error) });
+              // 观察器错误不改变 Host 结果；错误正文可能包含提示词/路径，只保留稳定分类。
+              addDiagnostic({ code: 'extension_handler_failed', path, detail: 'extension event observer failed; details omitted' });
             }
           });
           owns.push(remove);
           return remove;
         },
-        request: (tool: string, args?: unknown) => options.request(tool, args),
+        registerHook,
+        request: async (tool: string, args?: unknown) => {
+          assertActive();
+          return await options.request(tool, args);
+        },
       };
       const disposer = await factory(Object.freeze(config));
       if (disposer !== undefined && typeof disposer !== 'function') {
         throw new KernelError('extension_dispose_invalid', { detail: 'the setup returned something that is not a function' });
       }
       owns.push(() => {
-        if (typeof disposer === 'function') disposer();
+        if (typeof disposer === 'function') return disposer();
       });
       undo.push(owns);
       loaded.push({ name, path, tools });
     } catch (error) {
-      const cleanupErrors = clean(owns);
+      owner.active = false;
+      owners.delete(owner);
+      const cleanupErrors = await clean(owns);
       const failure = error instanceof KernelError ? error : new KernelError('extension_load_failed', { cause: error });
       const detail = failure.detail ?? (error instanceof Error ? error.message : String(error));
       const cleanupDetail = cleanupErrors.map((item) => item instanceof Error ? item.message : String(item));
-      diagnostics.push({
+      addDiagnostic({
         code: failure.code,
         path,
         detail: cleanupDetail.length === 0 ? detail : `${detail}; cleanup failed: ${cleanupDetail.join('; ')}`,
@@ -239,11 +579,22 @@ export async function loadExtensions(paths: string[], options: LoadOptions) {
   return {
     loaded,
     diagnostics,
-    dispose() {
-      const errors: unknown[] = [];
-      while (undo.length > 0) errors.push(...clean(undo.pop()!));
-      if (errors.length === 1) throw errors[0];
-      if (errors.length > 0) throw new AggregateError(errors, 'extension cleanup failed');
+    hooks: hookRegistry,
+    async dispose() {
+      if (disposed) return;
+      if (disposePromise !== undefined) return await disposePromise;
+      acceptingRegistrations = false;
+      for (const owner of owners) owner.active = false;
+      disposePromise = (async () => {
+        const errors: unknown[] = [];
+        while (undo.length > 0) errors.push(...await clean(undo.pop()!));
+        owners.clear();
+        disposed = true;
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 0) throw new AggregateError(errors, 'extension cleanup failed');
+      })();
+      try { await disposePromise; }
+      finally { if (disposed) disposePromise = undefined; }
     },
   };
 }

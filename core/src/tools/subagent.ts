@@ -4,6 +4,7 @@
 // 它沿用父会话的权限判定、不能递归启动其他子 Agent，且拥有独立记录以便恢复。
 //
 // 该工具通过插件注册，不属于 Kernel 内置能力。每个父会话最多同时运行三个派生任务。
+import { randomUUID } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
@@ -15,8 +16,10 @@ import { createRunAcceptance, isRunAcceptance, publishRunResult, readRunResult, 
 import { readSessionRecord } from '../session/record.js';
 import { createRunSteeringInbox, type RunSteeringInbox } from '../kernel/run-steering.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
+import { completeExtensionRun, prepareExtensionRequest, type ExtensionHookRegistry } from '../kernel/extensions.js';
 import {
-  assertDelegationCompletion, completedRunResult, createOutputSchemaContract, DELEGATION_RESULT_TOOL, failedRunResult, MAX_DELEGATION_SCHEMA_BYTES,
+  assertDelegationCompletion, completedRunResult, createOutputSchemaContract, DELEGATION_RESULT_TOOL, failedRunResult,
+  MAX_DELEGATION_SCHEMA_BYTES, structuredOutputDigest,
   MODE_SELECTION_SCHEMA, outputSchemaInstructions, registerDelegationResultTool,
 } from '../delegation.js';
 import {
@@ -81,6 +84,7 @@ export interface SubagentDeps {
   loopLimits?: LoopLimits;
   telemetry?: Telemetry;
   parentSession?: SessionLog;
+  extensionHooks?: () => ExtensionHookRegistry | undefined;
 }
 
 export interface SubagentRunArguments {
@@ -514,7 +518,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
   }
 
   async function settleParent(parentRunId: string, state: 'completed' | 'failed' | 'cancelled'): Promise<void> {
-    closedParents.add(parentRunId);
+    if (state !== 'completed') closedParents.add(parentRunId);
     const records = [...subruns.values()].filter(record => record.parentRunId === parentRunId
       && (record.state === 'starting' || record.state === 'running'));
     if (state !== 'completed') {
@@ -644,6 +648,8 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                 session,
                 logger: deps.logger,
                 permission,
+                extensionHooks: deps.extensionHooks,
+                taskBudget: deps.taskBudget,
               });
               // 派生执行继承父会话的插件工具，但不注册 `subagent`，从而禁止递归派生。
               const media = createMediaStore({ boundary: boundaryOf(deps.config),
@@ -678,6 +684,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
               disposeAssembly = () => assembly.dispose();
               let structuredSubmitted = false;
               let structuredResult: unknown;
+              let completionContext = '';
               if (outputContract !== undefined) {
                 disposeResultTool = registerDelegationResultTool(child, outputContract, (value) => {
                   structuredResult = value;
@@ -740,12 +747,60 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                   ...(outputContract === undefined ? {} : { delegationSchemaDigest: outputContract.digest }),
                 }),
               });
+              const extensionHooks = deps.extensionHooks?.();
               let result: Awaited<ReturnType<typeof loop.run>>;
               try {
                 result = await loop.run(args.task, {
                   signal,
                   task: deps.taskBudget?.(),
                   runId: acceptance.runId,
+                  source,
+                  prepareRequest: async (context) => {
+                    return extensionHooks === undefined ? undefined : await prepareExtensionRequest(extensionHooks, context,
+                      deps.promptFragmentBytes ?? 8192, deps.taskBudget?.());
+                  },
+                  ...(extensionHooks?.forPhase('completeRun').length === 0 || extensionHooks === undefined ? {} : {
+                    completeRun: async (candidate) => {
+                      if (candidate.userSeq === undefined) throw new KernelError('extension_hook_run_context_unavailable');
+                      const completion = await completeExtensionRun(extensionHooks, {
+                        sessionId: id,
+                        runId: acceptance.runId,
+                        source,
+                        signal: candidate.signal,
+                        callId: candidate.callId,
+                        ...(candidate.parentCallId === undefined ? {} : { parentCallId: candidate.parentCallId }),
+                        ...(candidate.parentRunId === undefined ? {} : { parentRunId: candidate.parentRunId }),
+                        ...(candidate.executionId === undefined ? {} : { executionId: candidate.executionId }),
+                        ...(candidate.parentExecutionId === undefined ? {} : { parentExecutionId: candidate.parentExecutionId }),
+                        userSeq: candidate.userSeq,
+                        candidate: candidate.candidate,
+                        ...(structuredSubmitted ? { structuredDigest: structuredOutputDigest(structuredResult) } : {}),
+                        ...(candidate.completedBy === undefined ? {} : { completedBy: candidate.completedBy }),
+                        summary: candidate.summary,
+                        request: async (name, requestArgs) => {
+                          if (!child.readOnly().includes(name)) throw new KernelError('extension_request_read_only_required');
+                          return await child.call(name, requestArgs, {
+                            signal: candidate.signal,
+                            sessionId: id,
+                            runId: acceptance.runId,
+                            source,
+                            callId: randomUUID(),
+                            parentCallId: candidate.callId,
+                            ...(candidate.executionId === undefined ? {} : { executionId: candidate.executionId }),
+                            ...(candidate.userSeq === undefined ? {} : { userSeq: candidate.userSeq }),
+                            ...(candidate.parentRunId === undefined ? {} : { parentRunId: candidate.parentRunId }),
+                            ...(candidate.parentExecutionId === undefined ? {} : { parentExecutionId: candidate.parentExecutionId }),
+                          });
+                        },
+                      }, deps.promptFragmentBytes ?? 8192, deps.taskBudget?.(), completionContext);
+                      if (completion.decision === 'continue') completionContext = completion.context;
+                      return completion;
+                    },
+                  }),
+                  onCompletionInvalidated: () => {
+                    structuredSubmitted = false;
+                    structuredResult = undefined;
+                  },
                   user: { origin: source, run: acceptance },
                   steering,
                   onAccepted: () => {

@@ -8,6 +8,12 @@ export { createLogger } from './kernel/log.js';
 export { loadAssembly } from './kernel/assembly.js';
 export { loadMode, applyMode, modeDirectories, MODE_DIRECTORY, DEFAULT_MODE } from './kernel/modes.js';
 export { extensionSources, loadExtensions, installNameOf } from './kernel/extensions.js';
+export type {
+  ExtensionAfterToolContext, ExtensionBeforeToolContext, ExtensionBeforeToolResult, ExtensionCompletionContext,
+  ExtensionCompletionDecision, ExtensionCompletionInput, ExtensionCompletionResult, ExtensionDiagnostic,
+  ExtensionHook, ExtensionHookPhase, ExtensionHookRegistration,
+  ExtensionHookRegistry, ExtensionHookScope, ExtensionRequestPreparationContext, ExtensionRequestPreparationResult,
+} from './kernel/extensions.js';
 export { readExtensionState, writeExtensionState, extensionStatePath } from './kernel/extension-state.js';
 export { discoverSkills, skillDirectories, formatSkillCatalog, searchSkills, readSkillBody, listSkillFiles, SKILL_FILE, SKILLS_DIRECTORY, SKILL_METADATA_BUDGET_BYTES } from './kernel/skills.js';
 export { createSkillTool, createSkillPlugin } from './tools/skill.js';

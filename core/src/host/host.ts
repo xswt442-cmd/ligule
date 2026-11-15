@@ -12,7 +12,8 @@ import { currentKernelExecutionContext, withKernelExecutionContext, withoutKerne
 import { rememberRunSummary } from '../kernel/run-summary.js';
 import {
   assertDelegationCompletion, createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
-  registerDelegationResultTool, completedRunResult, failedRunResult, type DelegationSpec, type RunValidation,
+  registerDelegationResultTool, completedRunResult, failedRunResult, structuredOutputDigest,
+  type DelegationSpec, type RunValidation,
 } from '../delegation.js';
 import {
   assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationMode, assertDelegationModelSelection, assertDelegationPermission,
@@ -25,7 +26,10 @@ import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, 
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { createFileWriteQueue } from '../kernel/file-write-queue.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
-import { loadExtensions, type ExtensionDiagnostic } from '../kernel/extensions.js';
+import {
+  completeExtensionRun, loadExtensions, prepareExtensionRequest,
+  type ExtensionDiagnostic, type ExtensionHookRegistry,
+} from '../kernel/extensions.js';
 import { readExtensionState, writeExtensionState } from '../kernel/extension-state.js';
 import {
   applyModeToPrompt, DEFAULT_MODE, listModes, loadMode, resolveModeSelection,
@@ -350,6 +354,7 @@ interface HostSessionRetirement {
 
 interface DelegatedRunOptions {
   readonly signal?: AbortSignal;
+  readonly source?: 'human' | 'controller';
   readonly user?: Record<string, unknown>;
   readonly onProgress?: (event: LoopProgressEvent) => void;
   readonly delegation?: DelegationSpec;
@@ -2143,10 +2148,13 @@ export function createHost({
       if (grant !== undefined) assertDelegationPolicy(grant, recoveredPolicyState.override ?? grant.defaultPolicy);
       chain.restore({ ...recoveredPolicyState, override: recoveredPolicyState.override ?? (grant?.defaultPolicy ?? null) });
     }
+    let extensionHookRegistry: ExtensionHookRegistry | undefined;
     const kernel = createKernel({ config, policy: chain, session, logger,
       fileWriteQueue,
       permissionForCall: () => state.permission,
       policyOverrideForSession: () => state.policyOverride,
+      extensionHooks: () => extensionHookRegistry,
+      taskBudget: () => state.taskBudget,
     });
     cleanup.push(() => managedProcesses.close());
     if (!recover && initial?.policy !== undefined) await appendPolicyState(session, chain, initial.policy);
@@ -2289,6 +2297,7 @@ export function createHost({
       customToolPlugin,
       authorizeScreenCapture,
       taskBudget: () => state.taskBudget,
+      extensionHooks: () => extensionHookRegistry,
       telemetry,
       createMcp: async (childId, childMedia) => {
         const servers = await Promise.all(mcpConfigs.map(server => server.name === BROWSER_SERVER ? browser.session(childId) : server));
@@ -2373,6 +2382,11 @@ export function createHost({
       request: async (tool, args) => {
         const parent = currentKernelExecutionContext();
         if (parent === undefined || !parent.scope.active) throw new KernelError('extension_request_context_unavailable');
+        if (parent.extensionHookPhase === 'beforeTool' || parent.extensionHookPhase === 'afterTool') {
+          throw new KernelError('extension_hook_request_unavailable');
+        }
+        if ((parent.extensionHookPhase === 'prepareRequest' || parent.extensionHookPhase === 'completeRun')
+          && !kernel.readOnly().includes(tool)) throw new KernelError('extension_request_read_only_required');
         if (parent.signal.aborted) {
           const reason = parent.signal.reason;
           throw reason instanceof KernelError ? reason : new KernelError('loop_cancelled', { cause: reason });
@@ -2396,6 +2410,7 @@ export function createHost({
         }
       },
     });
+    extensionHookRegistry = installedExtensions.hooks;
     cleanup.push(() => installedExtensions.dispose());
     for (const diagnostic of installedExtensions.diagnostics) {
       // 扩展加载失败时撤销它的登记、记录诊断，然后继续加载其他扩展。
@@ -2523,6 +2538,7 @@ export function createHost({
       if (budget.signal.aborted) abortTask();
       let structuredSubmitted = false;
       let structured: unknown;
+      let completionContext = '';
       let disposeResultTool: (() => void) | undefined;
       let undoOutputContract = () => {};
       let undoDelegationMode = () => {};
@@ -2572,9 +2588,56 @@ export function createHost({
         const result = await loop.run(input, {
           signal: budget.signal,
           task: budget,
+          source: options.source ?? 'controller',
           ...(options.steering === undefined ? {} : { steering: options.steering }),
           onAccepted: options.onAccepted,
           user: { ...options.user, ...(options.acceptance === undefined ? {} : { run: options.acceptance }) },
+          prepareRequest: async (context) => await prepareExtensionRequest(installedExtensions.hooks, context,
+            limitsOf(state.environment.config).promptFragmentBytes, budget),
+          ...(installedExtensions.hooks.forPhase('completeRun').length === 0 ? {} : {
+            completeRun: async (candidate) => {
+              if (candidate.sessionId === undefined || candidate.runId === undefined || candidate.userSeq === undefined) {
+                throw new KernelError('extension_hook_run_context_unavailable');
+              }
+              const decision = await completeExtensionRun(installedExtensions.hooks, {
+                sessionId: candidate.sessionId,
+                runId: candidate.runId,
+                source: candidate.source,
+                signal: candidate.signal,
+                callId: candidate.callId,
+                ...(candidate.parentCallId === undefined ? {} : { parentCallId: candidate.parentCallId }),
+                ...(candidate.parentRunId === undefined ? {} : { parentRunId: candidate.parentRunId }),
+                ...(candidate.executionId === undefined ? {} : { executionId: candidate.executionId }),
+                ...(candidate.parentExecutionId === undefined ? {} : { parentExecutionId: candidate.parentExecutionId }),
+                userSeq: candidate.userSeq,
+                candidate: candidate.candidate,
+                ...(structuredSubmitted ? { structuredDigest: structuredOutputDigest(structured) } : {}),
+                ...(candidate.completedBy === undefined ? {} : { completedBy: candidate.completedBy }),
+                summary: candidate.summary,
+                request: async (name, args) => {
+                  if (!kernel.readOnly().includes(name)) throw new KernelError('extension_request_read_only_required');
+                  return await kernel.call(name, args, {
+                    signal: candidate.signal,
+                    sessionId: candidate.sessionId,
+                    runId: candidate.runId,
+                    source: candidate.source,
+                    callId: randomUUID(),
+                    parentCallId: candidate.callId,
+                    ...(candidate.executionId === undefined ? {} : { executionId: candidate.executionId }),
+                    userSeq: candidate.userSeq,
+                    ...(candidate.parentRunId === undefined ? {} : { parentRunId: candidate.parentRunId }),
+                    ...(candidate.parentExecutionId === undefined ? {} : { parentExecutionId: candidate.parentExecutionId }),
+                  });
+                },
+              }, limitsOf(state.environment.config).promptFragmentBytes, budget, completionContext);
+              if (decision.decision === 'continue') completionContext = decision.context;
+              return decision;
+            },
+          }),
+          onCompletionInvalidated: () => {
+            structuredSubmitted = false;
+            structured = undefined;
+          },
           ...(options.acceptance === undefined ? {} : {
             runId: options.acceptance.runId,
             settleSubruns: async (status) => await subagents.settleParent(options.acceptance!.runId, status),
@@ -3034,7 +3097,7 @@ export function createHost({
           user = { ...user, raw: input, arguments: expanded.arguments, source: expanded.source, digest: expanded.digest };
         }
         return await state.runDelegated(text, {
-          signal, user, onProgress: report, delegation, acceptance, steering,
+          signal, source: origin, user, onProgress: report, delegation, acceptance, steering,
           onAccepted: (userSeq) => { steering.activate(); onAccepted?.(userSeq); },
         });
       }, connection);

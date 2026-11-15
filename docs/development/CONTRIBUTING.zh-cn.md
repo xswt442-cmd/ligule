@@ -53,4 +53,4 @@ pnpm --filter ligule-desktop run dev
 
 ## 相关文档
 
-[架构说明](ARCHITECTURE.zh-cn.md)介绍内核和适配器的依赖方向；[使用手册](../guide.zh-CN.md)介绍 CLI、TUI 和桌面端的用户操作。
+[架构说明](ARCHITECTURE.zh-cn.md)介绍内核和适配器的依赖方向；[Host 扩展指南](extensions.zh-CN.md)介绍受信任扩展的合同和可运行示例；[使用手册](../guide.zh-CN.md)介绍 CLI、TUI 和桌面端的用户操作。

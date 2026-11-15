@@ -53,4 +53,4 @@ The default CI run covers the core tests and clean CLI consumer install on Windo
 
 ## Related guides
 
-The [architecture guide](ARCHITECTURE.en.md) describes the dependency direction between the kernel and adapters. The [user guide](../guide.en.md) explains CLI, TUI, and desktop workflows.
+The [architecture guide](ARCHITECTURE.en.md) describes the dependency direction between the kernel and adapters. The [Host extension guide](extensions.en.md) documents the trusted extension contract and runnable examples. The [user guide](../guide.en.md) explains CLI, TUI, and desktop workflows.

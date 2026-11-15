@@ -16,6 +16,7 @@ import type { PermissionCapabilitySnapshot } from '../core/dist/capability/permi
 import { createConfig } from '../core/dist/kernel/config.js';
 import { modeDirectories } from '../core/dist/kernel/modes.js';
 import { createPermissionContext } from '../core/dist/kernel/permission.js';
+import { createDelegationGrant, listDelegationGrants } from '../core/dist/host/agent-control.js';
 import { listenFetchable } from './helpers/port.ts';
 import { connectMcp } from './helpers/mcp-control.mjs';
 import { requestAgentControl } from '../core/dist/host/agent-control-runtime.js';
@@ -52,6 +53,7 @@ type RunOutcome = {
   state: string;
   output: { text?: string; structured?: unknown };
   validation: { status: string; schemaDigest: string };
+  usage: { modelCalls: number | null };
   stopReason?: string;
   artifacts?: unknown[];
 };
@@ -130,6 +132,7 @@ type ProviderBody = {
 type McpContext = Awaited<ReturnType<typeof connectMcp>>;
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const projectContextExtensionPath = resolve(join(repoRoot, 'core', 'examples', 'extensions', 'project-context.mjs'));
 const workspaceRoot = resolve(process.env.LIGULE_MCP_E2E_WORKSPACE_ROOT ?? repoRoot);
 const testplaceRoot = resolve(process.env.LIGULE_MCP_E2E_TESTPLACE_ROOT ?? join(workspaceRoot, 'testplace'));
 const cliPath = resolve(process.env.LIGULE_MCP_CLI ?? join(repoRoot, 'tui', 'dist', 'cli.js'));
@@ -717,6 +720,115 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     logPath = join(readings, `mcp-stdio-e2e-${Date.now()}.jsonl`);
     await writeFile(logPath, `${trace.map((entry) => JSON.stringify(entry)).join('\n')}\n`);
     t.diagnostic(`MCP E2E trace: ${logPath}`);
+    await rm(verifiedTempRoot, { recursive: true, force: true });
+  }
+});
+
+test('the project-context extension runs through a stdio MCP Host with the same Session-bound Kernel checks', { timeout: 45_000 }, async () => {
+  const parent = resolve(process.env.LIGULE_MCP_E2E_TEMP_ROOT ?? join(testplaceRoot, 'tmp'));
+  await mkdir(parent, { recursive: true });
+  const tempRoot = await mkdtemp(join(parent, 'mcp-p11-extension-'));
+  const verifiedTempRoot = await realpath(tempRoot);
+  assert.ok(verifiedTempRoot.startsWith(`${await realpath(parent)}${process.platform === 'win32' ? '\\' : '/'}`));
+  const projectRoot = join(tempRoot, 'project');
+  const dataRoot = join(tempRoot, 'data');
+  const sessionDirectory = join(projectRoot, 'sessions');
+  await Promise.all([mkdir(projectRoot), mkdir(dataRoot)]);
+  await mkdir(sessionDirectory);
+  await writeFile(join(projectRoot, 'README.md'), 'P11_EXTENSION_DEMO_CONTEXT_SOURCE: stdio project note.');
+  await writeFile(join(projectRoot, 'verification.txt'), 'PASS');
+
+  const apiKeyName = 'LIGULE_MCP_P11_EXTENSION_API_KEY';
+  const providerStub = 'local-p11-extension';
+  const systemInputs: string[] = [];
+  const endpoint = createServer(async (request, response) => {
+    try {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      assert.equal(request.headers.authorization, `Bearer ${providerStub}`);
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as ProviderBody;
+      const lastUser = [...body.messages].reverse().find((message) => message.role === 'user')?.content;
+      const system = body.messages.filter((message) => message.role === 'system')
+        .map((message) => typeof message.content === 'string' ? message.content : '').join('\n');
+      if (system.includes('P11_EXTENSION_DEMO_CONTEXT_SOURCE') || system.includes('P11_EXTENSION_DEMO_CHECK')) {
+        systemInputs.push(system);
+      }
+      assert.equal(typeof lastUser, 'string');
+      assert.ok((lastUser as string).includes('P11_EXTENSION_DEMO'));
+      sse(response, { content: 'P11_EXTENSION_DEMO_DONE' });
+    } catch {
+      if (!response.destroyed) {
+        response.writeHead(500, { 'content-type': 'text/plain' });
+        response.end('p11 extension fixture failure');
+      }
+    }
+  });
+  let connected: McpContext | undefined;
+  try {
+    const baseURL = `http://127.0.0.1:${await listenFetchable(endpoint)}/v1`;
+    await writeFile(join(dataRoot, 'config.toml'), [
+      `extensions = [${tomlString(projectContextExtensionPath)}]`,
+      '',
+      '[model]',
+      'api = "chat-completions"',
+      `baseURL = ${tomlString(baseURL)}`,
+      'model = "mcp-p11-extension-local"',
+      `apiKeyEnv = "${apiKeyName}"`,
+      '',
+      '[host]',
+      `sessionDirectory = ${tomlString(sessionDirectory)}`,
+      '',
+      '[policy]',
+      'mode = "auto"',
+      '',
+      '[loop]',
+      'iterations = 4',
+      'modelCalls = 4',
+      'totalModelCalls = 8',
+    ].join('\n'));
+    await setTrusted(projectRoot, true, join(dataRoot, 'tui-trust.json'));
+    const grantsPath = join(dataRoot, 'agent-control.json');
+    const grant = (await createDelegationGrant(grantsPath, {
+      name: 'P11 extension stdio test',
+      projectRoot,
+      defaultPermissionProfile: 'full-access',
+      maxPermissionProfile: 'full-access',
+      defaultNetwork: 'unrestricted',
+      maxNetwork: 'unrestricted',
+      defaultPolicy: 'auto',
+      allowedPolicies: ['auto'],
+      allowOperator: false,
+      confirmFullAccess: true,
+      confirmUnrestrictedNetwork: true,
+      expiresAt: null,
+    }, (await listDelegationGrants(grantsPath)).version)).grants[0]!;
+    connected = await connectMcp({ cliPath, projectRoot, dataRoot, apiKeyName, apiKey: providerStub, sdkRoot, grantId: grant.id });
+    const session = toolData(await connected.client.callTool({ name: 'ligule_session_create', arguments: { projectRoot } }), 'p11_extension_session_create');
+    const run = toolData(await connected.client.callTool({ name: 'ligule_run', arguments: {
+      sessionId: session.sessionId, input: 'P11_EXTENSION_DEMO', timeoutMs: 15_000,
+    } }), 'p11_extension_run');
+    assert.equal(run.state, 'done');
+    assert.equal(run.result.state, 'completed');
+    assert.equal(run.result.output.text, 'P11_EXTENSION_DEMO_DONE');
+    assert.equal(run.result.usage.modelCalls, 2, 'the stdio run uses one original request and one completion continuation');
+    assert.ok(systemInputs[0]?.includes('P11_EXTENSION_DEMO_CONTEXT_SOURCE'));
+    assert.ok(systemInputs.some((system) => system.includes('P11_EXTENSION_DEMO_CHECK')));
+
+    const transcript = toolData(await connected.client.callTool({ name: 'ligule_session_read', arguments: {
+      sessionId: session.sessionId, limit: 50,
+    } }), 'p11_extension_session_read');
+    const events = transcript.records.map((record) => JSON.parse(record.json) as Record<string, unknown>);
+    const reads = events.filter((event) => event.kind === 'tool' && event.tool === 'read');
+    assert.equal(reads.length, 3, 'two request-context reads and one completion check are persisted by the Host Kernel');
+    const user = events.find((event) => event.kind === 'user' && typeof event.text === 'string'
+      && event.text.includes('P11_EXTENSION_DEMO')) as { run?: { runId?: string } } | undefined;
+    assert.equal(typeof user?.run?.runId, 'string');
+    assert.ok(reads.every((event) => event.runId === user?.run?.runId));
+    assert.ok(reads.every((event) => typeof event.parentCallId === 'string'));
+  } finally {
+    if (connected !== undefined) await connected.close();
+    endpoint.closeAllConnections();
+    await new Promise<void>((done) => endpoint.close(() => done()));
     await rm(verifiedTempRoot, { recursive: true, force: true });
   }
 });

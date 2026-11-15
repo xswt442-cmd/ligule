@@ -16,6 +16,10 @@ import { boundaryOf, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
 import { isTrusted } from './workspace-trust.js';
 import { createFileWriteQueue, fileWriteTargetKey, type FileWriteQueue } from './file-write-queue.js';
+import { runExtensionHook } from './extensions.js';
+import type { ExtensionAfterToolContext, ExtensionHookRegistry } from './extensions.js';
+import { currentKernelExecutionContext } from './execution-context.js';
+import type { TaskBudget } from './task-budget.js';
 
 export interface ToolContext {
   readonly config: ConfigSnapshot;
@@ -111,6 +115,8 @@ export interface KernelOptions {
   readonly permission?: PermissionContext;
   readonly permissionForCall?: () => PermissionContext;
   readonly policyOverrideForSession?: () => PolicyMode | null;
+  readonly extensionHooks?: () => ExtensionHookRegistry | undefined;
+  readonly taskBudget?: () => TaskBudget | undefined;
   /** Shared by Sessions that belong to the same Host; omitted Kernels get a private queue. */
   readonly fileWriteQueue?: FileWriteQueue;
 }
@@ -127,6 +133,7 @@ export interface Kernel {
   restrict(names: readonly string[]): () => void;
   call(name: string, args?: unknown, options?: {
     readonly callId?: string; readonly signal?: AbortSignal; readonly sessionId?: string; readonly runId?: string;
+    readonly source?: 'human' | 'controller';
     readonly executionId?: string; readonly userSeq?: number; readonly parentCallId?: string;
     readonly parentRunId?: string; readonly parentExecutionId?: string;
   }): Promise<unknown>;
@@ -189,11 +196,15 @@ export function createKernel(options: KernelOptions = {}): Kernel {
   const policy = options.policy;
   const permission = options.permission ?? DEFAULT_PERMISSION_CONTEXT;
   const session = options.session;
+  const extensionHooks = options.extensionHooks;
+  const taskBudget = options.taskBudget;
   const fileWriteQueue = options.fileWriteQueue ?? createFileWriteQueue();
   const logger = createLogger(options.logger);
   // 文件观察记录与工具表具有相同生命周期；覆盖文件前必须与此前读取的版本匹配。
   const observations = createObservationLog();
   const context = Object.freeze({ config, logger, observations });
+  let extensionObserverFailures = 0;
+  let extensionObserverTruncated = false;
 
   function currentPermission(): PermissionContext {
     return options.permissionForCall?.() ?? permission;
@@ -229,14 +240,19 @@ export function createKernel(options: KernelOptions = {}): Kernel {
   async function record(
     entry: ToolEvent,
     result: ReturnType<typeof refusalOf> | ReturnType<typeof failureOf> | ReturnType<typeof resultOf>,
-  ): Promise<void> {
-    if (!session) return;
+  ): Promise<{ readonly result: ReturnType<typeof refusalOf> | ReturnType<typeof failureOf> | ReturnType<typeof resultOf>; readonly eventSeq?: number }> {
     // Older readers must reject a record requiring images rather than silently project text alone.
-    if (result.images !== undefined) {
+    if (session && result.images !== undefined) {
       entry.callId ??= randomUUID();
       await session.append({ kind: 'image', callId: entry.callId });
     }
-    await session.append({ ...entry, result: await withinLimit(result, session.directory) });
+    const limited = session === undefined ? result : await withinLimit(result, session.directory);
+    const serialized = JSON.stringify(limited);
+    if (serialized === undefined) throw new KernelError('tool_result_not_serializable');
+    const persisted = JSON.parse(serialized) as typeof limited;
+    if (session === undefined) return { result: persisted };
+    const event = await session.append({ ...entry, result: persisted });
+    return { result: persisted, ...(isPlainObject(event) && typeof event.seq === 'number' ? { eventSeq: event.seq } : {}) };
   }
 
   // 失败先写入会话记录再交给调用方；稳定错误码供分支判断，说明文字供模型查看。
@@ -384,6 +400,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
     // 所有调用都经过权限判定，并将拒绝、失败和成功结果写入会话记录。
     async call(name: string, args?: unknown, options: {
       readonly callId?: string; readonly signal?: AbortSignal; readonly sessionId?: string; readonly runId?: string;
+      readonly source?: 'human' | 'controller';
       readonly executionId?: string; readonly userSeq?: number; readonly parentCallId?: string;
       readonly parentRunId?: string; readonly parentExecutionId?: string;
     } = {}) {
@@ -413,6 +430,55 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       }
       const activePermission = currentPermission();
       let callPermission = activePermission;
+      const observeAfterToolHooks = async (outcome: ExtensionAfterToolContext['outcome'], stored: Awaited<ReturnType<typeof record>>,
+        permission: PermissionContext, target?: string): Promise<void> => {
+        const registrations = extensionHooks?.()?.forPhase('afterTool') ?? [];
+        if (registrations.length === 0) return;
+        const current = currentKernelExecutionContext();
+        const sessionId = options.sessionId ?? current?.sessionId;
+        const runId = options.runId ?? current?.runId;
+        if (sessionId === undefined || runId === undefined) return;
+        const signal = options.signal ?? current?.signal ?? new AbortController().signal;
+        if (signal.aborted) return;
+        const hookContext = {
+          sessionId,
+          runId,
+          source: options.source ?? current?.source ?? 'controller',
+          signal,
+          callId: options.callId ?? current?.callId ?? randomUUID(),
+          ...(options.parentCallId ?? current?.parentCallId) === undefined ? {} : {
+            parentCallId: options.parentCallId ?? current?.parentCallId,
+          },
+          ...(options.executionId ?? current?.executionId) === undefined ? {} : {
+            executionId: options.executionId ?? current?.executionId,
+          },
+          ...(options.userSeq ?? current?.userSeq) === undefined ? {} : { userSeq: options.userSeq ?? current?.userSeq },
+          tool: name,
+          args: args as Readonly<Record<string, unknown>>,
+          outcome,
+          result: stored.result,
+          durationMs: entry.durationMs ?? 0,
+          ...(stored.eventSeq === undefined ? {} : { eventSeq: stored.eventSeq }),
+          permission: { profile: permission.profile, network: permission.network },
+          ...(target === undefined ? {} : { target }),
+          ...(entry.verdict === undefined ? {} : { verdict: entry.verdict }),
+        };
+        for (const registration of registrations) {
+          try {
+            const result = await runExtensionHook(registration, hookContext, taskBudget?.());
+            if (result !== undefined) throw new KernelError('extension_hook_result_invalid');
+          } catch (error) {
+            const code = error instanceof KernelError ? error.code : 'extension_hook_failed';
+            if (extensionObserverFailures < 128) {
+              extensionObserverFailures += 1;
+              logger.log('extension afterTool observer failed', { code, extension: registration.extension, hook: registration.hook.name });
+            } else if (!extensionObserverTruncated) {
+              extensionObserverTruncated = true;
+              logger.log('extension observer diagnostics truncated', { code: 'extension_diagnostics_truncated', phase: 'afterTool' });
+            }
+          }
+        }
+      };
       const denied = permissionDenial(activePermission, tool.access);
       if (denied !== undefined) {
         entry.permission = {
@@ -424,7 +490,8 @@ export function createKernel(options: KernelOptions = {}): Kernel {
           reason: denied.reason,
         };
         logger.log(`tool ${name} is not permitted`, { tool: name, code: denied.code, reason: denied.reason });
-        await record(entry, refusalOf(denied.code, denied.reason));
+        const stored = await record(entry, refusalOf(denied.code, denied.reason));
+        await observeAfterToolHooks('denied', stored, activePermission);
         throw new KernelError(denied.code, { detail: denied.reason });
       }
       let preflightResult: unknown;
@@ -470,6 +537,68 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       let requiresManualApproval = false;
       let requiresWorkspaceTrust = false;
       let scriptWorkspaceRoot: string | undefined;
+      let beforeToolHooksRun = false;
+      const runBeforeToolHooks = async (): Promise<void> => {
+        beforeToolHooksRun = true;
+        const registrations = extensionHooks?.()?.forPhase('beforeTool') ?? [];
+        if (registrations.length === 0) return;
+        const current = currentKernelExecutionContext();
+        const sessionId = options.sessionId ?? current?.sessionId;
+        const runId = options.runId ?? current?.runId;
+        if (sessionId === undefined || runId === undefined) {
+          return await fail(entry, new KernelError('extension_hook_run_context_unavailable'));
+        }
+        const signal = options.signal ?? current?.signal ?? new AbortController().signal;
+        for (const registration of registrations) {
+          let result: unknown;
+          try {
+            result = await runExtensionHook(registration, {
+              sessionId,
+              runId,
+              source: options.source ?? current?.source ?? 'controller',
+              signal,
+              callId: options.callId ?? current?.callId ?? randomUUID(),
+              ...(options.parentCallId ?? current?.parentCallId) === undefined ? {} : {
+                parentCallId: options.parentCallId ?? current?.parentCallId,
+              },
+              ...(options.executionId ?? current?.executionId) === undefined ? {} : {
+                executionId: options.executionId ?? current?.executionId,
+              },
+              ...(options.userSeq ?? current?.userSeq) === undefined ? {} : { userSeq: options.userSeq ?? current?.userSeq },
+              tool: name,
+              args: args as Readonly<Record<string, unknown>>,
+              permission: { profile: callPermission.profile, network: callPermission.network },
+              ...(network === undefined ? {} : { target: network.url }),
+            }, taskBudget?.());
+          } catch (error) {
+            return await fail(entry, error instanceof KernelError ? error : new KernelError('extension_hook_failed'));
+          }
+          if (result === undefined) continue;
+          if (!isPlainObject(result)) {
+            return await fail(entry, new KernelError('extension_hook_result_invalid', {
+              detail: `${registration.extension}/${registration.hook.name}`,
+            }));
+          }
+          const decision = result.decision;
+          const reason = result.reason;
+          if ((decision !== 'continue' && decision !== 'deny')
+            || Object.keys(result).some((key) => key !== 'decision' && key !== 'reason')
+            || (decision === 'continue' && Object.keys(result).some((key) => key !== 'decision'))
+            || (decision === 'deny' && (typeof reason !== 'string' || reason.trim() === ''
+              || reason.length > 512 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(reason)))) {
+            return await fail(entry, new KernelError('extension_hook_result_invalid', {
+              detail: `${registration.extension}/${registration.hook.name}`,
+            }));
+          }
+          if (decision === 'deny') {
+            const denialReason = reason as string;
+            entry.verdict = { decision: 'deny', source: 'extension-hook', extension: registration.extension, hook: registration.hook.name };
+            const stored = await record(entry, refusalOf('extension_hook_denied', denialReason));
+            await observeAfterToolHooks('denied', stored, callPermission, network?.url);
+            throw new KernelError('extension_hook_denied');
+          }
+        }
+      };
       if (policy) {
         // 有能力元数据的工具按其声明的实际能力名称进行判定，例如 `mcp:<服务器>/<工具>`。
         const capability = tool.capability?.(args);
@@ -500,6 +629,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
             scriptBindingError = error instanceof KernelError ? error : new KernelError('exec_script_binding_unavailable', { cause: error });
           }
         }
+        await runBeforeToolHooks();
         const verdict = await policy.evaluate({ tool: name, input: args, target: network, shell, capability, access: tool.access, scriptBinding,
           ...(commandText === undefined ? {} : { command: commandText }),
           ...(options.callId === undefined ? {} : { callId: options.callId }),
@@ -542,7 +672,8 @@ export function createKernel(options: KernelOptions = {}): Kernel {
           const code = verdict.code ?? 'policy_denied';
           const reason = verdict.reason ?? '';
           logger.log(`tool ${name} is not allowed`, { tool: name, code, reason });
-          await record(entry, refusalOf(code, reason));
+          const stored = await record(entry, refusalOf(code, reason));
+          await observeAfterToolHooks('denied', stored, callPermission, network?.url);
           throw new KernelError(code);
         }
         // 在结果中保留解析出的命令分段，便于从记录中确认实际判定了哪些命令。
@@ -554,6 +685,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
           if (shell.tail !== '') entry.shell.tail = shell.tail;
         }
       }
+      if (!beforeToolHooksRun) await runBeforeToolHooks();
       if (scriptBindingError !== undefined) {
         await fail(entry, scriptBindingError);
         return undefined;
@@ -626,10 +758,13 @@ export function createKernel(options: KernelOptions = {}): Kernel {
           : new KernelError('tool_failed', { cause: error, detail: errorMessage(error) });
         // 失败和取消的调用也记录实际执行耗时；拒绝、参数错误和跳过的调用不会进入此处。
         timed();
-        await fail(entry, failure);
+        const stored = await record(entry, failureOf(failure.code, failure.detail === undefined ? undefined : { content: failure.detail }));
+        await observeAfterToolHooks('failed', stored, callPermission, network?.url);
+        throw failure;
       }
       timed();
-      await record(entry, success!);
+      const stored = await record(entry, success!);
+      await observeAfterToolHooks('completed', stored, callPermission, network?.url);
       return value;
     },
   };
