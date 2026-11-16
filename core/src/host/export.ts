@@ -93,8 +93,10 @@ function resultBody(record: ExportRecord): string {
 
 // 派生结果可能将支线 ID 存在溢出文件中，需在读取完整结果后提取。
 export function branchSessionId(record: ExportRecord): string | undefined {
-  if (record.kind !== 'tool' || record.tool !== 'subagent') return undefined;
-  const id = (record.result?.content as { sessionId?: unknown } | undefined)?.sessionId;
+  if (record.kind !== 'tool' || (record.tool !== 'subagent' && record.tool !== 'subagent_start')) return undefined;
+  const content = record.result?.content;
+  if (!isRecord(content)) return undefined;
+  const id = record.tool === 'subagent_start' ? content.sessionId ?? content.subrunId : content.sessionId;
   return typeof id === 'string' && id !== '' ? id : undefined;
 }
 

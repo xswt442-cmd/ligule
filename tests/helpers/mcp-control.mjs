@@ -31,6 +31,7 @@ export async function connectMcp({ cliPath, projectRoot, dataRoot, apiKeyName, a
     LIGULE_HOME: home,
     [apiKeyName]: apiKey,
     PATH: inheritedPath,
+    ...(process.env.TMPDIR === undefined ? {} : { TMPDIR: process.env.TMPDIR }),
     ...(process.env.PATHEXT === undefined ? {} : { PATHEXT: process.env.PATHEXT }),
     ...(process.platform === 'win32' ? { Path: inheritedPath } : {}),
   };

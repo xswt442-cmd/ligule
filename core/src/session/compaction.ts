@@ -8,6 +8,7 @@ import { KernelError } from '../errors.js';
 import type { SessionEvent } from './format.js';
 import { estimateRequest, estimateTokens, usageEvent, type ProviderCacheUsage } from './usage.js';
 import type { LoopCompactionRequest, ModelProvider, ModelTool, ProviderEvent } from '../kernel/loop.js';
+import { emptyRequestCompactionDiagnostics, REQUEST_DIAGNOSTIC_COMPACTION_BLOCK_LIMIT, requestCompactionDiagnostics, type RequestDiagnostic } from '../kernel/request-diagnostics.js';
 import { projectModelView } from './session.js';
 export { estimateRequest, estimateTokens } from './usage.js';
 
@@ -174,6 +175,9 @@ export function createCompaction({ provider, session, directory, id, limits, log
   // 单次失败只记原因，仍会重试。
   let summaryFailure: string | null = null;
   let summaryFailures = 0;
+  let collectRequestDiagnostics = false;
+  let requestDiagnosticsInitialized = false;
+  let latestRequestDiagnostics = emptyRequestCompactionDiagnostics();
 
   // 复审（Reviewer）的用量与主 Agent 记在同一份记录里，压缩只认主 Agent 的对话账：
   // 拿复审或摘要请求的输入量当校准数据会把主 Agent 的窗口估算整体拉偏。
@@ -209,6 +213,61 @@ export function createCompaction({ provider, session, directory, id, limits, log
     }
   }
 
+  async function captureRequestDiagnostics(): Promise<void> {
+    if (!collectRequestDiagnostics || requestDiagnosticsInitialized) return;
+    const events = await session.read();
+    const { blocks, reason } = await loadCheckpointFile({ directory, id, events });
+    latestRequestDiagnostics = requestCompactionDiagnostics(events, blocks, reason);
+    requestDiagnosticsInitialized = true;
+  }
+
+  function seedRequestDiagnostics(diagnostics: RequestDiagnostic['compaction']): void {
+    latestRequestDiagnostics = structuredClone(diagnostics);
+    requestDiagnosticsInitialized = true;
+  }
+
+  function noteDiagnosticSummaryUsage(usage: NonNullable<ReturnType<typeof usageEvent>>): void {
+    if (!collectRequestDiagnostics || !requestDiagnosticsInitialized) return;
+    const previous = latestRequestDiagnostics;
+    const summaryRequests = previous.summaryRequests + 1;
+    const unknownInput = previous.unknownSummaryInputRequests + (usage.input === null ? 1 : 0);
+    const unknownOutput = previous.unknownSummaryOutputRequests + (usage.output === null ? 1 : 0);
+    const unknownCache = previous.unknownSummaryCacheRequests + (usage.cache?.hitInputTokens === undefined || usage.cache.hitInputTokens === null ? 1 : 0);
+    latestRequestDiagnostics = {
+      ...previous,
+      summaryRequests,
+      summaryInputTokens: unknownInput > 0 ? null : (previous.summaryInputTokens ?? 0) + (usage.input ?? 0),
+      summaryOutputTokens: unknownOutput > 0 ? null : (previous.summaryOutputTokens ?? 0) + (usage.output ?? 0),
+      summaryCachedInputTokens: unknownCache > 0 ? null : (previous.summaryCachedInputTokens ?? 0) + (usage.cache?.hitInputTokens ?? 0),
+      unknownSummaryInputRequests: unknownInput,
+      unknownSummaryOutputRequests: unknownOutput,
+      unknownSummaryCacheRequests: unknownCache,
+    };
+  }
+
+  function noteDiagnosticBlock(block: CompactionBlock, reason: CompactionReason): void {
+    if (!collectRequestDiagnostics || !requestDiagnosticsInitialized) return;
+    const combined = [...latestRequestDiagnostics.blocks, {
+      blockId: block.blockId,
+      fromSeq: block.fromSeq,
+      toSeq: block.toSeq,
+      summaryBytes: Buffer.byteLength(block.text, 'utf8'),
+      reason,
+    }];
+    const blocks = combined.slice(-REQUEST_DIAGNOSTIC_COMPACTION_BLOCK_LIMIT);
+    latestRequestDiagnostics = {
+      ...latestRequestDiagnostics,
+      blocks,
+      omittedBlocks: latestRequestDiagnostics.omittedBlocks || combined.length > blocks.length,
+    };
+  }
+
+  function resetRequestDiagnostics(): void {
+    collectRequestDiagnostics = false;
+    requestDiagnosticsInitialized = false;
+    latestRequestDiagnostics = emptyRequestCompactionDiagnostics();
+  }
+
   // 摘要请求同样是一次 Provider 调用，要按主 Agent 记账：否则压缩一次就少算一次请求。
   // 端点没报用量时仍写一条未知记录，次数算得清，数值保持 null。
   // 记账只要求“消息数组可展开”，因此这里按 usage 的口径重新包一层，不改原请求。
@@ -216,8 +275,9 @@ export function createCompaction({ provider, session, directory, id, limits, log
     // 摘要请求记在主 Agent 账上（它确实是一次主 Agent 的调用），但标成 `source: 'summary'`：
     // 用量汇总照常计数，窗口校准不拿它当对话读数。
     const usage = usageEvent({ system: request.system, tools: request.tools, messages: [...request.messages] }, [...events], 'agent', { unknownWhenUnreported: true, source: 'summary' });
-    if (usage === null || typeof session.append !== 'function') return;
-    await session.append(usage);
+    if (usage === null) return;
+    noteDiagnosticSummaryUsage(usage);
+    if (typeof session.append === 'function') await session.append(usage);
   }
 
   async function summarise(events: SessionEvent[], previous: string | undefined, signal?: AbortSignal): Promise<string> {
@@ -339,6 +399,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
         kind: 'compaction', ignorable: true, reason, blockId: block.blockId, fromSeq, toSeq, tokensBefore, tokensAfter,
       });
     }
+    noteDiagnosticBlock(block, reason);
     // 保存本地估算和校准系数，使读取记录的一方可以还原触发压缩时的计算依据。
     logger?.log?.('session compacted', {
       sessionId: id,
@@ -427,6 +488,9 @@ export function createCompaction({ provider, session, directory, id, limits, log
   }
 
   return {
+    diagnostics: () => latestRequestDiagnostics,
+    seedDiagnostics: seedRequestDiagnostics,
+    resetDiagnostics: resetRequestDiagnostics,
     tokens: () => ({ threshold, soft, retained, reserved, factor }),
 
     // 为状态和命令行提供上下文窗口、压力阈值、当前估算和最近一次服务端用量。
@@ -472,27 +536,28 @@ export function createCompaction({ provider, session, directory, id, limits, log
 
     // 在构造请求后检查上下文压力；超出阈值时先压缩，再使用新投影发送请求。
     // 软阈值区间内先提醒模型自行压缩；提醒是临时的，不进入持久历史。
-    async prepare(request: LoopCompactionRequest, signal?: AbortSignal): Promise<unknown[]> {
+    async prepare(request: LoopCompactionRequest, signal?: AbortSignal, collectDiagnostics = false): Promise<unknown[]> {
+      collectRequestDiagnostics = collectDiagnostics;
       await seedFromRecord();
       const estimated = estimateRequest(request) * factor;
+      let prepared = request.messages;
       if (estimated > threshold) {
         const done = await compact('auto', signal);
-        if (done === null) return request.messages;
-        return await session.modelView();
-      }
-      if (estimated >= soft && !nudged) {
+        if (done !== null) prepared = await session.modelView();
+      } else if (estimated >= soft && !nudged) {
         const text = await reminder(estimated);
         if (text !== null) {
           nudged = true;
-          return [...request.messages, { role: 'user', text }];
+          prepared = [...request.messages, { role: 'user', text }];
         }
-      }
-      if (estimated < soft) nudged = false;
-      return request.messages;
+      } else if (estimated < soft) nudged = false;
+      if (collectDiagnostics) await captureRequestDiagnostics();
+      return prepared;
     },
 
     // Loop 按轮次限制超长恢复次数；此处只处理超长错误并返回重新构造的投影。
-    async recover(error: unknown, request: LoopCompactionRequest, signal?: AbortSignal): Promise<unknown[] | null> {
+    async recover(error: unknown, request: LoopCompactionRequest, signal?: AbortSignal, collectDiagnostics = false): Promise<unknown[] | null> {
+      collectRequestDiagnostics = collectDiagnostics;
       if (!isOverflow(error)) return null;
       logger?.log?.('context reported overflow, compacting once', {
         sessionId: id,
@@ -506,9 +571,12 @@ export function createCompaction({ provider, session, directory, id, limits, log
           sessionId: id,
           reason: summaryFailure ?? 'no_compressible_range',
         });
+        if (collectDiagnostics) await captureRequestDiagnostics();
         return null;
       }
-      return await session.modelView();
+      const recovered = await session.modelView();
+      if (collectDiagnostics) await captureRequestDiagnostics();
+      return recovered;
     },
 
     // 服务端报告用量后校准本地估算并写入会话记录，避免持续低估导致压力触发失效。

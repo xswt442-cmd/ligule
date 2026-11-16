@@ -648,6 +648,152 @@ test('request preparation Hooks receive the active Run and affect the actual Pro
   }
 });
 
+test('a request capability saved by a Hook expires after that Hook and Run finish', { timeout: 15_000 }, async () => {
+  const root = await directoryWith({
+    'save-request-capability.mjs': `export default function saveRequestCapability(host) {
+  globalThis.__p9P11SavedHookRequest = undefined;
+  host.registerHook({ phase: 'prepareRequest', name: 'save-request', run: (context) => {
+    globalThis.__p9P11SavedHookRequest = context.request;
+    return { context: 'saved request capability test' };
+  } });
+}`,
+  });
+  try {
+    await withTuiHost(async ({ client, sessionId, sessionDirectory }) => {
+      await client.request('run.start', { sessionId, input: 'complete before reusing the saved Hook request' });
+      const sessionPath = join(sessionDirectory, `${sessionId}.jsonl`);
+      const before = (await readFile(sessionPath, 'utf8')).trim().split('\n').filter(Boolean);
+      const saved = (globalThis as { __p9P11SavedHookRequest?: (tool: string, args: unknown) => Promise<{ text: string }> }).__p9P11SavedHookRequest;
+      assert.equal(typeof saved, 'function');
+      await assert.rejects(saved!('read', { path: 'note.txt' }), { code: 'extension_request_context_unavailable' });
+      const after = (await readFile(sessionPath, 'utf8')).trim().split('\n').filter(Boolean);
+      assert.equal(after.length, before.length, 'a stale Hook capability cannot append a tool event after the terminal');
+    }, {
+      extensions: { paths: [join(root, 'save-request-capability.mjs')], ignored: [] },
+      config: { policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      setup: async ({ projectDirectory }) => await writeFile(join(projectDirectory, 'note.txt'), 'review canary'),
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    delete (globalThis as { __p9P11SavedHookRequest?: unknown }).__p9P11SavedHookRequest;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('factory host.request from a child Hook uses the child Kernel and mode', { timeout: 15_000 }, async () => {
+  const root = await directoryWith({
+    'child-factory-request.mjs': `export default function childFactoryRequest(host) {
+  globalThis.__p9P11ChildFactoryRequest = undefined;
+  host.registerHook({ phase: 'completeRun', name: 'read-child-note', run: async (context) => {
+    if (context.parentRunId === undefined) return { decision: 'accept' };
+    try {
+      const read = await host.request('read', { path: 'note.txt' });
+      globalThis.__p9P11ChildFactoryRequest = { text: read.text, runId: context.runId, sessionId: context.sessionId };
+    } catch (error) {
+      globalThis.__p9P11ChildFactoryRequest = { code: error.code, runId: context.runId, sessionId: context.sessionId };
+    }
+    return { decision: 'accept' };
+  } });
+}`,
+  });
+  let requestCount = 0;
+  try {
+    await withTuiHost(async ({ client, sessionId, sessionDirectory, providerRequests }) => {
+      await client.request('run.start', { sessionId, input: JSON.stringify({
+        tool: 'subagent_start', args: {
+          task: 'child Hook must use its own Kernel', mode: { type: 'inline', tools: ['find'], prompt: [] },
+        },
+      }) });
+      const observed = (globalThis as { __p9P11ChildFactoryRequest?: Record<string, unknown> }).__p9P11ChildFactoryRequest;
+      assert.ok(observed, 'the child completion Hook ran');
+      assert.notEqual(observed.sessionId, sessionId);
+      assert.equal(observed.code, 'tool_denied', 'the child Kernel denies read because its Mode exposes only find');
+      assert.equal(providerRequests.length, 3);
+      const parent = (await readFile(join(sessionDirectory, `${sessionId}.jsonl`), 'utf8')).trim().split('\n')
+        .filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+      assert.equal(parent.filter((event) => event.kind === 'tool' && event.runId === observed.runId).length, 0,
+        'a child Hook request cannot write its event into the parent Session');
+      const child = (await readFile(join(sessionDirectory, `${String(observed.sessionId)}.jsonl`), 'utf8')).trim().split('\n')
+        .filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+      const childRead = child.find((event) => event.kind === 'tool' && event.tool === 'read') as {
+        result?: { code?: string };
+      } | undefined;
+      assert.equal(childRead?.result?.code, 'tool_denied');
+    }, {
+      extensions: { paths: [join(root, 'child-factory-request.mjs')], ignored: [] },
+      config: { loop: { iterations: 3, modelCalls: 3, totalModelCalls: 6 }, policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      beforeResponse: (body) => {
+        requestCount += 1;
+        if (requestCount < 3) return;
+        const lastUser = [...body.messages].reverse().find((message) => message.role === 'user');
+        if (typeof lastUser?.content === 'string' && lastUser.content.includes('"tool":"subagent_start"')) {
+          lastUser.content = 'parent finishes after checking the child';
+        }
+      },
+      setup: async ({ projectDirectory }) => await writeFile(join(projectDirectory, 'note.txt'), 'review canary'),
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    delete (globalThis as { __p9P11ChildFactoryRequest?: Record<string, unknown> }).__p9P11ChildFactoryRequest;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a completed child result remains readable after Host restart when boundary is narrower than projectRoot', { timeout: 20_000 }, async () => {
+  let releaseParent!: () => void;
+  const parentGate = new Promise<void>((resolve) => { releaseParent = resolve; });
+  const config: Record<string, unknown> = { loop: { iterations: 8, modelCalls: 8 }, policy: { mode: 'auto' } };
+  let parentReached = false;
+  try {
+    await withTuiHost(async ({ client, sessionId, restart, projectDirectory }) => {
+      const parent = await client.request('run.submit', { sessionId, input: 'hold parent while the child completes' }) as { runId: string };
+      await waitFor(() => parentReached, { within: 5_000 });
+      const child = await client.request('subrun.start', {
+        sessionId, parentRunId: parent.runId, task: 'review child result after restart',
+      }) as { subrunId: string };
+      const finished = await client.request('subrun.wait', {
+        sessionId, parentRunId: parent.runId, subrunIds: [child.subrunId], timeoutMs: 5_000,
+      }) as { subruns: { state: string }[] };
+      assert.equal(finished.subruns[0]?.state, 'completed');
+      releaseParent();
+      await client.request('run.wait', { sessionId, runId: parent.runId });
+      const reopened = await restart();
+      await reopened.request('session.open', { sessionId, projectRoot: projectDirectory });
+      const persisted = await reopened.request('subrun.status', {
+        sessionId, parentRunId: parent.runId, subrunId: child.subrunId,
+      }) as { state: string; errorCode?: string; result?: unknown };
+      assert.equal(persisted.state, 'completed');
+      assert.equal(persisted.errorCode, undefined);
+      assert.ok(persisted.result, 'the durable child RunResult remains readable after restart');
+    }, {
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      config,
+      testDirectory: 'testplace/tmp',
+      beforeResponse: async (body) => {
+        if (body.messages.some((message) => message.role === 'user' && message.content === 'hold parent while the child completes')) {
+          parentReached = true;
+          await parentGate;
+        }
+      },
+      setup: async ({ projectDirectory }) => {
+        config.workspaceRoot = projectDirectory;
+        config.boundary = join(projectDirectory, 'narrow');
+        await mkdir(String(config.boundary));
+      },
+    });
+  } finally {
+    releaseParent();
+  }
+});
+
 test('request preparation Hook output is bounded by the existing prompt-fragment limit', { timeout: 10_000 }, async () => {
   const root = await directoryWith({
     'oversize-context.mjs': `export default function oversize(host) {
@@ -840,6 +986,128 @@ test('configured Hooks load when the TUI Host reopens a Session with full-access
     modeName: 'full',
     testDirectory: 'testplace/tmp',
   });
+});
+
+test('a completion candidate closes child admission until its Hook accepts or continues', { timeout: 20_000 }, async () => {
+  let releaseCandidate!: () => void;
+  const candidateGate = new Promise<void>((resolve) => { releaseCandidate = resolve; });
+  const reviewGlobals = globalThis as typeof globalThis & {
+    __p11CandidateGate?: Promise<void>;
+    __p11CandidateChecked?: string;
+  };
+  const root = await directoryWith({
+    'hold-completion.mjs': `export default function holdCompletion(host) {
+  host.registerHook({ phase: 'completeRun', name: 'verify-while-children-are-closed', run: async (context) => {
+    if (context.parentRunId !== undefined || !context.summary.text.includes('P11_COMPLETION_GATE')) return { decision: 'accept' };
+    const result = await context.request('read', { path: 'verification.txt' });
+    globalThis.__p11CandidateChecked = result.text.trim();
+    await globalThis.__p11CandidateGate;
+    return result.text.trim() === 'PASS' ? { decision: 'accept' } : { decision: 'fail', reason: 'verification changed' };
+  } });
+}`,
+  });
+  reviewGlobals.__p11CandidateGate = candidateGate;
+  delete reviewGlobals.__p11CandidateChecked;
+  try {
+    await withTuiHost(async ({ client, sessionId, sessionDirectory, projectDirectory }) => {
+      const parent = await client.request('run.submit', { sessionId, input: 'P11_COMPLETION_GATE' }) as { runId: string };
+      await waitFor(() => reviewGlobals.__p11CandidateChecked === 'PASS', { within: 5_000 });
+      let child: { subrunId: string } | undefined;
+      try {
+        const startingChild = client.request('subrun.start', {
+          sessionId,
+          parentRunId: parent.runId,
+          task: JSON.stringify({ tool: 'edit', args: { path: 'verification.txt', anchor: 'PASS', replacement: 'FAIL' } }),
+        }).then((result) => { child = result as { subrunId: string }; return result; });
+        await assert.rejects(startingChild, { code: 'subagent_parent_not_active' });
+      } finally {
+        releaseCandidate();
+        if (child !== undefined) {
+          await client.request('subrun.wait', { sessionId, parentRunId: parent.runId,
+            subrunIds: [child.subrunId], timeoutMs: 5_000 }).catch(() => undefined);
+        }
+      }
+      await client.request('run.wait', { sessionId, runId: parent.runId });
+      assert.equal(await readFile(join(projectDirectory, 'verification.txt'), 'utf8'), 'PASS');
+      const events = (await readFile(join(sessionDirectory, `${sessionId}.jsonl`), 'utf8')).split('\n').filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const terminal = events.findLast((event) => event.kind === 'turn' && event.runId === parent.runId);
+      assert.equal(terminal?.status, 'completed');
+    }, {
+      extensions: { paths: [join(root, 'hold-completion.mjs')], ignored: [] },
+      config: { policy: { mode: 'auto' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      setup: async ({ projectDirectory }) => await writeFile(join(projectDirectory, 'verification.txt'), 'PASS'),
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    releaseCandidate();
+    delete reviewGlobals.__p11CandidateGate;
+    delete reviewGlobals.__p11CandidateChecked;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('accepted child steering invalidates its pending approval before a late allow arrives', { timeout: 20_000 }, async () => {
+  let releaseParent!: () => void;
+  let resolveApproval!: (value: { decision: 'allow' | 'deny' }) => void;
+  const parentGate = new Promise<void>((resolve) => { releaseParent = resolve; });
+  const approvalGate = new Promise<{ decision: 'allow' | 'deny' }>((resolve) => { resolveApproval = resolve; });
+  let parentReached = false;
+  let approvalReached = false;
+  try {
+    await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+      client.onRequest((message) => {
+        if (message.method !== 'approval.request') return undefined;
+        approvalReached = true;
+        return approvalGate;
+      });
+      const parent = await client.request('run.submit', { sessionId, input: 'hold the parent during child approval' }) as { runId: string };
+      await waitFor(() => parentReached, { within: 5_000 });
+      const child = await client.request('subrun.start', {
+        sessionId,
+        parentRunId: parent.runId,
+        task: JSON.stringify({ tool: 'create', args: { path: 'must-not-be-created.txt', content: 'late approval' } }),
+      }) as { subrunId: string; runId: string };
+      await waitFor(() => approvalReached, { within: 5_000 });
+      const accepted = await client.request('subrun.message', {
+        sessionId,
+        parentRunId: parent.runId,
+        subrunId: child.subrunId,
+        runId: child.runId,
+        input: 'Do not create that file. Return without changing anything.',
+      }) as { state: string };
+      assert.equal(accepted.state, 'accepted');
+      resolveApproval({ decision: 'allow' });
+      await client.request('subrun.wait', {
+        sessionId,
+        parentRunId: parent.runId,
+        subrunIds: [child.subrunId],
+        timeoutMs: 5_000,
+      });
+      assert.equal(existsSync(join(projectDirectory, 'must-not-be-created.txt')), false,
+        'a late answer cannot authorize the request that preceded accepted child input');
+      releaseParent();
+      await client.request('run.wait', { sessionId, runId: parent.runId });
+    }, {
+      config: { loop: { iterations: 4, modelCalls: 4 }, policy: { mode: 'ask' } },
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      beforeResponse: async (body) => {
+        if (body.messages.some((message) => message.role === 'user' && message.content === 'hold the parent during child approval')) {
+          parentReached = true;
+          await parentGate;
+        }
+      },
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    resolveApproval({ decision: 'deny' });
+    releaseParent();
+  }
 });
 
 test('completion failure outranks an earlier continue decision and runs the remaining checks', { timeout: 15_000 }, async () => {

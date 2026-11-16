@@ -16,6 +16,7 @@ export interface KernelExecutionContext {
   readonly parentRunId?: string;
   readonly parentExecutionId?: string;
   readonly extensionHookPhase?: 'prepareRequest' | 'beforeTool' | 'afterTool' | 'completeRun';
+  readonly extensionRequest?: (tool: string, args?: unknown) => Promise<unknown>;
   readonly scope: KernelExecutionScope;
 }
 

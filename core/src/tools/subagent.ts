@@ -15,6 +15,8 @@ import { createSessionLog, type SessionLog } from '../session/session.js';
 import { createRunAcceptance, isRunAcceptance, publishRunResult, readRunResult, runReceipts } from '../session/run.js';
 import { readSessionRecord } from '../session/record.js';
 import { createRunSteeringInbox, type RunSteeringInbox } from '../kernel/run-steering.js';
+import { currentKernelExecutionContext } from '../kernel/execution-context.js';
+import type { RequestDiagnostic } from '../kernel/request-diagnostics.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
 import { completeExtensionRun, prepareExtensionRequest, type ExtensionHookRegistry } from '../kernel/extensions.js';
 import {
@@ -83,6 +85,8 @@ export interface SubagentDeps {
   promptFragmentBytes?: number;
   loopLimits?: LoopLimits;
   telemetry?: Telemetry;
+  requestDiagnosticsEnabled?: () => boolean;
+  onRequestDiagnostic?: (diagnostic: RequestDiagnostic) => void;
   parentSession?: SessionLog;
   extensionHooks?: () => ExtensionHookRegistry | undefined;
 }
@@ -130,7 +134,7 @@ export interface SubagentRuntime {
   setup(kernel: { register(tool: unknown): () => void; manifest(): readonly { readonly name: string }[] }): () => void;
   start(args: SubagentRunArguments, context: SubagentCallContext, source?: 'human' | 'controller'): Promise<SubrunReference>;
   status(subrunId: string, parentRunId: string): Promise<SubrunStatus>;
-  message(args: { readonly subrunId: string; readonly runId: string; readonly parentRunId: string; readonly input: string }, source: 'human' | 'controller'): Promise<{
+  message(args: { readonly subrunId: string; readonly runId: string; readonly parentRunId: string; readonly input: string }, source: 'human' | 'controller', onAccepted?: () => void): Promise<{
     readonly inputId: string;
     readonly runId: string;
     readonly state: 'accepted';
@@ -150,6 +154,8 @@ export interface SubagentRuntime {
     readonly state: SubrunStatus['state'];
   }>;
   settleParent(parentRunId: string, status: 'completed' | 'failed' | 'cancelled'): Promise<void>;
+  beginCompletionCandidate(parentRunId: string): void;
+  resumeParent(parentRunId: string): void;
   finishParent(parentRunId: string): Promise<void>;
   close(): Promise<void>;
   interaction(runId: string, type: 'approval' | 'question', waiting: boolean): void;
@@ -469,12 +475,12 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
 
   async function message({ subrunId, runId, parentRunId, input }: {
     subrunId: string; runId: string; parentRunId: string; input: string;
-  }, source: 'human' | 'controller') {
+  }, source: 'human' | 'controller', onAccepted?: () => void) {
     const record = findSubrun(subrunId, parentRunId);
     if (record.state !== 'running' || record.runId !== runId || record.inbox === undefined) {
       throw new KernelError('subagent_not_running');
     }
-    return { subrunId, ...await record.inbox.accept(source, input) };
+    return { subrunId, ...await record.inbox.accept(source, input, onAccepted) };
   }
 
   async function wait(subrunIds: readonly string[], parentRunId: string, timeoutMs: number) {
@@ -525,6 +531,15 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
       for (const record of records) record.controller.abort(new KernelError('subagent_parent_cancelled'));
     }
     await Promise.all(records.map(record => record.work ?? Promise.resolve()));
+  }
+
+  function beginCompletionCandidate(parentRunId: string): void {
+    if (closed) throw new KernelError('subagent_host_closed');
+    closedParents.add(parentRunId);
+  }
+
+  function resumeParent(parentRunId: string): void {
+    if (!closed) closedParents.delete(parentRunId);
   }
 
   async function finishParent(parentRunId: string): Promise<void> {
@@ -732,6 +747,8 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                 limits,
                 resolveImage: media.read,
                 telemetry: deps.telemetry,
+                requestDiagnosticsEnabled: deps.requestDiagnosticsEnabled,
+                onRequestDiagnostic: deps.onRequestDiagnostic,
                 sessionId: id,
                 onProgress: lifecycle?.onProgress,
                 ...(runId === undefined ? {} : { parentRunId: runId }),
@@ -779,8 +796,9 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                         summary: candidate.summary,
                         request: async (name, requestArgs) => {
                           if (!child.readOnly().includes(name)) throw new KernelError('extension_request_read_only_required');
+                          const requestSignal = currentKernelExecutionContext()?.signal ?? candidate.signal;
                           return await child.call(name, requestArgs, {
-                            signal: candidate.signal,
+                            signal: requestSignal,
                             sessionId: id,
                             runId: acceptance.runId,
                             source,
@@ -834,7 +852,8 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                       : failedRunResult(acceptance.runId, id,
                         typeof fields.code === 'string' ? fields.code : 'subagent_failed',
                         fields.diagnostics as KernelError['diagnostics'], validation, summary);
-                    return await publishRunResult(session.directory, workspaceIdentity(boundaryOf(deps.config)), id,
+                    const projectRoot = typeof deps.config.workspaceRoot === 'string' ? deps.config.workspaceRoot : boundaryOf(deps.config);
+                    return await publishRunResult(session.directory, workspaceIdentity(projectRoot), id,
                       acceptance.runId, childRunResult);
                   },
                   validateCompletion: () => assertDelegationCompletion(outputContract, structuredSubmitted) });
@@ -998,6 +1017,8 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
     waitForResult,
     cancel,
     settleParent,
+    beginCompletionCandidate,
+    resumeParent,
     finishParent,
     close,
     interaction,

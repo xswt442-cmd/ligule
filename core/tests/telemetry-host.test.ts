@@ -139,10 +139,12 @@ test('Host enables loopback OTLP only from the user configuration layer', async 
 });
 
 test('Host telemetry uses execution IDs plus Session and parent-call links, and excludes sensitive content', async (t) => {
+  let providerCalls = 0;
   const provider = testHostProvider({
     name: 'vendor/local-test-provider',
     model: 'vendor/local-test-model',
     async *stream({ tools, messages }: ModelRequest) {
+      providerCalls += 1;
       const hasChildTool = tools.some(tool => tool.name === 'subagent');
       const hasToolResult = messages.some(message => message.role === 'tool');
       if (hasChildTool && !hasToolResult) {
@@ -173,6 +175,7 @@ test('Host telemetry uses execution IDs plus Session and parent-call links, and 
   await hostContext.host.handle({ method: 'run.wait', params: {
     sessionId: hostContext.sessionId, runId: accepted.runId, origin: 'human',
   } }, hostContext.client);
+  assert.equal(providerCalls, 4, 'the child sees its tool result and does not repeat the same tool call until budget exhaustion');
   assert.ok(hostContext.approvals.some(item => item.tool === 'create'));
 
   const parent = await hostContext.host.handle({ method: 'session.read', params: { sessionId: hostContext.sessionId } }, hostContext.client) as { events: SessionEventView[] };
@@ -180,9 +183,12 @@ test('Host telemetry uses execution IDs plus Session and parent-call links, and 
   assert.ok(delegated);
   const childSessionId = delegated.result.content.sessionId;
   assert.equal(typeof childSessionId, 'string');
-  const childLines = (await readFile(join(hostContext.sessions, `${childSessionId}.jsonl`), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { kind?: string; status?: string; runId?: string });
+  const childLines = (await readFile(join(hostContext.sessions, `${childSessionId}.jsonl`), 'utf8')).trim().split('\n')
+    .map(line => JSON.parse(line) as { kind?: string; status?: string; runId?: string; run?: { runId?: string } });
   assert.ok(childLines.some(event => event.kind === 'turn' && event.status === 'completed'));
-  assert.ok(childLines.filter(event => event.kind === 'turn').every(event => event.runId === undefined));
+  const childRunId = childLines.find(event => event.kind === 'user')?.run?.runId;
+  assert.equal(typeof childRunId, 'string');
+  assert.ok(childLines.filter(event => event.kind === 'turn').every(event => event.runId === childRunId));
   const records = await waitForTelemetry(hostContext.telemetryDirectory, events =>
     events.some(event => event.type === 'run.finished' && event.runId === accepted.runId)
       && events.some(event => event.type === 'tool.finished' && event.callId === 'parent-call-1' && event.outcome === 'success'));
@@ -193,14 +199,14 @@ test('Host telemetry uses execution IDs plus Session and parent-call links, and 
   assert.ok(parentStart);
   assert.ok(childStart, 'child run telemetry event missing');
   assert.match(parentStart.runId as string, /^[0-9a-f-]{36}$/u);
-  assert.equal(childStart.runId, undefined);
+  assert.equal(childStart.runId, childRunId);
   assert.equal(childStart.parentExecutionId, parentStart.executionId);
   assert.equal(childStart.parentRunId, parentStart.runId);
   assert.equal(childStart.parentCallId, 'parent-call-1');
   const approval = records.find(event => event.type === 'approval.finished' && event.callId === 'child-call-1');
   assert.ok(approval);
   assert.equal(approval.sessionId, childSessionId);
-  assert.equal(approval.runId, undefined);
+  assert.equal(approval.runId, childRunId);
   assert.equal(approval.parentRunId, parentStart.runId);
   assert.equal(approval.executionId, childStart.executionId);
   assert.equal(approval.parentExecutionId, parentStart.executionId);

@@ -20,7 +20,7 @@ import {
   loadCheckpointFile,
 } from '../dist/index.js';
 import { resolveModel } from '../dist/kernel/model-services.js';
-import type { LoopCompactionRequest, ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
+import type { LoopCompactionRequest, ModelProvider, ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
 import type { SessionEvent } from '../dist/session/format.js';
 import type { SessionLog } from '../dist/session/session.js';
 
@@ -158,6 +158,30 @@ test('an endpoint overflow answer gets one compaction and one retry', async () =
   });
 });
 
+test('context overflow recovery reruns request preparation on the compacted Session projection', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 2);
+    const provider = fakeProvider([overflow, [{ type: 'text', text: 'after prepared recovery' }]]);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    const prepared: { attempt: number; messageCount: number }[] = [];
+    const result = await createLoop({ kernel, provider, prompt, session, compaction, sessionId: id }).run('继续', {
+      runId: 'overflow-reprepare-run',
+      prepareRequest: async (context) => {
+        prepared.push({ attempt: context.attempt, messageCount: context.messages.length });
+        return { context: `request preparation ${context.attempt}` };
+      },
+    });
+
+    assert.equal(result.text, 'after prepared recovery');
+    assert.deepEqual(prepared.map((item) => item.attempt), [1, 2]);
+    assert.ok(prepared[1]!.messageCount < prepared[0]!.messageCount, 'the second Hook sees the authoritative compacted projection');
+    const request = provider.seen.at(-1)! as unknown as { system?: string; messages: readonly { text?: string }[] };
+    assert.ok(request.system?.includes('request preparation 2'));
+    assert.ok(!request.system?.includes('request preparation 1'));
+    assert.equal(request.messages[0]?.text, SUMMARY);
+  });
+});
+
 test('a second overflow answer does not buy a second compaction', async () => {
   await withSession(async ({ directory, id, session }) => {
     await fill(session, 2);
@@ -193,6 +217,116 @@ test('reported compaction size uses the exact shared model projection', async ()
     assert.ok(result);
     assert.equal(result.tokensAfter, estimateTokens(await session.modelView()));
     assert.ok(result.tokensAfter < result.tokensBefore);
+  });
+});
+
+test('request diagnostics report validated summary coverage and keep unreported summary usage unknown', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 4);
+    const provider = fakeProvider([]);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    const block = await compaction.compactNow();
+    assert.ok(block);
+    assert.ok(session.modelViewWithDiagnostics);
+    const view = await session.modelViewWithDiagnostics!();
+    assert.equal(view.compaction.checkpointValidation, 'valid');
+    assert.deepEqual(view.messages, await session.modelView(), 'diagnostic capture shares the authoritative Session projection');
+    assert.deepEqual(view.compaction.blocks.map(({ blockId, fromSeq, toSeq }) => ({ blockId, fromSeq, toSeq })), [
+      { blockId: block.blockId, fromSeq: block.fromSeq, toSeq: block.toSeq },
+    ]);
+    await compaction.prepare({ system: '', tools: [], messages: await session.modelView() }, undefined, true);
+    const diagnostic = await compaction.diagnostics();
+    assert.deepEqual(diagnostic.blocks, [{
+      blockId: block.blockId,
+      fromSeq: block.fromSeq,
+      toSeq: block.toSeq,
+      summaryBytes: Buffer.byteLength(SUMMARY, 'utf8'),
+      reason: 'manual',
+    }]);
+    assert.equal(diagnostic.summaryUsageScope, 'session_to_date');
+    assert.equal(diagnostic.summaryRequests, 1);
+    assert.equal(diagnostic.summaryInputTokens, null);
+    assert.equal(diagnostic.summaryOutputTokens, null);
+    assert.equal(diagnostic.unknownSummaryInputRequests, 1);
+    assert.equal(diagnostic.unknownSummaryOutputRequests, 1);
+    assert.equal(diagnostic.unknownSummaryCacheRequests, 1);
+    assert.equal(JSON.stringify(diagnostic).includes(SUMMARY), false, 'the diagnostic reports size and covered range, not summary text');
+  });
+});
+
+test('a missing summary usage report makes the cumulative diagnostic totals unknown', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    let summaryCalls = 0;
+    const provider: ModelProvider = {
+      async *stream(request: ModelRequest): AsyncGenerator<ProviderEvent> {
+        const first = request.messages[0];
+        if (first?.role === 'user' && first.text.startsWith('Write a summary')) {
+          summaryCalls += 1;
+          if (summaryCalls === 1) yield { type: 'usage', input: 12, output: 4, cache: {
+            source: 'chat-completions',
+            sourceFields: [{ field: 'prompt_tokens_details.cached_tokens', tokens: 3 }],
+            hitInputTokens: 3,
+            missInputTokens: 9,
+            creationInputTokens: null,
+            uncachedInputTokens: 9,
+            providerInputIncludesCache: true,
+            consistent: true,
+          } };
+          yield { type: 'text', text: `summary ${summaryCalls}` };
+          return;
+        }
+        yield { type: 'text', text: 'unused' };
+      },
+    };
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    await compaction.prepare({ system: '', tools: [], messages: [] }, undefined, true);
+    await fill(session, 4);
+    assert.ok(await compaction.compactNow());
+    const firstDiagnostic = compaction.diagnostics();
+    assert.equal(firstDiagnostic.summaryRequests, 1);
+    assert.equal(firstDiagnostic.summaryInputTokens, 12);
+    assert.equal(firstDiagnostic.summaryOutputTokens, 4);
+    assert.equal(firstDiagnostic.summaryCachedInputTokens, 3);
+    assert.equal(firstDiagnostic.unknownSummaryInputRequests, 0);
+    assert.equal(firstDiagnostic.unknownSummaryOutputRequests, 0);
+    assert.equal(firstDiagnostic.unknownSummaryCacheRequests, 0);
+
+    await fill(session, 4);
+    assert.ok(await compaction.compactNow());
+    const diagnostic = compaction.diagnostics();
+    assert.equal(diagnostic.summaryRequests, 2);
+    assert.equal(diagnostic.summaryInputTokens, null);
+    assert.equal(diagnostic.summaryOutputTokens, null);
+    assert.equal(diagnostic.summaryCachedInputTokens, null);
+    assert.equal(diagnostic.unknownSummaryInputRequests, 1);
+    assert.equal(diagnostic.unknownSummaryOutputRequests, 1);
+    assert.equal(diagnostic.unknownSummaryCacheRequests, 1);
+  });
+});
+
+test('request diagnostics bind compacted coverage and provider usage to the retry sent after preparation', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 4);
+    const provider = fakeProvider([[{ type: 'text', text: 'after diagnostics compaction' }]]);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    const diagnostics: import('../src/kernel/request-diagnostics.ts').RequestDiagnostic[] = [];
+    await createLoop({
+      kernel, provider, prompt, session, compaction, sessionId: id,
+      requestDiagnosticsEnabled: () => true,
+      onRequestDiagnostic: (entry) => diagnostics.push(entry),
+    }).run('request after summary', { runId: 'request-diagnostics-run' });
+
+    assert.equal(diagnostics.length, 1);
+    const [diagnostic] = diagnostics;
+    assert.equal(diagnostic?.status, 'completed');
+    assert.equal(diagnostic?.inputTokens, null, 'the fake endpoint did not report input usage');
+    assert.equal(diagnostic?.compaction.blocks.length, 1);
+    assert.equal(diagnostic?.compaction.blocks[0]?.reason, 'auto');
+    assert.equal(diagnostic?.compaction.summaryRequests, 1);
+    assert.equal(diagnostic?.compaction.unknownSummaryInputRequests, 1);
+    assert.equal(diagnostic?.compaction.unknownSummaryOutputRequests, 1);
+    const sent = provider.seen.at(-1) as unknown as { messages: readonly { text?: string }[] };
+    assert.equal(sent.messages[0]?.text, SUMMARY, 'diagnostic coverage describes the actual post-compaction request');
   });
 });
 

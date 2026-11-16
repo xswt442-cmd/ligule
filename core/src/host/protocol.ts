@@ -467,6 +467,13 @@ export const METHODS = Object.freeze({
     description: 'Read the read-only token usage of a project session, split by purpose (agent model calls and the optional approval reviewer); the totals are partial sums of what endpoints reported, requests that reported nothing are counted in unknownInputRequests and unknownOutputRequests instead of becoming zero, and cached input is a subset of input, never added to it',
     parameters: { type: 'object', properties: { sessionId: SESSION_ID, projectRoot: { type: 'string' } }, required: ['sessionId'] },
   },
+  'usage.diagnostics': {
+    description: 'Enable, disable, or read the bounded in-memory request composition diagnostics for an open local session. Diagnostics contain counts only and are available to trusted local UI clients.',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID,
+      action: { type: 'string', enum: ['enable', 'disable', 'read'] },
+    }, required: ['sessionId', 'action'] },
+  },
   'session.configure': {
     description: 'Read or change one session-owned category: mode, policy, model generation, or the per-turn iteration limit. Loop-limit changes apply at the next turn boundary and never write configuration files.',
     parameters: { type: 'object', properties: {

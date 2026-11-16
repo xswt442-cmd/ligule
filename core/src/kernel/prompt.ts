@@ -22,6 +22,14 @@ export interface PromptAssembly {
   readonly staticPrefix: string;
   fragment(definition: PromptFragment): () => void;
   render(): string;
+  measure(): {
+    readonly systemPrefixBytes: number;
+    readonly projectGuideBytes: number;
+    readonly dynamicFragmentBytes: number;
+    readonly systemSuffixBytes: number;
+    readonly renderedSystemBytes: number;
+    readonly truncatedFragments: number;
+  };
 }
 
 // 动态片段超限时添加可见截断标记；标记本身也计入字节预算。
@@ -63,6 +71,22 @@ export function createPromptAssembly(options: PromptAssemblyOptions = {}): Promp
         .join('\n\n');
       // 按固定顺序组合各段，并忽略空段。
       return [this.staticPrefix, PROMPT_BOUNDARY, dynamic, options.append ?? ''].filter((part) => part !== '').join('\n\n');
+    },
+    measure() {
+      const ordered = fragments.slice().sort((left, right) => left.anchor - right.anchor || left.name.localeCompare(right.name));
+      const rendered = ordered.map((fragment) => ({
+        name: fragment.name,
+        bytes: Buffer.byteLength(cap(fragment.text, fragment.maxBytes, fragment.name), 'utf8'),
+        truncated: Buffer.byteLength(fragment.text, 'utf8') > fragment.maxBytes,
+      }));
+      return {
+        systemPrefixBytes: Buffer.byteLength(this.staticPrefix, 'utf8'),
+        projectGuideBytes: rendered.filter((fragment) => fragment.name === 'instructions').reduce((sum, fragment) => sum + fragment.bytes, 0),
+        dynamicFragmentBytes: rendered.filter((fragment) => fragment.name !== 'instructions').reduce((sum, fragment) => sum + fragment.bytes, 0),
+        systemSuffixBytes: Buffer.byteLength(options.append ?? '', 'utf8'),
+        renderedSystemBytes: Buffer.byteLength(this.render(), 'utf8'),
+        truncatedFragments: rendered.filter((fragment) => fragment.truncated).length,
+      };
     },
   };
 }

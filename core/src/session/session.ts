@@ -9,11 +9,13 @@ import { KernelError, KernelRuntimeError } from '../errors.js';
 import { loadCheckpointFile, type CompactionBlock } from './checkpoint.js';
 import { checkedImageReferences } from './media.js';
 import { createSessionHeader } from './format.js';
+import { isRunAcceptance } from './run.js';
 import { readSessionRecord } from './record.js';
 import { acquireSessionLock } from './lock.js';
 import type { SessionEvent, PendingSessionEvent, SessionHeader } from './format.js';
 import type { ReadSessionRecord } from './record.js';
 import type { SessionLock } from './lock.js';
+import { requestCompactionDiagnostics, type RequestDiagnostic } from '../kernel/request-diagnostics.js';
 import { createStreamDraft, readStreamDraft, type StreamDraftWriter, type ProvisionalOutput } from './stream-draft.js';
 
 export interface SessionMetadata {
@@ -38,6 +40,7 @@ export interface SessionLog {
   read(): Promise<SessionEvent[]>;
   header(): Promise<SessionHeader | undefined>;
   modelView(): Promise<unknown[]>;
+  modelViewWithDiagnostics?(): Promise<{ readonly messages: unknown[]; readonly compaction: RequestDiagnostic['compaction'] }>;
   beginOutput(userSeq: number | undefined, onFailure: (error: KernelRuntimeError) => void): StreamDraftWriter;
   readProvisionalOutput(events: readonly SessionEvent[]): Promise<ProvisionalOutput | null>;
 }
@@ -46,9 +49,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-export function projectModelView(events: readonly SessionEvent[], blocks: readonly Pick<CompactionBlock, 'fromSeq' | 'toSeq' | 'text'>[] = []): unknown[] {
+export function projectModelView(
+  events: readonly SessionEvent[],
+  blocks: readonly Pick<CompactionBlock, 'fromSeq' | 'toSeq' | 'text'>[] = [],
+): unknown[] {
   const view = [];
   const acceptedRunInputs = new Map<string, string>();
+  const parentRunCalls = new Set(events.flatMap((event) => {
+    if (event.kind !== 'user' || !isRunAcceptance(event.run) || event.run.parentage?.callId === undefined) return [];
+    return [event.run.parentage.callId];
+  }));
   let blockIndex = 0;
   let reasoning = '';
   for (const event of events) {
@@ -76,7 +86,7 @@ export function projectModelView(events: readonly SessionEvent[], blocks: readon
       const text = acceptedRunInputs.get(event.inputId);
       if (text !== undefined) view.push({ role: 'user', text });
     } else if (event.kind === 'tool') {
-      if (typeof event.parentCallId === 'string') continue;
+      if (typeof event.parentCallId === 'string' && !parentRunCalls.has(event.parentCallId)) continue;
       if (!isRecord(event.result)) throw new TypeError('a tool event has no result object');
       const result = event.result;
       const content = result.content === '' && result.failed ? `${result.code}: ${result.reason ?? 'no output'}` : result.content;
@@ -247,6 +257,14 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
       const events = await this.read();
       const { blocks } = await loadCheckpointFile({ directory, id, events });
       return projectModelView(events, blocks);
+    },
+    async modelViewWithDiagnostics(): Promise<{ readonly messages: unknown[]; readonly compaction: RequestDiagnostic['compaction'] }> {
+      const events = await this.read();
+      const { blocks, reason } = await loadCheckpointFile({ directory, id, events });
+      return {
+        messages: projectModelView(events, blocks),
+        compaction: requestCompactionDiagnostics(events, blocks, reason),
+      };
     },
   };
   return session;

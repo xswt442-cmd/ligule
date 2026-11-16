@@ -139,6 +139,12 @@ export async function runExtensionHook(registration: ExtensionHookRegistration, 
   }
   const parent = currentKernelExecutionContext();
   const scope = { active: true };
+  const requestCapability = 'request' in context ? context.request : undefined;
+  const scopedRequest = requestCapability === undefined ? undefined : async (tool: string, args?: unknown) => {
+    if (!scope.active) throw new KernelError('extension_request_context_unavailable');
+    if (signal.aborted) throw abortReason(signal);
+    return await requestCapability(tool, args);
+  };
   const executionContext: KernelExecutionContext = {
     signal,
     callId: context.callId ?? parent?.callId ?? randomUUID(),
@@ -151,11 +157,11 @@ export async function runExtensionHook(registration: ExtensionHookRegistration, 
     userSeq: context.userSeq ?? parent?.userSeq,
     parentCallId: context.parentCallId ?? parent?.parentCallId,
     extensionHookPhase: registration.hook.phase,
+    ...(scopedRequest === undefined ? {} : { extensionRequest: scopedRequest }),
     scope,
   };
   const contextData: Record<string, unknown> = { ...context };
   delete contextData.signal;
-  const requestCapability = 'request' in context ? context.request : undefined;
   delete contextData.request;
   const contextSnapshot = freezeSnapshot(structuredClone(contextData)) as Record<string, unknown>;
   const hookContext = Object.freeze({
@@ -163,7 +169,7 @@ export async function runExtensionHook(registration: ExtensionHookRegistration, 
     extension: registration.extension,
     hook: registration.hook.name,
     signal,
-    ...(requestCapability === undefined ? {} : { request: requestCapability }),
+    ...(scopedRequest === undefined ? {} : { request: scopedRequest }),
   });
   const invoke = () => {
     switch (registration.hook.phase) {

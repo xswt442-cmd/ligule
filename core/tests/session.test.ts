@@ -93,6 +93,25 @@ test('nested extension tool results stay in the Session but out of the parent mo
   });
 });
 
+test("a child Session includes tool results linked to its parent's call in its own model view", async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'child-model-view' });
+    const run = createRunAcceptance('child-model-view', 'create the requested file', null, 'controller:subagent', undefined, undefined,
+      { sessionId: 'parent-session', runId: '00000000-0000-4000-8000-000000000001', subrunId: 'child-model-view', callId: 'parent-call' });
+    await session.append({ kind: 'user', text: 'create the requested file', run });
+    await session.append({ kind: 'assistant', text: '', toolCalls: [
+      { id: 'child-call', name: 'create', args: { path: 'result.txt' } },
+    ] });
+    await session.append({ kind: 'tool', tool: 'create', callId: 'child-call', parentCallId: 'parent-call',
+      result: { kind: 'result', failed: false, content: 'created' } });
+
+    const view = await session.modelView() as { role: string; id?: string; content?: string }[];
+    assert.deepEqual(view.filter((message) => message.role === 'tool').map((message) => [message.id, message.content]), [
+      ['child-call', 'created'],
+    ]);
+  });
+});
+
 test('an applied steering input joins its current Run model view only after application', async () => {
   await withDirectory(async (directory) => {
     const session = createSessionLog({ directory, id: 'steering-model-view' });

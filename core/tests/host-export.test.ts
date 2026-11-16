@@ -54,6 +54,9 @@ test('the exported markdown preserves consecutive blank lines in the original bo
 
 test('the branch id comes from that derived result and nothing else', () => {
   assert.equal(branchSessionId({ kind: 'tool', tool: 'subagent', result: { content: { sessionId: 'b-1' } } }), 'b-1');
+  assert.equal(branchSessionId({ kind: 'tool', tool: 'subagent_start', result: { content: {
+    subrunId: 'b-2', sessionId: 'b-2', runId: 'child-run',
+  } } }), 'b-2', 'asynchronous child Runs retain an exportable Session reference');
   assert.equal(branchSessionId({ kind: 'tool', tool: 'read', result: { content: { sessionId: 'b-1' } } }), undefined, '别的工具结果里同名的那一格不算支线');
   assert.equal(branchSessionId({ kind: 'tool', tool: 'subagent', result: { content: '整段溢出了', spilled: 's-1-3.json' } }), undefined,
     '结果内容溢出到文件时记录里就没有这一格');
@@ -73,6 +76,27 @@ test('session.export writes the record to the path the caller names', async () =
   assert.ok(requests.some((request) => request.method === 'session.export' && (request.params as { path?: string }).path === path),
     '界面只交出一个目的地，排版与落盘都在宿主那一侧');
 }, { permissionControl: true }));
+
+test('session.export includes the child Session started by subagent_start', async () => withTuiHost(async ({ client, sessionId, directory }) => {
+  await client.request('run.start', { sessionId, input: JSON.stringify({
+    tool: 'subagent_start', args: { task: 'child session export content' },
+  }) });
+  const parent = await client.request('session.read', { sessionId, fullResults: true }) as { events: Record<string, unknown>[] };
+  const event = parent.events.find((item) => item.kind === 'tool' && item.tool === 'subagent_start');
+  const reference = (event?.result as { content?: Record<string, unknown> } | undefined)?.content;
+  assert.equal(typeof reference?.sessionId, 'string');
+  const path = join(directory, 'async-child.md');
+  const done = await client.request('session.export', { sessionId, path }) as Exported;
+  const childPath = join(directory, `async-child.${String(reference!.sessionId)}.md`);
+  assert.deepEqual(done.written, [path, childPath]);
+  assert.deepEqual(done.skipped, []);
+  assert.match(await readFile(childPath, 'utf8'), /child session export content/);
+}, {
+  permissionControl: true,
+  modeName: 'full',
+  config: { policy: { mode: 'auto' }, loop: { iterations: 4, modelCalls: 4, totalModelCalls: 8 } },
+  testDirectory: 'testplace/tmp',
+}));
 
 test('exporting while the round is still running says the tail is unfinished', async () => withTuiHost(async ({ client, sessionId, directory, notifications }) => {
   // 模型服务故意等两秒（`delayMs`）：那一段时间里这一轮还在往下写，导出读到的是中途的末端。

@@ -59,3 +59,17 @@ test('the static prefix is the same bytes on every render', () => {
   assert.equal(assembly.staticPrefix, before);
   assert.ok(assembly.render().startsWith(`${before}\n\n${PROMPT_BOUNDARY}`));
 });
+
+test('prompt diagnostics count the rendered system sections without returning their text', () => {
+  const assembly = createPromptAssembly({ static: 'system prefix', append: 'system suffix' });
+  assembly.fragment({ name: 'instructions', anchor: 0, text: 'project guide content', maxBytes: 8 });
+  assembly.fragment({ name: 'skills', anchor: 1, text: 'dynamic catalog', maxBytes: 64 });
+  const measured = assembly.measure();
+  assert.equal(measured.systemPrefixBytes, Buffer.byteLength('system prefix', 'utf8'));
+  assert.equal(measured.projectGuideBytes, Buffer.byteLength('[prompt fragment "instructions" truncated to fit 8 bytes]', 'utf8'));
+  assert.equal(measured.dynamicFragmentBytes, Buffer.byteLength('dynamic catalog', 'utf8'));
+  assert.equal(measured.systemSuffixBytes, Buffer.byteLength('system suffix', 'utf8'));
+  assert.equal(measured.renderedSystemBytes, Buffer.byteLength(assembly.render(), 'utf8'));
+  assert.equal(measured.truncatedFragments, 1);
+  assert.equal(JSON.stringify(measured).includes('project guide content'), false);
+});

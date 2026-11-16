@@ -74,6 +74,7 @@ import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instr
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
 import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
 import { createLoop, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase, type LoopResult, type LoopSteeringInbox } from '../kernel/loop.js';
+import { appendRequestDiagnostic, configureRequestDiagnostics, createRequestDiagnosticStore, requestDiagnosticSnapshot, type RequestDiagnosticStore } from '../kernel/request-diagnostics.js';
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createTodoWritePlugin } from '../tools/todo-write.js';
@@ -287,6 +288,8 @@ interface HostSessionBase {
   readonly session: SessionLog;
   readonly listeners: ((event: SessionEvent) => void)[];
   readonly asks: Set<() => void>;
+  readonly asksByRun: Map<string, Set<() => void>>;
+  readonly requestDiagnostics: RequestDiagnosticStore;
   readonly mcpTrust: Map<string, { readonly source: 'trusted-ui'; readonly trusted: boolean; readonly updatedAt: string }>;
   sessionPolicyRules: PolicyRule[];
   readonly environment: ProjectEnvironment;
@@ -392,6 +395,26 @@ interface ExtensionPromptFragment {
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== 'string') throw new KernelError('protocol_args_invalid', { detail: `${field} must be a string` });
   return value;
+}
+
+function trackAsk(state: HostSessionBase, settle: () => void, runId?: string): void {
+  state.asks.add(settle);
+  if (runId === undefined) return;
+  const asks = state.asksByRun.get(runId) ?? new Set<() => void>();
+  asks.add(settle);
+  state.asksByRun.set(runId, asks);
+}
+
+function untrackAsk(state: HostSessionBase, settle: () => void, runId?: string): void {
+  state.asks.delete(settle);
+  if (runId === undefined) return;
+  const asks = state.asksByRun.get(runId);
+  asks?.delete(settle);
+  if (asks?.size === 0) state.asksByRun.delete(runId);
+}
+
+function settleRunAsks(state: HostSessionBase, runId: string): void {
+  for (const settle of [...(state.asksByRun.get(runId) ?? [])]) settle();
 }
 
 function modelConfigOf(config: HostConfigSnapshot): Record<string, unknown> {
@@ -1667,6 +1690,8 @@ export function createHost({
     // 将已持久化的会话事件同时发送给客户端和已加载扩展。
     const listeners: ((event: SessionEvent) => void)[] = [];
     const asks = new Set<() => void>();
+    const asksByRun = new Map<string, Set<() => void>>();
+    const requestDiagnostics = createRequestDiagnosticStore();
     const modeState: ModeState = { file: undefined, tools: [], undo: () => {} };
     const configuredLoopLimits = loopLimitsOf(config);
     const search = await createSearchSupport(config, env.layers);
@@ -1722,6 +1747,8 @@ export function createHost({
       session,
       listeners,
       asks,
+      asksByRun,
+      requestDiagnostics,
       mcpTrust: new Map(),
       sessionPolicyRules: [],
       running: undefined,
@@ -2022,6 +2049,7 @@ export function createHost({
         const requestId = randomUUID();
         const requestSteeringRevision = state.runInputRevision ?? 0;
         const childRunId = currentKernelExecutionContext()?.runId;
+        const interactionRunId = childRunId ?? state.activeRunId;
         let summary;
         try {
           summary = summarizeApproval({
@@ -2040,7 +2068,7 @@ export function createHost({
         const cancelled = new Promise<{ decision: 'cancelled'; code: string }>((resolve) => {
           settle = () => { approvalActive = false; resolve({ decision: 'cancelled', code: 'policy_approval_cancelled' }); };
         });
-        state.asks.add(settle);
+        trackAsk(state, settle, interactionRunId);
         if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'approval', true);
         const endInteraction = state.taskBudget?.startInteraction();
         updateWaitingForUser(state as HostSessionState, connection, true, 'approval');
@@ -2135,7 +2163,7 @@ export function createHost({
           approvalActive = false;
           endInteraction?.();
           pendingApprovalDetails.delete(requestId);
-          state.asks.delete(settle);
+          untrackAsk(state, settle, interactionRunId);
           if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'approval', false);
           updateWaitingForUser(state as HostSessionState, connection, false, 'approval');
         }
@@ -2248,11 +2276,12 @@ export function createHost({
       ask: async (questions) => {
         const questionSteeringRevision = state.runInputRevision ?? 0;
         const childRunId = currentKernelExecutionContext()?.runId;
+        const interactionRunId = childRunId ?? state.activeRunId;
         let settle = (): void => {};
         const cancelled = new Promise<'cancelled'>((resolve) => {
           settle = () => resolve('cancelled');
         });
-        state.asks.add(settle);
+        trackAsk(state, settle, interactionRunId);
         if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'question', true);
         const endInteraction = state.taskBudget?.startInteraction();
         updateWaitingForUser(state as HostSessionState, connection, true, 'input');
@@ -2278,7 +2307,7 @@ export function createHost({
           throw new KernelError('ask_user_host_gone', { detail: `${id}: ${errorMessage(error) ?? String(error)}` });
         } finally {
           endInteraction?.();
-          state.asks.delete(settle);
+          untrackAsk(state, settle, interactionRunId);
           if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'question', false);
           updateWaitingForUser(state as HostSessionState, connection, false, 'input');
         }
@@ -2299,6 +2328,8 @@ export function createHost({
       taskBudget: () => state.taskBudget,
       extensionHooks: () => extensionHookRegistry,
       telemetry,
+      requestDiagnosticsEnabled: () => state.requestDiagnostics.enabled,
+      onRequestDiagnostic: (diagnostic) => appendRequestDiagnostic(state.requestDiagnostics, diagnostic),
       createMcp: async (childId, childMedia) => {
         const servers = await Promise.all(mcpConfigs.map(server => server.name === BROWSER_SERVER ? browser.session(childId) : server));
         const childRegistry = createMcpRegistry(servers, { toolPolicy: browserToolPolicy, assertServerAccess: assertMcpAccess,
@@ -2382,14 +2413,16 @@ export function createHost({
       request: async (tool, args) => {
         const parent = currentKernelExecutionContext();
         if (parent === undefined || !parent.scope.active) throw new KernelError('extension_request_context_unavailable');
-        if (parent.extensionHookPhase === 'beforeTool' || parent.extensionHookPhase === 'afterTool') {
-          throw new KernelError('extension_hook_request_unavailable');
-        }
-        if ((parent.extensionHookPhase === 'prepareRequest' || parent.extensionHookPhase === 'completeRun')
-          && !kernel.readOnly().includes(tool)) throw new KernelError('extension_request_read_only_required');
         if (parent.signal.aborted) {
           const reason = parent.signal.reason;
           throw reason instanceof KernelError ? reason : new KernelError('loop_cancelled', { cause: reason });
+        }
+        if (parent.extensionHookPhase === 'beforeTool' || parent.extensionHookPhase === 'afterTool') {
+          throw new KernelError('extension_hook_request_unavailable');
+        }
+        if (parent.extensionHookPhase === 'prepareRequest' || parent.extensionHookPhase === 'completeRun') {
+          if (parent.extensionRequest === undefined) throw new KernelError('extension_request_context_unavailable');
+          return await parent.extensionRequest(tool, args);
         }
         const callId = randomUUID();
         const child = { ...parent, callId, parentCallId: parent.callId, scope: { active: true } };
@@ -2477,8 +2510,8 @@ export function createHost({
     };
     const compaction = rebuildCompaction(state.generation.model ?? {});
     const loopCompaction: LoopCompaction = {
-      prepare: (request, signal) => state.compaction?.prepare(request, signal) ?? Promise.resolve(request.messages),
-      recover: (error, request, signal) => state.compaction?.recover(error, request, signal) ?? Promise.resolve(null),
+      prepare: (request, signal, collectDiagnostics) => state.compaction?.prepare(request, signal, collectDiagnostics) ?? Promise.resolve(request.messages),
+      recover: (error, request, signal, collectDiagnostics) => state.compaction?.recover(error, request, signal, collectDiagnostics) ?? Promise.resolve(null),
       observe: async (request, events) => {
         const current = state.compaction;
         if (current !== undefined && current !== null) await current.observe(request, events);
@@ -2488,6 +2521,9 @@ export function createHost({
           if (usage !== null) await session.append(usage);
         }
       },
+      diagnostics: () => state.compaction?.diagnostics(),
+      seedDiagnostics: (diagnostics) => state.compaction?.seedDiagnostics(diagnostics),
+      resetDiagnostics: () => state.compaction?.resetDiagnostics(),
     };
     const loop = createLoop({
       kernel,
@@ -2501,6 +2537,8 @@ export function createHost({
       sessionId: id,
       telemetryModel: () => ({ provider: state.generation.provider.name,
         ...(state.generation.provider.model === null ? {} : { model: state.generation.provider.model }) }),
+      requestDiagnosticsEnabled: () => state.requestDiagnostics.enabled,
+      onRequestDiagnostic: (diagnostic) => appendRequestDiagnostic(state.requestDiagnostics, diagnostic),
       onProgress: (event) => {
         if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
       },
@@ -2616,8 +2654,9 @@ export function createHost({
                 summary: candidate.summary,
                 request: async (name, args) => {
                   if (!kernel.readOnly().includes(name)) throw new KernelError('extension_request_read_only_required');
+                  const requestSignal = currentKernelExecutionContext()?.signal ?? candidate.signal;
                   return await kernel.call(name, args, {
-                    signal: candidate.signal,
+                    signal: requestSignal,
                     sessionId: candidate.sessionId,
                     runId: candidate.runId,
                     source: candidate.source,
@@ -2641,6 +2680,8 @@ export function createHost({
           ...(options.acceptance === undefined ? {} : {
             runId: options.acceptance.runId,
             settleSubruns: async (status) => await subagents.settleParent(options.acceptance!.runId, status),
+            beginCompletionCandidate: () => subagents.beginCompletionCandidate(options.acceptance!.runId),
+            resumeSubruns: () => subagents.resumeParent(options.acceptance!.runId),
             finishSubruns: async () => await subagents.finishParent(options.acceptance!.runId),
             persistTerminal: async (status, summary, fields) => {
               const runId = options.acceptance!.runId;
@@ -3977,12 +4018,13 @@ export function createHost({
           const parentRunId = requiredString(message.params.parentRunId, 'parentRunId');
           await requireSubrunParent(state, parentRunId);
           const source = runOriginOf(undefined, 'human', mayRecordHumanRun(controlTrust, bridge));
+          const runId = requiredString(message.params.runId, 'runId');
           return await state.subagents.message({
             subrunId: requiredString(message.params.subrunId, 'subrunId'),
-            runId: requiredString(message.params.runId, 'runId'),
+            runId,
             parentRunId,
             input: requiredString(message.params.input, 'input'),
-          }, source);
+          }, source, () => settleRunAsks(state, runId));
         }
         case 'subrun.wait': {
           const state = open(sessionId);
@@ -4055,6 +4097,18 @@ export function createHost({
           }
           const record = await readSessionRecord(path);
           return { sessionId, summary: summarizeUsage(record.events) };
+        }
+        case 'usage.diagnostics': {
+          requireTrustedUi('request-diagnostics', controlTrust);
+          const state = open(sessionId);
+          const action = requiredString(message.params.action, 'action');
+          if (action === 'enable') return configureRequestDiagnostics(state.requestDiagnostics, true);
+          if (action === 'disable') {
+            state.compaction?.resetDiagnostics();
+            return configureRequestDiagnostics(state.requestDiagnostics, false);
+          }
+          if (action === 'read') return requestDiagnosticSnapshot(state.requestDiagnostics);
+          throw new KernelError('protocol_args_invalid');
         }
         case 'status.get': {
           const state = open(sessionId);
