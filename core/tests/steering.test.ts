@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createPermissionContext } from '../dist/kernel/permission.js';
+import { TRUSTED_AGENT_CONTROL_ORIGIN } from '../dist/host/agent-control-runtime.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 
 const fullAccess = createPermissionContext('full-access', 'unrestricted', {
@@ -72,6 +73,44 @@ test('P10 steering is bound to the active Run and applied before natural complet
     },
     interactive: true,
     permissionControl: true,
+    testDirectory: 'testplace/tmp',
+  });
+});
+
+test('run steering cannot target a Run accepted through another caller scope', { timeout: 20_000 }, async () => {
+  let releaseFirstResponse!: () => void;
+  let reportFirstRequest!: () => void;
+  const firstResponse = new Promise<void>((resolve) => { releaseFirstResponse = resolve; });
+  const firstRequest = new Promise<void>((resolve) => { reportFirstRequest = resolve; });
+  let holdFirstResponse = true;
+
+  await withTuiHost(async ({ host, sessionId }) => {
+    const humanConnection = {
+      [TRUSTED_AGENT_CONTROL_ORIGIN]: true as const,
+      notify() {},
+      async request() { return { decision: 'deny' }; },
+    };
+    const started = await host.handle({ method: 'run.submit', params: { sessionId, input: 'human-owned active run', origin: 'human' } }, humanConnection) as { runId: string };
+    try {
+      await firstRequest;
+      await assert.rejects(
+        host.handle({ method: 'run.steer', params: { sessionId, runId: started.runId, input: 'untrusted steering' } }, {
+          notify() {},
+          async request() { return { decision: 'deny' }; },
+        }),
+        { code: 'run_not_found' },
+      );
+    } finally {
+      releaseFirstResponse();
+    }
+    await host.handle({ method: 'run.wait', params: { sessionId, runId: started.runId } }, humanConnection);
+  }, {
+    beforeResponse: async () => {
+      if (!holdFirstResponse) return;
+      holdFirstResponse = false;
+      reportFirstRequest();
+      await firstResponse;
+    },
     testDirectory: 'testplace/tmp',
   });
 });

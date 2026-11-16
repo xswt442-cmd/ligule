@@ -3982,6 +3982,8 @@ export function createHost({
           const state = open(sessionId);
           const runId = requiredString(message.params.runId, 'runId');
           if (state.activeRunId !== runId) throw new KernelError('run_steer_target_mismatch');
+          const scope = runAcceptanceScope(await state.session.read(), sessionId, runId);
+          if (scope === undefined || (runScopes !== undefined && !runScopes.includes(scope))) throw new KernelError('run_not_found');
           if (grant !== undefined) assertGrantSessionScope(grant, state);
           const header = await state.session.header();
           if (header?.formatVersion === undefined || header.formatVersion < 3) throw new KernelError('run_steer_session_format_unsupported');
