@@ -434,20 +434,19 @@ export const editTool = {
     }
     text = before.toString('utf8');
     if (hasLegacyArguments) {
-      let hits = 0;
+      let position = -1;
       let searchFrom = 0;
       while (true) {
-        const position = text.indexOf(args.anchor!, searchFrom);
-        if (position === -1) break;
-        hits += 1;
-        searchFrom = position + 1;
+        const match = text.indexOf(args.anchor!, searchFrom);
+        if (match === -1) break;
+        if (position !== -1) {
+          throw new KernelError('edit_anchor_ambiguous', { detail: `the anchor appears more than once in ${args.path}; widen it until one occurrence is left` });
+        }
+        position = match;
+        searchFrom = match + 1;
       }
-      if (hits === 0) throw new KernelError('edit_anchor_not_found', { detail: `the anchor does not appear in ${args.path}` });
-      // 定位字符串必须唯一匹配，避免模型在多个位置中任意选择修改目标。
-      if (hits > 1) {
-        throw new KernelError('edit_anchor_ambiguous', { detail: `the anchor appears ${hits} times in ${args.path}; widen it until one occurrence is left` });
-      }
-      const updated = text.replace(args.anchor!, () => args.replacement!);
+      if (position === -1) throw new KernelError('edit_anchor_not_found', { detail: `the anchor does not appear in ${args.path}` });
+      const updated = text.slice(0, position) + args.replacement! + text.slice(position + args.anchor!.length);
       const expected = Buffer.from(updated, 'utf8');
       try { await persistTextFile(target, updated, context); }
       catch (error) {
