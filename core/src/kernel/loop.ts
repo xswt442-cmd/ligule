@@ -979,23 +979,20 @@ export function createLoop({
       } catch (error) {
         try { await draft?.flush(); }
         catch (writeError) { error = writeError; }
+        const cleanupErrors: unknown[] = [];
         try {
           await runOptions.settleSubruns?.(TURN_CANCEL_CODES.has(failureCode(error)) ? 'cancelled' : 'failed');
         } catch (subrunError) {
-          finishTelemetry('failed', failureCode(subrunError));
-          rememberRunSummary(subrunError, summary());
-          throw subrunError;
+          cleanupErrors.push(subrunError);
         }
         try {
           await runOptions.steering?.close(TURN_CANCEL_CODES.has(failureCode(error)) ? 'cancelled' : 'invalidated');
         } catch (closeError) {
-          const closeCode = failureCode(closeError);
-          finishTelemetry(TURN_CANCEL_CODES.has(closeCode) ? 'cancelled' : 'failed', closeCode);
-          rememberRunSummary(closeError, summary());
-          throw closeError;
+          cleanupErrors.push(closeError);
         }
-        const diagnostics = error instanceof KernelError ? error.diagnostics : undefined;
-        const code = failureCode(error);
+        const failure = cleanupErrors[0] ?? error;
+        const diagnostics = failure instanceof KernelError ? failure.diagnostics : undefined;
+        const code = failureCode(failure);
         try {
           await markTurn(TURN_CANCEL_CODES.has(code) ? 'cancelled' : 'failed', {
             code,
@@ -1007,8 +1004,8 @@ export function createLoop({
           throw turnError;
         }
         finishTelemetry(TURN_CANCEL_CODES.has(code) ? 'cancelled' : 'failed', code);
-        rememberRunSummary(error, summary());
-        throw error;
+        rememberRunSummary(failure, summary());
+        throw failure;
       } finally {
         reportPhase('settling');
         signal?.removeEventListener('abort', forward);

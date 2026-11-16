@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createConfig, createKernel, createLoop, createSessionLog, createTaskBudget, DEFAULT_LOOP_LIMITS, KernelError, KernelRuntimeError } from '../dist/index.js';
-import type { LoopProgressEvent, ModelProvider, ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
+import type { LoopProgressEvent, LoopSteeringInbox, ModelProvider, ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
 import type { ToolDefinition } from '../dist/kernel/kernel.js';
 import type { ProviderDiagnostic } from '../dist/kernel/error.js';
 
@@ -31,6 +31,22 @@ function kernelWith(tools: ToolDefinition[]) {
   const kernel = createKernel();
   for (const entry of tools) kernel.register(entry);
   return kernel;
+}
+
+function steeringInbox(close: LoopSteeringInbox['close']): LoopSteeringInbox {
+  return {
+    async applyPending() { return []; },
+    async startWork<TResult>(start: () => TResult) { return { started: true, value: start() }; },
+    async startToolGroup<TResult>(start: () => TResult) { return { started: true, value: start() }; },
+    async finishIfIdle() { return false; },
+    close,
+  };
+}
+
+async function loopFailureDirectory(): Promise<string> {
+  const parent = join(process.cwd(), 'testplace', 'tmp');
+  await mkdir(parent, { recursive: true });
+  return await mkdtemp(join(parent, 'loop-cleanup-'));
 }
 
 test('a turn without tool calls ends the run and the provider is asked once', async () => {
@@ -87,6 +103,43 @@ test('empty output and reasoning-only output fail with one persistent terminal',
       assert.equal(records.filter((event) => event.kind === 'turn').length, 1);
     }
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a subrun cleanup failure still closes steering and records the failed turn', async () => {
+  const root = await loopFailureDirectory();
+  const session = createSessionLog({ directory: root, id: 'subrun-cleanup-failure' });
+  let steeringClosed = 0;
+  try {
+    const provider = { async *stream() { throw new KernelError('provider_http_error'); } };
+    await assert.rejects(createLoop({ kernel: kernelWith([]), provider, session }).run('fail in cleanup', {
+      steering: steeringInbox(async () => { steeringClosed += 1; }),
+      settleSubruns: async () => { throw new KernelError('subrun_settle_failed'); },
+    }), { code: 'subrun_settle_failed' });
+    assert.equal(steeringClosed, 1, 'steering cleanup runs after subrun cleanup fails');
+    assert.deepEqual((await session.read()).filter((event) => event.kind === 'turn').map((event) => [event.status, event.code]), [
+      ['failed', 'subrun_settle_failed'],
+    ]);
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a steering cleanup failure still records the failed turn', async () => {
+  const root = await loopFailureDirectory();
+  const session = createSessionLog({ directory: root, id: 'steering-cleanup-failure' });
+  try {
+    const provider = { async *stream() { throw new KernelError('provider_http_error'); } };
+    await assert.rejects(createLoop({ kernel: kernelWith([]), provider, session }).run('fail in cleanup', {
+      steering: steeringInbox(async () => { throw new KernelError('steering_close_failed'); }),
+    }), { code: 'steering_close_failed' });
+    assert.deepEqual((await session.read()).filter((event) => event.kind === 'turn').map((event) => [event.status, event.code]), [
+      ['failed', 'steering_close_failed'],
+    ]);
+  } finally {
+    await session.close();
     await rm(root, { recursive: true, force: true });
   }
 });
