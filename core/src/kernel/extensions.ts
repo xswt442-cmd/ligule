@@ -215,7 +215,7 @@ export async function prepareExtensionRequest(registry: ExtensionHookRegistry, c
     }
     if (result.context === undefined || result.context.trim() === '') continue;
     const labelled = `[${registration.extension}/${registration.hook.name}]\n${result.context}`;
-    totalBytes += Buffer.byteLength(labelled, 'utf8');
+    totalBytes += (contexts.length === 0 ? 0 : Buffer.byteLength('\n\n', 'utf8')) + Buffer.byteLength(labelled, 'utf8');
     if (totalBytes > maxBytes) {
       throw new KernelError('extension_hook_context_too_large', { detail: `${registration.extension}/${registration.hook.name}` });
     }

@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   createConfig, createKernel, createPermissionContext, createSessionLog, extensionSources, loadAssembly, loadExtensions, minimalPlugin,
 } from '../dist/index.js';
+import { prepareExtensionRequest } from '../dist/kernel/extensions.js';
 import type { ToolDefinition } from '../dist/kernel/kernel.js';
 import type { Connection } from '../dist/host/connection.js';
 import type { Host } from '../dist/host/host.js';
@@ -815,6 +816,39 @@ test('request preparation Hook output is bounded by the existing prompt-fragment
     });
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('request preparation counts the separators between labeled Hook contexts', async () => {
+  const root = await directoryWith({
+    'first.mjs': `export default function e1(host) {
+  host.registerHook({ phase: 'prepareRequest', name: 'a', run: () => ({ context: 'x' }) });
+}`,
+    'second.mjs': `export default function e2(host) {
+  host.registerHook({ phase: 'prepareRequest', name: 'b', run: () => ({ context: 'y' }) });
+}`,
+  });
+  const loaded = await loadExtensions([join(root, 'first.mjs'), join(root, 'second.mjs')], {
+    registerTool: () => () => {},
+    registerFragment: () => () => {},
+    addEventListener: () => () => {},
+    request: async () => undefined,
+  });
+  try {
+    await assert.rejects(prepareExtensionRequest(loaded.hooks, {
+      sessionId: 'extension-context-session',
+      runId: 'extension-context-run',
+      source: 'human',
+      requestId: 'extension-context-request',
+      attempt: 1,
+      system: '',
+      tools: [],
+      messages: [],
+      signal: new AbortController().signal,
+      request: async () => undefined,
+    }, 16), { code: 'extension_hook_context_too_large' });
+  } finally {
+    await loaded.dispose();
   }
 });
 
