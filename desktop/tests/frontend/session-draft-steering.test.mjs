@@ -29,7 +29,7 @@ const fullAccess = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
 });
 
-test('background steering clears only its sent session draft and preserves another session draft', {
+test('background steering and new conversations preserve session-owned drafts', {
   skip: skipReason,
   timeout: 40_000,
 }, async () => {
@@ -187,6 +187,59 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
         return field instanceof HTMLTextAreaElement && !field.readOnly;
       });
       assert.equal(await input.inputValue(), 'draft from B', 'B retains its own unsent draft');
+
+      const savedDraft = async (id) => {
+        const preferences = await client.request('prefs.read', {});
+        return preferences.settings.drafts?.[projectDirectory]?.[id];
+      };
+      const waitForDraft = async (id, expected) => await waitFor(async () => await savedDraft(id) === expected, { within: 5_000 });
+      await page.getByRole('button', { name: 'SESSION_A' }).click();
+      await page.waitForFunction(() => {
+        const field = document.querySelector('.composer-input');
+        return field instanceof HTMLTextAreaElement && !field.readOnly;
+      });
+      await input.fill('A draft survives new sessions');
+      await waitForDraft(sessionId, 'A draft survives new sessions');
+
+      const newConversation = page.locator('button.new-run');
+      await newConversation.click();
+      await page.waitForFunction(() => {
+        const field = document.querySelector('.composer-input');
+        return field instanceof HTMLTextAreaElement && !field.readOnly;
+      });
+      assert.equal(await input.inputValue(), '', 'an absent $new draft opens empty');
+      await page.getByRole('button', { name: 'SESSION_A' }).click();
+      await page.waitForFunction(() => {
+        const field = document.querySelector('.composer-input');
+        return field instanceof HTMLTextAreaElement && !field.readOnly;
+      });
+      assert.equal(await input.inputValue(), 'A draft survives new sessions', 'opening a blank new conversation leaves A unchanged');
+
+      await newConversation.click();
+      await page.waitForFunction(() => {
+        const field = document.querySelector('.composer-input');
+        return field instanceof HTMLTextAreaElement && !field.readOnly;
+      });
+      await input.fill('saved $new draft');
+      await waitForDraft('$new', 'saved $new draft');
+      await page.getByRole('button', { name: 'SESSION_A' }).click();
+      await page.waitForFunction(() => {
+        const field = document.querySelector('.composer-input');
+        return field instanceof HTMLTextAreaElement && !field.readOnly;
+      });
+      assert.equal(await input.inputValue(), 'A draft survives new sessions');
+      await newConversation.click();
+      await page.waitForFunction(() => {
+        const field = document.querySelector('.composer-input');
+        return field instanceof HTMLTextAreaElement && !field.readOnly;
+      });
+      assert.equal(await input.inputValue(), 'saved $new draft', 'a saved $new draft is restored');
+      await page.getByRole('button', { name: 'SESSION_A' }).click();
+      await page.waitForFunction(() => {
+        const field = document.querySelector('.composer-input');
+        return field instanceof HTMLTextAreaElement && !field.readOnly;
+      });
+      assert.equal(await input.inputValue(), 'A draft survives new sessions', 'restoring $new does not replace A');
       assert.deepEqual(errors, []);
     } finally {
       releaseProvider();

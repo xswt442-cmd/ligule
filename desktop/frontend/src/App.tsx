@@ -992,8 +992,9 @@ export function App({ transport }: { transport: Transport }) {
       setLive({ text: '', reasoning: '' });
       setPage(null);
       setWanted(null);
-      setDraft(unsavedInputs.current.get(JSON.stringify([params.projectRoot ?? '', '$new']))?.draft
-        ?? readSettings().drafts[params.projectRoot ?? '']?.$new ?? '');
+      const draftOwner = { root: params.projectRoot ?? '', id: '$new' };
+      setDraft(unsavedInputs.current.get(JSON.stringify([draftOwner.root, draftOwner.id]))?.draft
+        ?? readSettings().drafts[draftOwner.root]?.[draftOwner.id] ?? '', draftOwner);
       setWalk(-1);
       setSettings((current) => ({ ...current, lastSession: null }));
       composerRef.current?.focus();
@@ -1202,6 +1203,7 @@ export function App({ transport }: { transport: Transport }) {
     setStarting(true);
     creating.current = true;
     const request = openRequest.current;
+    let draftOwner = { root: newParameters.current.projectRoot ?? projectRoot, id: '$new' };
     try {
       const hasPermissionOverride = newSessionPermission.profile !== DEFAULT_NEW_SESSION_PERMISSION.profile
         || newSessionPermission.network !== DEFAULT_NEW_SESSION_PERMISSION.network;
@@ -1226,6 +1228,7 @@ export function App({ transport }: { transport: Transport }) {
       const opened = await openSession(created.sessionId, undefined, false, newParameters.current.projectRoot);
       if (active.current !== created.sessionId) return;
       if (opened !== true) throw Object.assign(new Error('session_open_failed'), { code: 'session_open_failed' });
+      draftOwner = { root: newParameters.current.projectRoot ?? projectRoot, id: created.sessionId };
       const cached = readSettings();
       const drafts = { ...cached.drafts };
       const atRoot = { ...(drafts[projectRoot] ?? {}) };
@@ -1238,13 +1241,13 @@ export function App({ transport }: { transport: Transport }) {
       setSessionsRevision((current) => current + 1);
       void submit(text, created.sessionId);
     } catch (error) {
-      setDraft(text);
+      setDraft(text, draftOwner);
       setRows((current) => [...current, metaRow('error', `无法开始会话：${code(error)}`, `Could not start conversation: ${code(error)}`)]);
     } finally {
       creating.current = false;
       setStarting(false);
     }
-  }, [client, draft, inputOwner, newSessionMode, newSessionPermission, newSessionPermissionConfirmations, newSessionPolicy, openSession, projectRoot, reading, sessionId, settings.newSelections, settingsReady, submit, t]);
+  }, [client, draft, inputOwner, newSessionMode, newSessionPermission, newSessionPermissionConfirmations, newSessionPolicy, openSession, projectRoot, reading, sessionId, settings.newSelections, settingsReady, setDraft, submit, t]);
 
   const steer = useCallback(async () => {
     const own = sessionId;
@@ -1737,9 +1740,9 @@ export function App({ transport }: { transport: Transport }) {
   const selectWorkspace = useCallback(async (root: string) => {
     const text = draft;
     if (!await newSession(root)) throw new Error('workspace_selection_cancelled');
-    setDraft(text);
+    setDraft(text, { root, id: '$new' });
     patch({ projects: [...new Set([...settings.projects, root])], hiddenProjects: settings.hiddenProjects.filter(item => item !== root) });
-  }, [draft, newSession, patch, settings.hiddenProjects, settings.projects]);
+  }, [draft, newSession, patch, setDraft, settings.hiddenProjects, settings.projects]);
   const selectModel = useCallback(async (selection: ModelSelection) => {
     if (sessionId === null) { patch({ newSelections: { ...settings.newSelections, [projectRoot]: selection } }); return; }
     await client.call('model.select', { sessionId, ...selection }, 15_000);
