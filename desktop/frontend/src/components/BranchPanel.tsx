@@ -24,6 +24,7 @@ function noteText(note: { kind: 'parent' | 'branch' | 'control'; code: string },
 export function BranchPanel({ client, sessionId, verbosity }: { client: Client; sessionId: string | null; verbosity: Verbosity }) {
   const t = useText();
   const requestGeneration = useRef(0);
+  const sessionGeneration = useRef(0);
   const branchReadGeneration = useRef(0);
   const messageRevision = useRef(0);
   const [branches, setBranches] = useState<Branch[]>([]);
@@ -34,7 +35,8 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
   const [note, setNote] = useState<{ kind: 'parent' | 'branch' | 'control'; code: string } | null>(null);
 
   useEffect(() => {
-    const generation = ++requestGeneration.current;
+    const generation = ++sessionGeneration.current;
+    requestGeneration.current += 1;
     branchReadGeneration.current += 1;
     setBranches([]);
     setSelectedId(null);
@@ -47,7 +49,7 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
     void (async () => {
       try {
         const { events } = await client.call('session.read', { sessionId, fullResults: true }) as { events: Record_[] };
-        if (requestGeneration.current !== generation) return;
+        if (sessionGeneration.current !== generation) return;
         const found = events.map(subrunBranchOf).filter((item): item is SubrunBranch => item !== null);
         setBranches(found);
         const states = await Promise.all(found.filter((item) => item.reference !== undefined).map(async (branch) => {
@@ -63,17 +65,18 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
             return { id: branch.id, state: 'unknown', errorCode: code(error) };
           }
         }));
-        if (requestGeneration.current !== generation) return;
+        if (sessionGeneration.current !== generation) return;
         setBranches((current) => current.map((branch) => {
           const status = states.find((item) => item.id === branch.id);
           return status === undefined ? branch : { ...branch, state: status.state, errorCode: status.errorCode };
         }));
       } catch (error) {
-        if (requestGeneration.current === generation) setNote({ kind: 'parent', code: code(error) });
+        if (sessionGeneration.current === generation) setNote({ kind: 'parent', code: code(error) });
       }
     })();
     return () => {
       requestGeneration.current += 1;
+      sessionGeneration.current += 1;
       branchReadGeneration.current += 1;
     };
   }, [client, sessionId]);

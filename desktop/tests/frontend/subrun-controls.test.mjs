@@ -19,7 +19,7 @@ const fullAccess = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
 });
 
-function gatedChildProvider() {
+function gatedChildProvider(childCount = 1) {
   let release;
   let markStarted;
   let parentStartSent = false;
@@ -41,7 +41,10 @@ function gatedChildProvider() {
         const tools = new Set(body.tools?.map((tool) => tool.function.name));
         if (lastUser === 'panel-parent-start-child' && tools.has('subagent_start') && !parentStartSent) {
           parentStartSent = true;
-          return { toolCalls: [{ tool: 'subagent_start', args: { task: 'panel-child-pending' } }] };
+          return { toolCalls: Array.from({ length: childCount }, (_value, index) => ({
+            tool: 'subagent_start',
+            args: { task: index === 0 ? 'panel-child-pending' : `panel-child-complete-${index}` },
+          })) };
         }
         return { text: 'completed this safe step' };
       },
@@ -49,32 +52,34 @@ function gatedChildProvider() {
   };
 }
 
-function branchFrom(events, parentRunId) {
-  const event = events.find((item) => item.kind === 'tool' && item.tool === 'subagent_start');
-  const content = typeof event?.result?.content === 'object' && event.result.content !== null
-    ? event.result.content : undefined;
-  const parent = typeof event?.runId === 'string' ? event.runId : content?.parentRunId;
-  if (typeof event?.seq !== 'number' || parent !== parentRunId || typeof content?.subrunId !== 'string'
-    || typeof content.sessionId !== 'string' || typeof content.runId !== 'string') return undefined;
-  return { seq: event.seq, parentRunId: parent, subrunId: content.subrunId, sessionId: content.sessionId, runId: content.runId };
+function branchesFrom(events, parentRunId) {
+  return events.flatMap((event) => {
+    if (event.kind !== 'tool' || event.tool !== 'subagent_start') return [];
+    const content = typeof event.result?.content === 'object' && event.result.content !== null
+      ? event.result.content : undefined;
+    const parent = typeof event.runId === 'string' ? event.runId : content?.parentRunId;
+    if (typeof event.seq !== 'number' || parent !== parentRunId || typeof content?.subrunId !== 'string'
+      || typeof content.sessionId !== 'string' || typeof content.runId !== 'string') return [];
+    return [{ seq: event.seq, parentRunId: parent, subrunId: content.subrunId, sessionId: content.sessionId, runId: content.runId }];
+  });
 }
 
-async function withChildRun(run) {
-  const childProvider = gatedChildProvider();
+async function withChildRun(run, { childCount = 1 } = {}) {
+  const childProvider = gatedChildProvider(childCount);
   await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
     await client.request('workspace.trust', {
       projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
     });
     const submitted = await client.request('run.submit', { sessionId, input: 'panel-parent-start-child' });
     await childProvider.started;
-    let branch;
+    let branches = [];
     await waitFor(async () => {
       const record = await client.request('session.read', { sessionId, fullResults: true });
-      branch = branchFrom(record.events, submitted.runId);
-      return branch !== undefined;
+      branches = branchesFrom(record.events, submitted.runId);
+      return branches.length === childCount;
     }, { within: 5_000 });
     try {
-      await run({ client, sessionId, parentRunId: submitted.runId, branch });
+      await run({ client, sessionId, parentRunId: submitted.runId, branch: branches[0], branches });
     } finally {
       childProvider.release();
       await client.request('run.wait', { sessionId, runId: submitted.runId });
@@ -231,4 +236,42 @@ test('typing a new child message during send preserves that unsent draft', { ski
       }
     });
   });
+});
+
+test('refreshing one child does not discard another child first status read', { skip: skipReason, timeout: 30_000 }, async () => {
+  await withChildRun(async ({ client, sessionId, parentRunId, branches, branch }) => {
+    const other = branches[1];
+    assert.ok(other);
+    let markOtherStatusStarted;
+    let releaseOtherStatus;
+    const otherStatusStarted = new Promise((resolve) => { markOtherStatusStarted = resolve; });
+    const otherStatusGate = new Promise((resolve) => { releaseOtherStatus = resolve; });
+    let held = false;
+    const hostCall = async (method, params) => {
+      if (method === 'subrun.status' && params.subrunId === other.subrunId && !held) {
+        held = true;
+        markOtherStatusStarted();
+        await otherStatusGate;
+      }
+      return await client.request(method, params);
+    };
+    try {
+      await withBranchPanel(sessionId, branch, hostCall, async (page) => {
+        await otherStatusStarted;
+        const otherRow = () => page.locator('li').filter({ has: page.getByRole('button', { name: `记录 ${other.seq}` }) });
+        assert.match(await otherRow().innerText(), /读取状态中/);
+        await page.getByRole('button', { name: '刷新状态' }).click();
+        await page.waitForFunction((seq) => [...document.querySelectorAll('li')].some((row) =>
+          row.querySelector('button')?.textContent === `记录 ${seq}` && row.textContent?.includes('running')),
+        branch.seq);
+        releaseOtherStatus();
+        await page.waitForFunction((seq) => [...document.querySelectorAll('li')].some((row) =>
+          row.querySelector('button')?.textContent === `记录 ${seq}` && row.textContent?.includes('completed')),
+        other.seq);
+        assert.match(await otherRow().innerText(), /completed/);
+      });
+    } finally {
+      releaseOtherStatus();
+    }
+  }, { childCount: 2 });
 });
