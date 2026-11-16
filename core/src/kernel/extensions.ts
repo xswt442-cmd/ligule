@@ -477,13 +477,17 @@ export async function loadExtensions(paths: string[], options: LoadOptions) {
 
   async function clean(owns: (() => void | Promise<void>)[]): Promise<unknown[]> {
     const errors: unknown[] = [];
+    const failed: (() => void | Promise<void>)[] = [];
     while (owns.length > 0) {
+      const cleanup = owns.pop()!;
       try {
-        await owns.pop()?.();
+        await cleanup();
       } catch (error) {
         errors.push(error);
+        failed.unshift(cleanup);
       }
     }
+    owns.push(...failed);
     return errors;
   }
 
@@ -571,6 +575,7 @@ export async function loadExtensions(paths: string[], options: LoadOptions) {
       owner.active = false;
       owners.delete(owner);
       const cleanupErrors = await clean(owns);
+      if (owns.length > 0) undo.push(owns);
       const failure = error instanceof KernelError ? error : new KernelError('extension_load_failed', { cause: error });
       const detail = failure.detail ?? (error instanceof Error ? error.message : String(error));
       const cleanupDetail = cleanupErrors.map((item) => item instanceof Error ? item.message : String(item));
@@ -593,14 +598,20 @@ export async function loadExtensions(paths: string[], options: LoadOptions) {
       for (const owner of owners) owner.active = false;
       disposePromise = (async () => {
         const errors: unknown[] = [];
-        while (undo.length > 0) errors.push(...await clean(undo.pop()!));
-        owners.clear();
-        disposed = true;
+        for (let index = undo.length - 1; index >= 0; index -= 1) {
+          const owns = undo[index]!;
+          errors.push(...await clean(owns));
+          if (owns.length === 0) undo.splice(index, 1);
+        }
+        if (errors.length === 0) {
+          owners.clear();
+          disposed = true;
+        }
         if (errors.length === 1) throw errors[0];
         if (errors.length > 0) throw new AggregateError(errors, 'extension cleanup failed');
       })();
       try { await disposePromise; }
-      finally { if (disposed) disposePromise = undefined; }
+      finally { disposePromise = undefined; }
     },
   };
 }

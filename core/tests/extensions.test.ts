@@ -235,13 +235,17 @@ test('a broken extension takes back its own registrations and leaves the others 
   assert.deepEqual(kernel.list(), ['keep']);
 });
 
-test('extension disposal attempts all owned cleanups in reverse order and only once', async () => {
+test('extension disposal retries only a failed disposer and reports completion afterward', async () => {
   const root = await directoryWith({
     'cleanup.js': `export default function cleanup(host) {
+  globalThis.__p11DisposerAttempts = 0;
   host.registerTool({ name: 'cleanup-tool', description: 'tool', access: 'read', parameters: { type: 'object', properties: {} }, run: async () => ({ text: 'ok' }) });
   host.registerPrompt({ name: 'cleanup-prompt', text: 'prompt' });
   host.onEvent(() => {});
-  return () => { throw new Error('extension disposer failed'); };
+  return () => {
+    globalThis.__p11DisposerAttempts += 1;
+    if (globalThis.__p11DisposerAttempts === 1) throw new Error('extension disposer failed once');
+  };
 }`,
   });
   const kernel = createKernel({ config: createConfig({ user: { boundary: root } }) });
@@ -253,12 +257,21 @@ test('extension disposal attempts all owned cleanups in reverse order and only o
     addEventListener: (handler) => { listeners.add(handler); return () => listeners.delete(handler); },
     request: (name, args) => kernel.call(name, args),
   });
-  await assert.rejects(loaded.dispose(), (error) => error instanceof Error && error.message === 'extension disposer failed');
-  assert.deepEqual(kernel.list(), []);
-  assert.equal(fragments.size, 0);
-  assert.equal(listeners.size, 0);
-  await loaded.dispose();
-  assert.deepEqual(kernel.list(), []);
+  try {
+    await assert.rejects(loaded.dispose(), (error) => error instanceof Error && error.message === 'extension disposer failed once');
+    assert.deepEqual(kernel.list(), []);
+    assert.equal(fragments.size, 0);
+    assert.equal(listeners.size, 0);
+    assert.equal((globalThis as { __p11DisposerAttempts?: number }).__p11DisposerAttempts, 1);
+    await loaded.dispose();
+    assert.equal((globalThis as { __p11DisposerAttempts?: number }).__p11DisposerAttempts, 2,
+      'only the failed disposer is retried');
+    await loaded.dispose();
+    assert.equal((globalThis as { __p11DisposerAttempts?: number }).__p11DisposerAttempts, 2,
+      'successful disposal remains complete');
+  } finally {
+    delete (globalThis as { __p11DisposerAttempts?: number }).__p11DisposerAttempts;
+  }
 });
 
 test('extension disposal awaits async disposers and completes exactly once', async () => {

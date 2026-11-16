@@ -38,6 +38,8 @@ The completion context includes the current Run, Session event range, candidate 
 
 `onEvent` remains observation-only. Hooks run in registration order and are owned by the extension that registered them. A Hook request is cancelled with its Run and bounded by the existing request deadline. Host shutdown waits for asynchronous disposers; it cannot force-stop arbitrary trusted JavaScript.
 
+Cleanup callbacks run in reverse registration order. If one rejects, a later `dispose()` or Session close retries that callback; successful callbacks are not repeated, and the Host does not report extension cleanup as complete until all callbacks succeed. Make cleanup safe to retry because a rejected callback may have completed only part of its work.
+
 Use the real Host APIs for embedded and stdio/MCP integrations. The Core extension contract does not add a second protocol, tool registry, Session store, global lock or public Core package. The examples use portable project-relative file names and do not perform direct filesystem operations to simulate tool results.
 
 ## Verify changes

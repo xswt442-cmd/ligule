@@ -38,6 +38,8 @@ Host 只会在打开使用 `full-access` Permission 和 `unrestricted` network �
 
 `onEvent` 仍然只用于观察。Hook 按登记顺序运行，并由登记它的扩展持有。Run 取消时会取消其 Hook 请求，Hook 也受现有请求时限约束。Host 关闭时会等待异步 disposer；它无法强制终止任意受信任的 JavaScript。
 
+清理回调按登记顺序的逆序执行。如果回调失败，后续调用 `dispose()` 或再次关闭 Session 时会重试该回调；已成功的回调不会重复执行。所有回调成功前，Host 不会报告扩展清理完成。失败回调可能只完成了部分工作，扩展应让清理过程可以安全重试。
+
 嵌入式和 stdio/MCP 集成都使用现有 Host API。Core 扩展合同不会新增第二套协议、工具注册表、Session 存储、全局锁或公开 Core 包。示例使用可移植的项目相对文件名，不会通过直接文件系统操作伪造工具结果。
 
 ## 验证改动
