@@ -401,6 +401,7 @@ test('P10 steering waits for an already-started process group to settle', { time
   await withTuiHost(async ({ client, sessionId, projectDirectory, providerRequests }) => {
     const startedMarker = join(projectDirectory, 'steering-process-started.txt');
     const completedMarker = join(projectDirectory, 'steering-process-completed.txt');
+    const releaseMarker = join(projectDirectory, 'steering-process-release.txt');
     await client.request('workspace.trust', {
       projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
     });
@@ -408,32 +409,38 @@ test('P10 steering waits for an already-started process group to settle', { time
     const running = client.request('run.start', {
       sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'node steering-child.mjs' } }),
     }).then(() => undefined, (error: unknown) => error);
-    await waitFor(() => existsSync(startedMarker), { within: 5_000, every: 20 });
-    const record = await client.request('session.read', { sessionId }) as {
-      events: { kind?: string; run?: { runId?: string } }[];
-    };
-    const runId = record.events.find((event) => event.kind === 'user')?.run?.runId;
-    assert.equal(typeof runId, 'string');
-    const accepted = await client.request('run.steer', { sessionId, runId, input: 'Keep the public route unchanged.' }) as {
-      cancelledInteractions: number;
-    };
-    assert.equal(accepted.cancelledInteractions, 0);
-    await waitFor(() => existsSync(completedMarker), { within: 5_000, every: 20 });
-    assert.equal(await running, undefined);
-    assert.ok(providerRequests[1].messages.some((message) =>
-      message.role === 'user' && typeof message.content === 'string' && message.content.includes('Keep the public route unchanged.')));
-    const finalRecord = await client.request('session.read', { sessionId }) as {
-      events: { kind?: string; tool?: string; result?: { failed?: boolean } }[];
-    };
-    assert.equal(finalRecord.events.find((event) => event.kind === 'tool' && event.tool === 'exec')?.result?.failed, false);
+    try {
+      await waitFor(() => existsSync(startedMarker), { within: 5_000, every: 20 });
+      const record = await client.request('session.read', { sessionId }) as {
+        events: { kind?: string; run?: { runId?: string } }[];
+      };
+      const runId = record.events.find((event) => event.kind === 'user')?.run?.runId;
+      assert.equal(typeof runId, 'string');
+      const accepted = await client.request('run.steer', { sessionId, runId, input: 'Keep the public route unchanged.' }) as {
+        cancelledInteractions: number;
+      };
+      assert.equal(accepted.cancelledInteractions, 0);
+      await writeFile(releaseMarker, 'release');
+      await waitFor(() => existsSync(completedMarker), { within: 5_000, every: 20 });
+      assert.equal(await running, undefined);
+      assert.ok(providerRequests[1].messages.some((message) =>
+        message.role === 'user' && typeof message.content === 'string' && message.content.includes('Keep the public route unchanged.')));
+      const finalRecord = await client.request('session.read', { sessionId }) as {
+        events: { kind?: string; tool?: string; result?: { failed?: boolean } }[];
+      };
+      assert.equal(finalRecord.events.find((event) => event.kind === 'tool' && event.tool === 'exec')?.result?.failed, false);
+    } finally {
+      await writeFile(releaseMarker, 'release').catch(() => undefined);
+      await running;
+    }
   }, {
     permission: fullAccess,
     permissionControl: true,
     setup: async ({ projectDirectory }) => {
       await writeFile(join(projectDirectory, 'steering-child.mjs'), [
-        "import { writeFileSync } from 'node:fs';",
+        "import { existsSync, writeFileSync } from 'node:fs';",
         "writeFileSync('steering-process-started.txt', 'started');",
-        'await new Promise((resolve) => setTimeout(resolve, 800));',
+        "while (!existsSync('steering-process-release.txt')) await new Promise((resolve) => setTimeout(resolve, 10));",
         "writeFileSync('steering-process-completed.txt', 'completed');",
       ].join('\n'));
     },
