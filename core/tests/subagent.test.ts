@@ -112,6 +112,50 @@ async function workspace() {
 
 const readEvents = async (file: string) => (await readFile(file, 'utf8')).split('\n').filter(Boolean).map((line) => JSON.parse(line) as RecordedEvent);
 
+test('subagent start rejects a startup failure before onStarted', { timeout: 15_000 }, async () => {
+  const boundary = await workspace();
+  const directory = await tempDirectory('ligule-subagent-start-failure-');
+  const config = createConfig({ user: { boundary } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory, id: 'parent' });
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  minimalPlugin.setup(kernel);
+  const budget = createTaskBudget({ maxModelCalls: 8, timeoutMs: 60_000, requestTimeoutMs: 10_000 });
+  budget.startWork = () => { throw new Error('simulated TaskBudget startup failure'); };
+  const runtime = createSubagentPlugin({
+    config,
+    provider: scripted([]),
+    chain,
+    prompt: { staticPrefix: '' },
+    directory,
+    sessionId: 'parent',
+    plugins: [minimalPlugin],
+    taskBudget: () => budget,
+  });
+  const unregister = runtime.setup(kernel);
+
+  try {
+    const start = runtime.start({ task: 'child that fails during setup' }, {
+      permission: fullAccess, runId: '123e4567-e89b-42d3-a456-426614174000',
+    })
+      .then((reference) => ({ kind: 'started' as const, reference }), (error: unknown) => ({
+        kind: 'rejected' as const,
+        code: typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined,
+      }));
+    const outcome = await Promise.race([
+      start,
+      delay(100).then(() => ({ kind: 'pending' as const })),
+    ]);
+
+    assert.deepEqual(outcome, { kind: 'rejected', code: 'subagent_failed' });
+  } finally {
+    await runtime.close();
+    unregister();
+    budget.dispose();
+    await session.close();
+  }
+});
+
 test('a parent and its child pause their shared execution budget while the child waits for approval', { timeout: 15_000 }, async (t) => {
   const originalNow = Object.getOwnPropertyDescriptor(performance, 'now');
   t.after(() => {

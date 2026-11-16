@@ -399,6 +399,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
       else if (record.state === 'failed' && typeof nested?.code === 'string') record.errorCode = nested.code;
       record.updatedAt = Date.now();
       record.completedAt = record.updatedAt;
+      if (!started) ready.reject(new KernelError(record.errorCode ?? 'subagent_failed'));
       return result;
     }, (error: unknown) => {
       record.state = controller.signal.aborted ? 'cancelled' : 'failed';
