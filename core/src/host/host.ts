@@ -2330,6 +2330,7 @@ export function createHost({
       telemetry,
       requestDiagnosticsEnabled: () => state.requestDiagnostics.enabled,
       onRequestDiagnostic: (diagnostic) => appendRequestDiagnostic(state.requestDiagnostics, diagnostic),
+      onSubrunMessageAccepted: (runId) => settleRunAsks(state, runId),
       createMcp: async (childId, childMedia) => {
         const servers = await Promise.all(mcpConfigs.map(server => server.name === BROWSER_SERVER ? browser.session(childId) : server));
         const childRegistry = createMcpRegistry(servers, { toolPolicy: browserToolPolicy, assertServerAccess: assertMcpAccess,

@@ -31,6 +31,7 @@ type ChatRequestBody = {
 type ToolOperation = { tool?: string; args?: unknown; toolCalls?: unknown[] };
 
 type RequestedCall = { tool: string; args?: unknown };
+type ProviderReply = { readonly toolCalls?: readonly RequestedCall[]; readonly text?: string };
 
 type TestConfig = ConfigSnapshot & {
   boundary: string;
@@ -63,6 +64,7 @@ type AgentControlOption = HostOptions['agentControl'];
 export type TuiHostOptions = {
   delayMs?: number;
   beforeResponse?: (body: ChatRequestBody) => void | Promise<void>;
+  providerReply?: (body: ChatRequestBody) => ProviderReply | undefined | Promise<ProviderReply | undefined>;
   setup?: (paths: TuiHostSetupPaths) => void | Promise<void>;
   config?: Record<string, unknown>;
   interactive?: boolean;
@@ -125,6 +127,7 @@ function requestedCallsOf(operation: ToolOperation | undefined): RequestedCall[]
 export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TResult | Promise<TResult>, {
   delayMs = 0,
   beforeResponse,
+  providerReply,
   setup,
   config: extra = {},
   interactive = false,
@@ -168,16 +171,17 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
       const body = JSON.parse(rawBody.toString('utf8')) as ChatRequestBody;
       providerRequests.push(body);
       await beforeResponse?.(body);
+      const reply = await providerReply?.(body);
       const lastUser = [...body.messages].reverse().find((message) => message.role === 'user');
       if (typeof lastUser?.content !== 'string') throw new Error('tui_host_user_message_missing');
       let operation: ToolOperation | undefined;
       try { operation = JSON.parse(lastUser.content) as ToolOperation; } catch { /* 普通文本走回显服务。 */ }
       const finalMessage = body.messages.at(-1);
       if (finalMessage === undefined) throw new Error('tui_host_messages_missing');
-      const requestedCalls = requestedCallsOf(operation);
-      const calls = finalMessage.role === 'tool' ? [] : requestedCalls.filter((call) =>
+      const requestedCalls = reply?.toolCalls ?? requestedCallsOf(operation);
+      const calls = finalMessage.role === 'tool' && reply?.toolCalls === undefined ? [] : requestedCalls.filter((call) =>
         body.tools?.some((tool) => tool.function.name === call.tool) === true);
-      const answer = `Local response: ${finalMessage.role === 'tool' ? finalMessage.content : lastUser.content}`;
+      const answer = reply?.text ?? `Local response: ${finalMessage.role === 'tool' ? finalMessage.content : lastUser.content}`;
       if (delayMs > 0) await delay(delayMs);
       if (response.destroyed) return;
       const frames = [

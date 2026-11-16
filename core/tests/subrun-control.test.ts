@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { createPermissionContext } from '../dist/kernel/permission.js';
 import { withTuiHost, waitFor } from './helpers/tui-host.ts';
+
+const fullAccess = createPermissionContext('full-access', 'unrestricted', {
+  filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+});
 
 test('P10 Host publishes one set of independently controllable subrun tools', async () => {
   await withTuiHost(async ({ client, sessionId }) => {
@@ -142,6 +149,136 @@ test('Host routes child steering, timeout wait, isolated cancellation, and persi
   } finally {
     releaseChild();
     releaseSibling();
+    releaseParent();
+  }
+});
+
+test('the model subagent_message tool invalidates a child approval before a late allow', { timeout: 30_000 }, async () => {
+  let releaseApproval!: (value: unknown) => void;
+  let releaseParent!: () => void;
+  const approvalReply = new Promise<unknown>((resolve) => { releaseApproval = resolve; });
+  const parentGate = new Promise<void>((resolve) => { releaseParent = resolve; });
+  let childReference: { subrunId: string; sessionId: string; runId: string } | undefined;
+  let parentStartSent = false;
+  let childCreateSent = false;
+  let childMessageSent = false;
+  let parentMessageHeld = false;
+  let approvalWasRequested = false;
+
+  const parseChildReference = (body: { messages: { role: string; content?: unknown }[] }) => {
+    for (const message of body.messages) {
+      if (message.role !== 'tool' || typeof message.content !== 'string') continue;
+      try {
+        const parsed = JSON.parse(message.content) as Record<string, unknown>;
+        const content = typeof parsed.content === 'object' && parsed.content !== null
+          ? parsed.content as Record<string, unknown> : parsed;
+        if (typeof content.subrunId === 'string' && typeof content.sessionId === 'string' && typeof content.runId === 'string') {
+          return { subrunId: content.subrunId, sessionId: content.sessionId, runId: content.runId };
+        }
+      } catch { /* Other tool results are not child references. */ }
+    }
+    return undefined;
+  };
+
+  try {
+    await withTuiHost(async ({ client, sessionId, projectDirectory, providerRequests }) => {
+      await client.request('workspace.trust', {
+        projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
+      });
+      client.onRequest((request) => {
+        if (request.method !== 'approval.request') return undefined;
+        approvalWasRequested = true;
+        return approvalReply;
+      });
+
+      const submitted = await client.request('run.submit', { sessionId, input: 'parent-start-child' }) as { runId: string };
+      assert.equal(typeof submitted.runId, 'string');
+      const requestsSeen = () => JSON.stringify({
+        requests: providerRequests.map((body) => ({
+          user: [...body.messages].reverse().find((message) => message.role === 'user')?.content,
+          tools: body.tools?.map((tool) => tool.function.name),
+        })),
+        parentStartSent, childCreateSent, childMessageSent, parentMessageHeld,
+      });
+      try {
+        await waitFor(() => approvalWasRequested, { within: 5_000, read: requestsSeen });
+      } catch (error) {
+        const record = await client.request('session.read', { sessionId, fullResults: true }) as {
+          events: { kind?: string; tool?: string; result?: unknown }[];
+        };
+        throw new Error(`${error instanceof Error ? error.message : 'approval_request_missing'}\n${JSON.stringify(record.events.filter((event) => event.kind === 'tool'))}`);
+      }
+      try {
+        await waitFor(() => parentMessageHeld, { within: 5_000, read: requestsSeen });
+      } catch (error) {
+        const record = await client.request('session.read', { sessionId, fullResults: true }) as {
+          events: { kind?: string; tool?: string; result?: unknown }[];
+        };
+        throw new Error(`${error instanceof Error ? error.message : 'model_subagent_message_missing'}\n${JSON.stringify(record.events.filter((event) => event.kind === 'tool'))}`);
+      }
+      releaseApproval({ decision: 'allow' });
+      releaseParent();
+      await client.request('run.wait', { sessionId, runId: submitted.runId });
+
+      assert.ok(childReference, 'the parent model call must start a child Run');
+      const childRecord = await client.request('session.read', {
+        sessionId: childReference.sessionId, fullResults: true,
+      }) as { events: { kind?: string; tool?: string; result?: { failed?: boolean; code?: string } }[] };
+      const create = childRecord.events.find((event) => event.kind === 'tool' && event.tool === 'create');
+      assert.equal(existsSync(join(projectDirectory, 'subagent-message-must-not-create.txt')), false,
+        'a late allow from the approval prompt must not apply after subagent_message was accepted');
+      assert.equal(create?.result?.failed, true);
+      assert.equal(create?.result?.code, 'policy_approval_cancelled');
+    }, {
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      config: {
+        policy: { mode: 'auto', rules: [{ tool: 'create', decision: 'ask' }] },
+        loop: { iterations: 8, modelCalls: 16, maxConcurrentSubagents: 3 },
+      },
+      testDirectory: 'testplace/tmp',
+      providerReply: async (body) => {
+        const lastUser = [...body.messages].reverse().find((message) => message.role === 'user')?.content;
+        const tools = new Set(body.tools?.map((tool) => tool.function.name));
+        if (tools.has('subagent_start') && lastUser === 'parent-start-child' && !parentStartSent) {
+          parentStartSent = true;
+          return { toolCalls: [{ tool: 'subagent_start', args: { task: 'child-create-pending-approval' } }] };
+        }
+        if (!tools.has('subagent_start') && tools.has('create')
+          && lastUser === 'child-create-pending-approval' && !childCreateSent) {
+          childCreateSent = true;
+          return { toolCalls: [{ tool: 'create', args: {
+            path: 'subagent-message-must-not-create.txt', content: 'must not be written',
+          } }] };
+        }
+        if (tools.has('subagent_message') && !childMessageSent) {
+          childReference = parseChildReference(body);
+          if (childReference === undefined) throw new Error('subagent_start_result_missing_from_parent_request');
+          await waitFor(() => approvalWasRequested, { within: 5_000 });
+          childMessageSent = true;
+          return { toolCalls: [{ tool: 'subagent_message', args: {
+            subrunId: childReference.subrunId,
+            runId: childReference.runId,
+            input: 'Do not create subagent-message-must-not-create.txt.',
+          } }] };
+        }
+        if (tools.has('subagent_message') && childMessageSent && !parentMessageHeld
+          && body.messages.some((message) => message.role === 'tool'
+            && typeof message.content === 'string' && message.content.includes('"state":"accepted"'))) {
+          parentMessageHeld = true;
+          await parentGate;
+          return { text: 'parent finished' };
+        }
+        if (!tools.has('subagent_message') && body.messages.some((message) => message.role === 'user'
+          && typeof message.content === 'string' && message.content.includes('Do not create subagent-message-must-not-create.txt.'))) {
+          return { text: 'I will follow the new instruction.' };
+        }
+        return { text: 'No further action.' };
+      },
+    });
+  } finally {
+    releaseApproval({ decision: 'allow' });
     releaseParent();
   }
 });

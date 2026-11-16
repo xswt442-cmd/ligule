@@ -87,6 +87,7 @@ export interface SubagentDeps {
   telemetry?: Telemetry;
   requestDiagnosticsEnabled?: () => boolean;
   onRequestDiagnostic?: (diagnostic: RequestDiagnostic) => void;
+  onSubrunMessageAccepted?: (runId: string) => void;
   parentSession?: SessionLog;
   extensionHooks?: () => ExtensionHookRegistry | undefined;
 }
@@ -973,7 +974,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
           }, required: ['subrunId', 'runId', 'input'] },
           run: async (args: { subrunId: string; runId: string; input: string }, context: SubagentCallContext) => {
             if (context.runId === undefined) throw new KernelError('subagent_parent_run_unavailable');
-            return await message({ ...args, parentRunId: context.runId }, 'controller');
+            return await message({ ...args, parentRunId: context.runId }, 'controller', () => deps.onSubrunMessageAccepted?.(args.runId));
           },
         }),
         kernel.register({
