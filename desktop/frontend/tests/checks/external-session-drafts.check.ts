@@ -8,6 +8,12 @@ import {
   updateExternalSessionDrafts,
   type ExternalSessionDrafts,
 } from '../../src/external-session-drafts.ts';
+import {
+  clearSessionDraftIfCurrent,
+  sessionDraftRevisionFor,
+  updateSessionDraftRevision,
+  type SessionDraftRevisions,
+} from '../../src/session-draft-revisions.ts';
 
 test('external guidance drafts survive composer remounts and remain isolated by session', () => {
   let drafts: ExternalSessionDrafts = new Map();
@@ -44,4 +50,22 @@ test('a send completion clears only the exact draft revision it submitted', () =
   drafts = clearExternalSessionDraftIfCurrent(drafts, 'session-a', reenteredRevision);
   assert.equal(externalSessionDraftFor(drafts, 'session-a'), '');
   assert.equal(externalSessionDraftRevisionFor(drafts, 'session-a'), reenteredRevision + 1);
+});
+
+test('a background send clears only its session draft revision after a session switch', () => {
+  let drafts: SessionDraftRevisions = new Map();
+  const keyA = JSON.stringify(['/project-a', 'session-a']);
+  const keyB = JSON.stringify(['/project-b', 'session-b']);
+  drafts = updateSessionDraftRevision(drafts, keyA, 'sent from A');
+  const sentRevision = sessionDraftRevisionFor(drafts, keyA);
+  drafts = updateSessionDraftRevision(drafts, keyB, 'keep the draft in B');
+  drafts = clearSessionDraftIfCurrent(drafts, keyA, sentRevision);
+  assert.equal(drafts.get(keyA)?.text, '');
+  assert.equal(drafts.get(keyB)?.text, 'keep the draft in B');
+
+  drafts = updateSessionDraftRevision(drafts, keyA, 'new draft in A');
+  const newerRevision = sessionDraftRevisionFor(drafts, keyA);
+  drafts = clearSessionDraftIfCurrent(drafts, keyA, sentRevision);
+  assert.equal(drafts.get(keyA)?.text, 'new draft in A', 'a late response cannot erase a newer draft after A is reopened');
+  assert.equal(sessionDraftRevisionFor(drafts, keyA), newerRevision);
 });

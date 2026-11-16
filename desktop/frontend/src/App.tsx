@@ -39,6 +39,7 @@ import { notificationOf, notificationTarget, type NotificationKind, type Notific
 import { SessionStreamBuffer } from './session-stream';
 import { observeExternalSession } from './external-session-observation';
 import { clearExternalSessionDraftIfCurrent, externalSessionDraftFor, externalSessionDraftRevisionFor, updateExternalSessionDrafts, type ExternalSessionDrafts } from './external-session-drafts';
+import { clearSessionDraftIfCurrent, sessionDraftRevisionFor, updateSessionDraftRevision, type SessionDraftRevisions } from './session-draft-revisions';
 import { Composer } from './components/Composer';
 import { ExternalSessionComposer, ExternalSessionControlPanel } from './components/ExternalSessionControlPanel';
 import type { MentionState } from './mentions';
@@ -229,7 +230,7 @@ export function App({ transport }: { transport: Transport }) {
   const [newSessionPolicy, setNewSessionPolicy] = useState<PolicySelection | null>(null);
   const [newSessionPermission, setNewSessionPermission] = useState<PermissionTarget>(DEFAULT_NEW_SESSION_PERMISSION);
   const [newSessionPermissionConfirmations, setNewSessionPermissionConfirmations] = useState<PermissionConfirmations>(NO_PERMISSION_CONFIRMATIONS);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraftState] = useState('');
   const [caret, setCaret] = useState(0);
   // `@` 路径候选由 Host 提供，前端不扫描项目目录。
   const [mention, setMention] = useState<MentionState | null>(null);
@@ -407,6 +408,32 @@ export function App({ transport }: { transport: Transport }) {
   const prefsSettled = useRef<Promise<void>>(Promise.resolve());
   const [settingsReady, setSettingsReady] = useState(false);
   const unsavedInputs = useRef(new Map<string, { root: string; id: string; draft?: string; items?: string[] }>());
+  const draftRevisions = useRef<SessionDraftRevisions>(new Map());
+  const draftState = useRef(draft);
+  draftState.current = draft;
+  const draftOwnerState = useRef({ root: projectRoot, id: inputOwner ?? sessionId ?? '$new' });
+  draftOwnerState.current = {
+    root: projectRoot || notificationSessions.current.get(inputOwner ?? sessionId ?? '$new')?.root || '',
+    id: inputOwner ?? sessionId ?? '$new',
+  };
+  const inputOwnerState = useRef(inputOwner);
+  inputOwnerState.current = inputOwner;
+  const setDraft = useCallback((
+    update: string | ((current: string) => string),
+    owner: { root: string; id: string } | null = draftOwnerState.current,
+  ) => {
+    const previous = draftState.current;
+    const next = typeof update === 'function' ? update(previous) : update;
+    if (next !== previous && owner !== null) {
+      const key = JSON.stringify([owner.root, owner.id]);
+      draftRevisions.current = updateSessionDraftRevision(draftRevisions.current, key, next);
+      unsavedInputs.current.set(key, {
+        ...unsavedInputs.current.get(key), root: owner.root, id: owner.id, draft: next,
+      });
+    }
+    draftState.current = next;
+    setDraftState(next);
+  }, []);
   const [prefsFailure, setPrefsFailure] = useState<string | null>(null);
   const [prefsDetails, setPrefsDetails] = useState('');
   const [prefsRevision, setPrefsRevision] = useState(0);
@@ -523,6 +550,7 @@ export function App({ transport }: { transport: Transport }) {
     const draftId = sessionId ?? '$new';
     const remember = (root: string, id: string, value: { draft?: string; items?: string[] }) => {
       const key = JSON.stringify([root, id]);
+      if (value.draft !== undefined && draftRevisions.current.get(key)?.text !== value.draft) return;
       unsavedInputs.current.set(key, { ...unsavedInputs.current.get(key), root, id, ...value });
     };
     if (inputOwner === sessionId) remember(projectRoot, draftId, { draft });
@@ -807,13 +835,13 @@ export function App({ transport }: { transport: Transport }) {
       const storedDraft = unsaved?.draft ?? stored.drafts[root]?.[id] ?? '';
       const restored = unsaved?.items ?? stored.queued[root]?.[id] ?? [];
       if (observing) {
-        setDraft('');
+        setDraft('', null);
       } else if (reclaimQueue && restored.length > 0) {
         // 重连后将队列按顺序移回草稿并清空队列，不自动发送任何内容。
-        setDraft(mergeQueueIntoDraft(storedDraft, restored));
+        setDraft(mergeQueueIntoDraft(storedDraft, restored), { root, id });
         patchQueue(id, () => ({ items: [], paused: false }));
       } else {
-        setDraft(storedDraft);
+        setDraft(storedDraft, { root, id });
         patchQueue(id, () => ({ items: restored, paused: restored.length > 0 }));
       }
       setReadOnlySessionId(observing ? id : null);
@@ -1223,6 +1251,14 @@ export function App({ transport }: { transport: Transport }) {
     const text = draft;
     if (quitting.current || reading || own === null || readOnlySessionId === own || inputOwner !== own
       || !runningIds.includes(own) || text.trim() === '') return;
+    const draftKey = JSON.stringify([projectRoot, own]);
+    if (draftRevisions.current.get(draftKey)?.text !== text) {
+      draftRevisions.current = updateSessionDraftRevision(draftRevisions.current, draftKey, text);
+      unsavedInputs.current.set(draftKey, {
+        ...unsavedInputs.current.get(draftKey), root: projectRoot, id: own, draft: text,
+      });
+    }
+    const submittedRevision = sessionDraftRevisionFor(draftRevisions.current, draftKey);
     const inView = () => active.current === own;
     try {
       const current = await client.call('status.get', { sessionId: own }, 10_000) as Status;
@@ -1236,9 +1272,26 @@ export function App({ transport }: { transport: Transport }) {
         (written) => setHistory((written as { entries: string[] }).entries),
         () => setHistory((entries) => [text, ...entries.filter((item) => item !== text)]),
       );
+      const currentRevisions = draftRevisions.current;
+      const clearedRevisions = clearSessionDraftIfCurrent(currentRevisions, draftKey, submittedRevision);
+      if (clearedRevisions !== currentRevisions) {
+        draftRevisions.current = clearedRevisions;
+        const cached = unsavedInputs.current.get(draftKey);
+        unsavedInputs.current.set(draftKey, { ...cached, root: projectRoot, id: own, draft: '' });
+        setSettings((current) => {
+          const drafts = { ...current.drafts };
+          const projectDrafts = { ...(drafts[projectRoot] ?? {}) };
+          delete projectDrafts[own];
+          if (Object.keys(projectDrafts).length === 0) delete drafts[projectRoot];
+          else drafts[projectRoot] = projectDrafts;
+          return { ...current, drafts };
+        });
+        if (active.current === own && inputOwnerState.current === own && draftState.current === text) {
+          setDraft('');
+          setWalk(-1);
+        }
+      }
       if (inView()) {
-        setDraft((currentDraft) => currentDraft === text ? '' : currentDraft);
-        setWalk(-1);
         setRows((currentRows) => [...currentRows, metaRow('meta',
           `输入已加入当前运行，待应用 ${accepted.pendingCount} 条${accepted.cancelledInteractions > 0 ? `；已取消 ${accepted.cancelledInteractions} 个等待答复` : ''}`,
           `Input added to the active run; ${accepted.pendingCount} pending${accepted.cancelledInteractions > 0 ? `; cancelled ${accepted.cancelledInteractions} pending interactions` : ''}`)]);
@@ -1247,7 +1300,7 @@ export function App({ transport }: { transport: Transport }) {
       if (inView()) setRows((currentRows) => [...currentRows,
         metaRow('error', `当前运行未收到输入：${code(error)}`, `The active run did not receive the input: ${code(error)}`)]);
     }
-  }, [client, draft, inputOwner, readOnlySessionId, reading, runningIds, sessionId]);
+  }, [client, draft, inputOwner, projectRoot, readOnlySessionId, reading, runningIds, sessionId, setDraft]);
 
   // `own` 指定取消目标会话；默认取消当前前台会话。
   const cancel = useCallback(async (own = sessionId) => {
