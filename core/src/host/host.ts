@@ -278,7 +278,7 @@ interface HostSessionBase {
   reviewer?: SessionReviewer;
   activeRunId?: string;
   runSteering?: RunSteeringInbox;
-  runInputRevision?: number;
+  runInputRevisions?: Map<string, number>;
   subagents?: SubagentRuntime;
   readonly id: string;
   readonly search: SearchStatus;
@@ -422,6 +422,15 @@ function settleRunAsks(state: HostSessionBase, runId: string): string[] {
   const pending = [...(state.asksByRun.get(runId) ?? [])];
   for (const ask of pending) ask.settle();
   return pending.map((ask) => ask.requestId);
+}
+
+function runInputRevisionOf(state: HostSessionBase, runId: string | undefined): number {
+  return runId === undefined ? 0 : state.runInputRevisions?.get(runId) ?? 0;
+}
+
+function advanceRunInputRevision(state: HostSessionBase, runId: string): void {
+  const revisions = state.runInputRevisions ??= new Map();
+  revisions.set(runId, runInputRevisionOf(state, runId) + 1);
 }
 
 function modelConfigOf(config: HostConfigSnapshot): Record<string, unknown> {
@@ -2054,9 +2063,9 @@ export function createHost({
           ? ['session', ...(state.environment.store === undefined ? [] : ['project' as const, 'user' as const])]
           : [];
         const requestId = randomUUID();
-        const requestSteeringRevision = state.runInputRevision ?? 0;
         const childRunId = currentKernelExecutionContext()?.runId;
         const interactionRunId = childRunId ?? state.activeRunId;
+        const requestSteeringRevision = runInputRevisionOf(state, interactionRunId);
         let summary;
         try {
           summary = summarizeApproval({
@@ -2098,7 +2107,7 @@ export function createHost({
               rememberScopes,
               ...(scriptBinding === undefined ? {} : { scriptBinding }),
             }).then(async (value) => {
-              if (!approvalActive || requestSteeringRevision !== (state.runInputRevision ?? 0)) {
+              if (!approvalActive || requestSteeringRevision !== runInputRevisionOf(state, interactionRunId)) {
                 return { decision: 'cancelled' as const, code: 'policy_approval_cancelled' };
               }
               const response = isRecord(value) ? value : value === true ? { decision: 'allow' } : value === false ? { decision: 'deny' } : {};
@@ -2282,9 +2291,9 @@ export function createHost({
     // 提问和审批走不同流程；只有支持交互回答的客户端才注册提问工具。
     const asked = interactive === false ? [] : [createAskUserPlugin({
       ask: async (questions) => {
-        const questionSteeringRevision = state.runInputRevision ?? 0;
         const childRunId = currentKernelExecutionContext()?.runId;
         const interactionRunId = childRunId ?? state.activeRunId;
+        const questionSteeringRevision = runInputRevisionOf(state, interactionRunId);
         const requestId = randomUUID();
         let settle = (): void => {};
         const cancelled = new Promise<'cancelled'>((resolve) => {
@@ -2299,7 +2308,7 @@ export function createHost({
           const outcome = await Promise.race([
             // 交互等待受整次任务累计等待预算约束。
             connection.request(QUESTION_METHOD, { requestId, sessionId: id, projectRoot: env.projectRoot, questions }).then((value) => {
-              if (questionSteeringRevision !== (state.runInputRevision ?? 0)) {
+              if (questionSteeringRevision !== runInputRevisionOf(state, interactionRunId)) {
                 throw new KernelError('ask_user_cancelled', { detail: `${id}: the question was superseded by steering input` });
               }
               return value;
@@ -3136,7 +3145,7 @@ export function createHost({
     if (state.running !== undefined) throw new KernelError('run_already_running');
     const steering = createRunSteeringInbox(state.session, acceptance.runId);
     state.runSteering = steering;
-    state.runInputRevision = 0;
+    state.runInputRevisions = new Map();
     state.activeRunId = acceptance.runId;
     try {
       return await execute(state, async (signal, report) => {
@@ -4002,7 +4011,7 @@ export function createHost({
           const source = runOriginOf(undefined, 'human', mayRecordHumanRun(controlTrust, bridge));
           let cancelledInteractionIds: string[] = [];
           const accepted = await steering.accept(source, requiredString(message.params.input, 'input'), () => {
-            state.runInputRevision = (state.runInputRevision ?? 0) + 1;
+            advanceRunInputRevision(state, runId);
             cancelledInteractionIds = settleRunAsks(state, runId);
           });
           return { ...accepted, cancelledInteractions: cancelledInteractionIds.length, cancelledInteractionIds };

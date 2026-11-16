@@ -282,3 +282,82 @@ test('the model subagent_message tool invalidates a child approval before a late
     releaseParent();
   }
 });
+
+test('steering a parent does not invalidate a child Run approval', { timeout: 30_000 }, async () => {
+  let releaseApproval!: (value: unknown) => void;
+  let markApprovalRequested!: () => void;
+  let releaseParentRequest!: () => void;
+  let markParentRequestStarted!: () => void;
+  const approvalReply = new Promise<unknown>((resolve) => { releaseApproval = resolve; });
+  const approvalRequested = new Promise<void>((resolve) => { markApprovalRequested = resolve; });
+  const parentRequestGate = new Promise<void>((resolve) => { releaseParentRequest = resolve; });
+  const parentRequestStarted = new Promise<void>((resolve) => { markParentRequestStarted = resolve; });
+
+  try {
+    await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+      await client.request('workspace.trust', {
+        projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
+      });
+      client.onRequest((request) => {
+        if (request.method !== 'approval.request') return undefined;
+        markApprovalRequested();
+        return approvalReply;
+      });
+
+      const parent = await client.request('run.submit', {
+        sessionId, input: 'parent-held-for-child-approval',
+      }) as { runId: string };
+      await parentRequestStarted;
+      const child = await client.request('subrun.start', {
+        sessionId, parentRunId: parent.runId, task: 'child-create-after-parent-steer',
+      }) as { subrunId: string; sessionId: string; runId: string };
+      await approvalRequested;
+
+      const accepted = await client.request('run.steer', {
+        sessionId, runId: parent.runId, input: 'Continue the parent while its child waits for approval.',
+      }) as { cancelledInteractions: number };
+      assert.equal(accepted.cancelledInteractions, 0, 'the parent has no pending interaction to cancel');
+
+      releaseParentRequest();
+      releaseApproval({ decision: 'allow' });
+      await client.request('run.wait', { sessionId, runId: parent.runId });
+      const childRecord = await client.request('session.read', { sessionId: child.sessionId, fullResults: true }) as {
+        events: { kind?: string; tool?: string; result?: { failed?: boolean; code?: string } }[];
+      };
+      const create = childRecord.events.find((event) => event.kind === 'tool' && event.tool === 'create');
+      assert.equal(create?.result?.failed, false, JSON.stringify(create));
+      assert.equal(existsSync(join(projectDirectory, 'parent-steer-child-approval.txt')), true,
+        'a late child approval remains valid when only the parent Run was steered');
+    }, {
+      permission: fullAccess,
+      permissionControl: true,
+      modeName: 'full',
+      config: {
+        policy: { mode: 'auto', rules: [{ tool: 'create', decision: 'ask' }] },
+        loop: { iterations: 8, modelCalls: 16, maxConcurrentSubagents: 3 },
+      },
+      testDirectory: 'testplace/tmp',
+      beforeResponse: async (body) => {
+        const lastUser = [...body.messages].reverse().find((message) => message.role === 'user')?.content;
+        if (lastUser === 'parent-held-for-child-approval') {
+          markParentRequestStarted();
+          await parentRequestGate;
+        }
+      },
+      providerReply: (body) => {
+        const lastUser = [...body.messages].reverse().find((message) => message.role === 'user')?.content;
+        const tools = new Set(body.tools?.map((tool) => tool.function.name));
+        if (lastUser === 'parent-held-for-child-approval') return { text: 'parent finished safely' };
+        if (lastUser === 'child-create-after-parent-steer' && tools.has('create')) {
+          return { toolCalls: [{ tool: 'create', args: {
+            path: 'parent-steer-child-approval.txt', content: 'child approval remains scoped to the child Run',
+          } }] };
+        }
+        return { text: 'no further action' };
+      },
+    });
+  } finally {
+    releaseApproval({ decision: 'allow' });
+    releaseParentRequest();
+  }
+});
