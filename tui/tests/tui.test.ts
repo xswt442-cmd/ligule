@@ -40,7 +40,7 @@ try {
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
 const mcpServerFixture = fileURLToPath(new URL('../../tests/fixtures/mcp-minimal.mjs', import.meta.url));
-const { foldText, editDraft, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, subrunReferenceOf, parseSubrunCommand, requestDiagnosticLines, detailTitle, routeInput, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
+const { foldText, editDraft, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, subrunReferenceOf, parseSubrunCommand, requestDiagnosticLines, detailTitle, routeInput, clearCancelledLocalQuestion, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
 // 界面记录只带界面关心的字段；测试直接写这种不带 `seq` 的投影输入。
 const projectRecord = rows.projectRecord as (record: Record<string, unknown>, locale?: Locale) => TranscriptItem[];
 const quoted = (value: string) => `"${value.replaceAll('"', '\\"')}"`;
@@ -106,6 +106,19 @@ test('a slash line the UI table does not own goes to the host as one message', o
   // 运行中的命令不可用时，应与未知命令返回不同的提示。
   assert.deepEqual(routeInput('/new', true), { kind: 'blocked', usage: '/new' });
   assert.deepEqual(routeInput('/new', false), { kind: 'command', name: 'new', argument: '' });
+});
+
+test('/steer clears only the matching local question cancelled by the Host', options, () => {
+  const local = { id: 'question-a', questions: [], at: 0, picked: {} };
+  const newer = { id: 'question-b', questions: [], at: 0, picked: {} };
+  const external = { id: 'question-a', questions: [], at: 0, picked: {}, external: true };
+  assert.equal(clearCancelledLocalQuestion(local, 'question-a', 1), null);
+  assert.equal(clearCancelledLocalQuestion(newer, 'question-a', 1), newer,
+    'a late steering response must not clear a newer question');
+  assert.equal(clearCancelledLocalQuestion(external, 'question-a', 1), external,
+    'external question state remains owned by its Host snapshot');
+  assert.equal(clearCancelledLocalQuestion(local, 'question-a', 0), local,
+    'a steer that cancelled no interactions leaves the question open');
 });
 
 test('the draft edits around a caret instead of only appending', options, () => {

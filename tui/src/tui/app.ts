@@ -446,6 +446,15 @@ interface QuestionState {
   readonly external?: boolean;
 }
 
+export function clearCancelledLocalQuestion<T extends { readonly id: string; readonly external?: boolean }>(
+  current: T | null,
+  requestId: string | undefined,
+  cancelledInteractions: number,
+): T | null {
+  if (requestId === undefined || cancelledInteractions < 1 || current?.external === true || current?.id !== requestId) return current;
+  return null;
+}
+
 // 将命令表和纯函数导出，供测试及其他界面逻辑使用。
 export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, insertMention, mentionToken, parseSubrunCommand, resolveSessionId, routeInput, sessionLines } from './commands.js';
 export { activeRunBudgetSegment, buildStatusLine, contextSegment } from './status-line.js';
@@ -2416,6 +2425,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         push({ kind: 'error', text: t('用法：/steer <文字>', 'Usage: /steer <text>') });
         return;
       }
+      const pendingQuestionId = externalControl || query?.external === true ? undefined : query?.id;
       void (async () => {
         try {
           const current = externalControl
@@ -2434,6 +2444,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             : await client.request('run.steer', { sessionId, runId, input });
           const pendingCount = typeof accepted.pendingCount === 'number' ? accepted.pendingCount : 0;
           const cancelledInteractions = typeof accepted.cancelledInteractions === 'number' ? accepted.cancelledInteractions : 0;
+          if (cancelledInteractions > 0 && pendingQuestionId !== undefined) {
+            setQuery((current) => clearCancelledLocalQuestion(current, pendingQuestionId, cancelledInteractions));
+          }
           push({ kind: 'meta', text: t(
             `输入已加入当前运行，待应用 ${pendingCount} 条${cancelledInteractions > 0 ? `；已取消 ${cancelledInteractions} 个等待答复` : ''}`,
             `Input added to the active run; ${pendingCount} pending${cancelledInteractions > 0 ? `; cancelled ${cancelledInteractions} pending interactions` : ''}`,
@@ -2991,7 +3004,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, externalControl, finishSessionNavigation, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, externalControl, finishSessionNavigation, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
