@@ -2,9 +2,10 @@
 // 内核、判定链、会话记录与循环都是真的；提供方按脚本回答，因为它只负责把「下一步做什么」这件事说出来。
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   KernelError, createConfig, createDecisionChain, createKernel, createLoop, createSessionLog, createSubagentPlugin,
   createPermissionContext, minimalPlugin, networkPlugin,
@@ -875,5 +876,109 @@ test('the model-callable subagent controls start, inspect, steer, wait, and canc
     await runtime.close();
     unregister();
     await session.close();
+  }
+});
+
+test('subagent_wait observes failed child cleanup for zero and positive timeouts', { timeout: 20_000 }, async () => {
+  const temporaryRoot = join(process.cwd(), 'testplace', 'tmp');
+  await mkdir(temporaryRoot, { recursive: true });
+  const root = await mkdtemp(join(temporaryRoot, 'subagent-wait-cleanup-'));
+  const workspaceRoot = join(root, 'project');
+  const sessionDirectory = join(root, 'sessions');
+  await Promise.all([mkdir(workspaceRoot), mkdir(sessionDirectory)]);
+  const config = createConfig({ user: { boundary: workspaceRoot } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: sessionDirectory, id: 'wait-cleanup-parent' });
+  let reportCloseStarted!: () => void;
+  let releaseClose!: () => void;
+  const closeStarted = new Promise<void>((resolve) => { reportCloseStarted = resolve; });
+  const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
+  const provider = scripted([text('child completed before cleanup')]);
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  const parentRunId = '123e4567-e89b-42d3-a456-426614174000';
+  const runtime = createSubagentPlugin({
+    config, provider, chain, prompt: { staticPrefix: '' }, directory: session.directory,
+    sessionId: 'wait-cleanup-parent', plugins: [minimalPlugin],
+    createMcp: async () => ({
+      plugin: { name: 'empty-mcp-test', setup() { return () => {}; } },
+      async close() { reportCloseStarted(); await closeGate; throw new KernelError('subagent_mcp_close_failed'); },
+    }),
+  });
+  const unregister = runtime.setup(kernel);
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const child = await kernel.call('subagent_start', { task: 'finish and report cleanup failure' }, {
+      sessionId: 'wait-cleanup-parent', runId: parentRunId,
+    }) as { subrunId: string };
+    await closeStarted;
+    const immediate = await runtime.wait([child.subrunId], parentRunId, 0);
+    assert.equal(immediate.timedOut, true);
+    assert.equal(immediate.subruns[0]?.state, 'running');
+
+    releaseClose();
+    await delay(20);
+    assert.deepEqual(unhandled, [], 'a zero-timeout wait must not leave an unhandled aggregate Promise');
+    const waited = await kernel.call('subagent_wait', { subrunIds: [child.subrunId], timeoutMs: 5_000 }, {
+      sessionId: 'wait-cleanup-parent', runId: parentRunId,
+    }) as { timedOut: boolean; subruns: { state: string; errorCode?: string }[] };
+    assert.equal(waited.timedOut, false);
+    assert.equal(waited.subruns[0]?.state, 'failed');
+    assert.equal(waited.subruns[0]?.errorCode, 'subagent_mcp_close_failed');
+  } finally {
+    releaseClose();
+    process.off('unhandledRejection', onUnhandled);
+    unregister();
+    await runtime.close();
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('subagent_wait reads a completed child result after its live record is pruned', { timeout: 30_000 }, async () => {
+  const temporaryRoot = join(process.cwd(), 'testplace', 'tmp');
+  await mkdir(temporaryRoot, { recursive: true });
+  const root = await mkdtemp(join(temporaryRoot, 'subagent-pruned-result-'));
+  const workspaceRoot = join(root, 'project');
+  const sessionDirectory = join(root, 'sessions');
+  await Promise.all([mkdir(workspaceRoot), mkdir(sessionDirectory)]);
+  const config = createConfig({ user: { boundary: workspaceRoot } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: sessionDirectory, id: 'pruned-parent' });
+  const provider = scripted(Array.from({ length: 65 }, (_value, index) => text(`persisted child result ${index}`)));
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  const parentRunId = '123e4567-e89b-42d3-a456-426614174000';
+  const context = { sessionId: 'pruned-parent', runId: parentRunId };
+  const runtime = createSubagentPlugin({ config, provider, chain, prompt: { staticPrefix: '' },
+    directory: session.directory, sessionId: 'pruned-parent', parentSession: session, plugins: [minimalPlugin] });
+  const unregister = runtime.setup(kernel);
+  let firstSubrunId = '';
+  try {
+    for (let index = 0; index < 65; index += 1) {
+      const child = await kernel.call('subagent_start', { task: `child ${index}` }, context) as { subrunId: string };
+      if (index === 0) firstSubrunId = child.subrunId;
+      const waited = await kernel.call('subagent_wait', { subrunIds: [child.subrunId], timeoutMs: 5_000 }, context) as {
+        timedOut: boolean;
+        subruns: { state: string; result?: { text?: string; result?: { output?: { text?: string | null } } } }[];
+      };
+      assert.equal(waited.timedOut, false);
+      assert.equal(waited.subruns[0]?.state, 'completed');
+      assert.equal(waited.subruns[0]?.result?.text, `persisted child result ${index}`);
+    }
+
+    const pruned = await kernel.call('subagent_wait', { subrunIds: [firstSubrunId], timeoutMs: 5_000 }, context) as {
+      timedOut: boolean;
+      subruns: { state: string; result?: { text?: string; result?: { output?: { text?: string | null } } } }[];
+    };
+    assert.equal(pruned.timedOut, false);
+    assert.equal(pruned.subruns[0]?.state, 'completed');
+    assert.equal(pruned.subruns[0]?.result?.text, 'persisted child result 0');
+    assert.equal(pruned.subruns[0]?.result?.result?.output?.text, 'persisted child result 0');
+  } finally {
+    unregister();
+    await runtime.close();
+    await session.close();
+    await rm(root, { recursive: true, force: true });
   }
 });

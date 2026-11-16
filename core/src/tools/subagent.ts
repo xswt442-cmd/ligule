@@ -416,7 +416,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
     }
   }
 
-  async function persistedStatus(subrunId: string, parentRunId: string): Promise<SubrunStatus> {
+  async function persistedChild(subrunId: string, parentRunId: string) {
     if (deps.parentSession === undefined || !subrunId.startsWith(`${deps.sessionId}.sub-`)
       || subrunId.length > 160 || /[\\/\u0000-\u001f\u007f]/u.test(subrunId)) {
       throw new KernelError('subagent_not_found');
@@ -444,7 +444,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
       ? receipt.state : 'unknown';
     errorCode ??= result?.diagnostic?.code
       ?? (typeof terminal?.code === 'string' ? terminal.code : undefined);
-    return {
+    const status: SubrunStatus = {
       subrunId,
       sessionId: subrunId,
       runId: acceptance.runId,
@@ -465,6 +465,12 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
       ...(state === 'completed' || state === 'failed' || state === 'cancelled'
         ? { completedAt: Number.isFinite(startedAt) ? startedAt : 0 } : {}),
     };
+    const turnContext = child.events.filter(event => event.kind === 'turnContext' && event.userSeq === receipt.userSeq).at(-1);
+    return { status, result, turnContext };
+  }
+
+  async function persistedStatus(subrunId: string, parentRunId: string): Promise<SubrunStatus> {
+    return (await persistedChild(subrunId, parentRunId)).status;
   }
 
   async function status(subrunId: string, parentRunId: string): Promise<SubrunStatus> {
@@ -493,9 +499,9 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
     const missing = subrunIds.filter(id => !subruns.has(id));
     for (const id of missing) await persistedStatus(id, parentRunId);
     let timedOut = false;
-    const pending = Promise.all(records.map(record => record.work ?? Promise.resolve(record.result ?? {})));
     if (timeoutMs === 0) timedOut = records.some(record => record.state === 'starting' || record.state === 'running');
     else {
+      const pending = Promise.allSettled(records.map(record => record.work ?? Promise.resolve(record.result ?? {})));
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
@@ -508,7 +514,36 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
   }
 
   async function waitForResult(subrunId: string, parentRunId?: string): Promise<unknown> {
-    const record = findSubrun(subrunId, parentRunId);
+    const record = subruns.get(subrunId);
+    if (record === undefined) {
+      if (parentRunId === undefined) throw new KernelError('subagent_not_found');
+      const persisted = await persistedChild(subrunId, parentRunId);
+      if (persisted.status.state !== 'completed' || persisted.result === undefined
+        || typeof persisted.result.output.text !== 'string'
+        || !Number.isSafeInteger(persisted.result.usage.iterations)
+        || !Number.isSafeInteger(persisted.result.usage.modelCalls)) {
+        throw new KernelError(persisted.status.errorCode ?? 'run_result_unavailable');
+      }
+      const context = typeof persisted.turnContext === 'object' && persisted.turnContext !== null
+        ? persisted.turnContext as Record<string, unknown> : {};
+      const generation = typeof context.childGeneration === 'object' && context.childGeneration !== null
+        ? context.childGeneration as Record<string, unknown> : undefined;
+      const limits = typeof context.childLimits === 'object' && context.childLimits !== null
+        ? context.childLimits as Record<string, unknown> : undefined;
+      const mode = typeof context.mode === 'object' && context.mode !== null ? context.mode as Record<string, unknown> : undefined;
+      return {
+        text: persisted.result.output.text,
+        sessionId: subrunId,
+        path: join(deps.directory, `${subrunId}.jsonl`),
+        iterations: persisted.result.usage.iterations,
+        modelCalls: persisted.result.usage.modelCalls,
+        ...(generation === undefined ? {} : { generation }),
+        ...(limits === undefined ? {} : { limits }),
+        ...(mode === undefined ? {} : { mode: mode.name ?? null, modeDigest: mode.digest ?? null }),
+        result: persisted.result,
+      };
+    }
+    if (record.parentRunId !== parentRunId) throw new KernelError('subagent_not_found');
     const resumeParent = deps.taskBudget?.()?.suspendCurrentWork();
     try { return await record.work ?? record.result ?? viewOf(record); }
     finally { resumeParent?.(); }
@@ -990,8 +1025,18 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
             if (context.runId === undefined) throw new KernelError('subagent_parent_run_unavailable');
             const waited = await wait(args.subrunIds, context.runId, args.timeoutMs ?? 30_000);
             if (waited.timedOut) return waited;
-            const results = await Promise.all(args.subrunIds.map(id => waitForResult(id, context.runId!)));
-            return { timedOut: false, subruns: waited.subruns.map((item, index) => ({ ...item, result: results[index] })) };
+            const results = await Promise.all(args.subrunIds.map(async (id, index) => {
+              const state = waited.subruns[index]?.state;
+              if (state === 'failed' || state === 'unknown') return undefined;
+              try { return await waitForResult(id, context.runId!); }
+              catch (error) {
+                if (state === 'cancelled') return undefined;
+                throw error;
+              }
+            }));
+            return { timedOut: false, subruns: waited.subruns.map((item, index) => ({
+              ...item, ...(results[index] === undefined ? {} : { result: results[index] }),
+            })) };
           },
         }),
         kernel.register({
