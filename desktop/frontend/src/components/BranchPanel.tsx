@@ -24,6 +24,8 @@ function noteText(note: { kind: 'parent' | 'branch' | 'control'; code: string },
 export function BranchPanel({ client, sessionId, verbosity }: { client: Client; sessionId: string | null; verbosity: Verbosity }) {
   const t = useText();
   const requestGeneration = useRef(0);
+  const branchReadGeneration = useRef(0);
+  const messageRevision = useRef(0);
   const [branches, setBranches] = useState<Branch[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [shown, setShown] = useState<{ id: string; rows: Row[] } | null>(null);
@@ -33,9 +35,11 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
 
   useEffect(() => {
     const generation = ++requestGeneration.current;
+    branchReadGeneration.current += 1;
     setBranches([]);
     setSelectedId(null);
     setShown(null);
+    messageRevision.current += 1;
     setMessage('');
     setBusyId(null);
     setNote(null);
@@ -70,19 +74,20 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
     })();
     return () => {
       requestGeneration.current += 1;
+      branchReadGeneration.current += 1;
     };
   }, [client, sessionId]);
 
   const open = useCallback(async (branch: Branch) => {
-    const generation = ++requestGeneration.current;
+    const generation = ++branchReadGeneration.current;
     setSelectedId(branch.id);
     setNote(null);
     try {
       const { events } = await client.call('session.read', { sessionId: branch.id, fullResults: true }) as { events: Record_[] };
-      if (requestGeneration.current !== generation) return;
+      if (branchReadGeneration.current !== generation) return;
       setShown({ id: branch.id, rows: events.flatMap((record) => projectRecord(record)) });
     } catch (error) {
-      if (requestGeneration.current === generation) setNote({ kind: 'branch', code: code(error) });
+      if (branchReadGeneration.current === generation) setNote({ kind: 'branch', code: code(error) });
     }
   }, [client]);
 
@@ -141,6 +146,8 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
 
   const sendMessage = useCallback(async (branch: Branch) => {
     if (sessionId === null || branch.reference === undefined || message.trim() === '') return;
+    const submittedMessage = message;
+    const submittedRevision = messageRevision.current;
     const generation = ++requestGeneration.current;
     setBusyId(branch.id);
     setNote(null);
@@ -150,10 +157,13 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
         parentRunId: branch.reference.parentRunId,
         subrunId: branch.reference.subrunId,
         runId: branch.reference.runId,
-        input: message,
+        input: submittedMessage,
       }, 15_000);
       if (requestGeneration.current !== generation) return;
-      setMessage('');
+      if (messageRevision.current === submittedRevision) {
+        messageRevision.current += 1;
+        setMessage('');
+      }
       setNote({ kind: 'control', code: 'subrun_message_accepted' });
       const status = await client.call('subrun.status', {
         sessionId,
@@ -216,7 +226,10 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
       <form onSubmit={(event) => { event.preventDefault(); void sendMessage(selected); }}>
         <label>
           {t('补充输入', 'Message child')}
-          <input aria-label={t('补充输入', 'Message child')} value={message} onChange={(event) => setMessage(event.currentTarget.value)} />
+          <input aria-label={t('补充输入', 'Message child')} value={message} onChange={(event) => {
+            messageRevision.current += 1;
+            setMessage(event.currentTarget.value);
+          }} />
         </label>
         <button type="submit" disabled={busyId !== null || selected.state !== 'running' || message.trim() === ''}>
           {t('发送', 'Send')}
