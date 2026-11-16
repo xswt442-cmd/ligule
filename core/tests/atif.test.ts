@@ -127,6 +127,40 @@ test('ATIF keeps nested extension tool records out of the parent tool observatio
   }
 });
 
+test('ATIF includes child-run tool results and still omits nested extension results', async () => {
+  const testplace = resolve('testplace');
+  const directoryRoot = join(testplace, 'tmp');
+  await mkdir(directoryRoot, { recursive: true });
+  const directory = await mkdtemp(join(directoryRoot, 'ligule-atif-child-'));
+  const session = createSessionLog({ directory, id: 'child-session' });
+  try {
+    const acceptance = createRunAcceptance('child-session', 'inspect the child file', null, 'controller:subagent', undefined, undefined, {
+      sessionId: 'parent-session',
+      runId: '123e4567-e89b-42d3-a456-426614174000',
+      subrunId: 'child-session',
+      callId: 'parent-call',
+    });
+    const user = await session.append({ kind: 'user', text: 'inspect the child file', run: acceptance });
+    await session.append({ kind: 'assistant', text: 'I will inspect it', toolCalls: [
+      { id: 'child-tool-call', name: 'read', args: { path: 'note.txt' } },
+    ] });
+    await session.append({ kind: 'tool', tool: 'read', callId: 'child-tool-call', parentCallId: 'parent-call',
+      result: { kind: 'result', failed: false, content: 'child tool output' } });
+    await session.append({ kind: 'tool', tool: 'exec', callId: 'nested-extension-call', parentCallId: 'child-tool-call',
+      result: { kind: 'result', failed: false, content: 'nested extension output' } });
+
+    const trajectory = sessionTurnToAtif(await session.read(), source(acceptance, user), { includeSensitiveContent: true });
+    const agent = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls)!;
+    assert.deepEqual(agent.observation?.results.map((result) => [result.source_call_id, result.content]), [
+      ['child-tool-call', 'child tool output'],
+    ]);
+    assert.equal(JSON.stringify(trajectory).includes('nested extension output'), false);
+  } finally {
+    await session.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('ATIF preserves applied steering as a separate user step with its recorded source', async () => {
   const fixture = await makeSession({ steering: true });
   try {

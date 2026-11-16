@@ -154,6 +154,8 @@ export function sessionTurnToAtif(
   const user = ordered[userIndex];
   const runAcceptance = isObject(user.run) ? user.run : undefined;
   const actualRunId = typeof runAcceptance?.runId === 'string' ? runAcceptance.runId : undefined;
+  const parentage = isObject(runAcceptance?.parentage) ? runAcceptance.parentage : undefined;
+  const parentCallId = typeof parentage?.callId === 'string' ? parentage.callId : undefined;
   if (source.runId !== undefined && actualRunId !== source.runId) throw new TypeError('atif_run_id_mismatch');
   const runId = source.runId ?? actualRunId;
   const nextUser = ordered.slice(userIndex + 1).find((event) => event.kind === 'user');
@@ -224,7 +226,7 @@ export function sessionTurnToAtif(
     }
 
     if (event.kind === 'tool') {
-      if (typeof event.parentCallId === 'string') continue;
+      if (typeof event.parentCallId === 'string' && event.parentCallId !== parentCallId) continue;
       if (typeof event.callId !== 'string' || !callOwner.has(event.callId)) throw new TypeError('atif_tool_result_without_call');
       if (resultEvents.has(event.callId)) throw new TypeError('atif_tool_result_duplicate');
       const owner = callOwner.get(event.callId)!;
