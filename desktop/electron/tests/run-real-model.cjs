@@ -1194,7 +1194,8 @@ async function runChecks() {
       })()`);
       await waitFor(`document.querySelector('.composer-bar button.steer-button') !== null`, 5_000, 'steer_button_missing');
       await clickWithMouse('.composer-bar button.steer-button', 'steer_button_not_clickable');
-      await waitFor(`document.body.innerText.includes('输入已加入当前运行')`, 10_000, 'steer_acceptance_not_shown');
+      await waitFor(`document.body.innerText.includes('输入已加入当前运行')
+        || document.body.innerText.includes('Input added to the active run')`, 10_000, 'steer_acceptance_not_shown');
       const summary = await waitForSessionIdle(30_000, 'steer_turn_did_not_finish');
       assert.equal(await require('node:fs/promises').access(target).then(() => true, () => false), false,
         'steering_did_not_cancel_the_pending_write_approval');
