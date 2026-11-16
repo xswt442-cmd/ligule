@@ -150,6 +150,7 @@ async function requestHost(method, params = {}, timeoutMs = 60_000) {
   const id = nextId('real-model-rpc');
   const encoded = JSON.stringify({ id, method, params });
   const result = await evaluate(`(async () => {
+    window.__realModelRequestMethods.set(${JSON.stringify(id)}, ${JSON.stringify(method)});
     await window.liguleDesktop.sendHostFrame(${JSON.stringify(encoded)});
     const deadline = Date.now() + ${timeoutMs};
     while (Date.now() < deadline) {
@@ -157,7 +158,8 @@ async function requestHost(method, params = {}, timeoutMs = 60_000) {
       if (response !== undefined) return response;
       await new Promise(resolvePromise => setTimeout(resolvePromise, 25));
     }
-    throw Object.assign(new Error('real_model_host_rpc_timeout'), { code: 'real_model_host_rpc_timeout' });
+    window.__realModelRequestMethods.delete(${JSON.stringify(id)});
+    throw Object.assign(new Error('real_model_host_rpc_timeout:' + ${JSON.stringify(method)}), { code: 'real_model_host_rpc_timeout' });
   })()`);
   if (result.errorCode !== undefined) throw Object.assign(new Error('host_rpc_failed'), { code: result.errorCode });
   return result;
@@ -273,6 +275,7 @@ async function createApplication() {
   phase = 'subscribe_to_host_frames';
   await evaluate(`(() => {
     window.__realModelFrames = [];
+    window.__realModelRequestMethods = new Map();
     window.liguleDesktop.onHostFrame(raw => {
       try {
         const frame = JSON.parse(raw);
@@ -286,6 +289,16 @@ async function createApplication() {
         if (frame.result && typeof frame.result.operationId === 'string') safe.operationId = frame.result.operationId;
         if (frame.result && typeof frame.result.state === 'string') safe.operationState = frame.result.state;
         if (frame.result && Array.isArray(frame.result.pendingInteractions)) safe.pendingInteractionTypes = frame.result.pendingInteractions.map(item => item.type);
+        const requestMethod = window.__realModelRequestMethods.get(frame.id);
+        if (requestMethod === 'usage.diagnostics' && frame.result !== null && typeof frame.result === 'object') {
+          safe.result = {
+            enabled: frame.result.enabled === true,
+            entries: Array.isArray(frame.result.entries) ? frame.result.entries.map(entry => ({
+              status: typeof entry?.status === 'string' ? entry.status : 'unknown',
+              promptContentIncluded: JSON.stringify(entry).includes('desktop-request-diagnostics-proof'),
+            })) : [],
+          };
+        }
         if (frame.error && typeof frame.error.code === 'string') safe.errorCode = frame.error.code;
         if (frame.event && typeof frame.event.type === 'string') safe.deltaType = frame.event.type;
         if (frame.method === 'approval.request') safe.approvalTool = frame.params?.tool;
@@ -313,6 +326,7 @@ async function createApplication() {
           }));
         }
         window.__realModelFrames.push(safe);
+        window.__realModelRequestMethods.delete(frame.id);
       } catch {}
     });
     return { href: location.href, methods: Object.keys(window.liguleDesktop).sort() };
@@ -1280,6 +1294,26 @@ async function runChecks() {
       }
       return '真实 Electron 窗口装载项目 Skill；MCP 披露工具可见，但未信任的 Server 在 Host 预检中被拒绝，未启动 MCP Server 或执行其工具';
     });
+
+    if (process.env.LIGULE_DESKTOP_TEST_REQUEST_DIAGNOSTICS === '1') {
+      await check(`${providerLabel}原生桌面请求诊断通道`, async () => {
+        if (typeof sessionId !== 'string') throw Object.assign(new Error('request_diagnostics_session_unavailable'), { code: 'request_diagnostics_session_unavailable' });
+        const enabled = await requestHost('usage.diagnostics', { sessionId, action: 'enable' });
+        assert.equal(enabled.result?.enabled, true, 'trusted_desktop_diagnostics_enable_failed');
+        await enterAndSend('desktop-request-diagnostics-proof');
+        await waitForSessionIdle(20_000, 'request_diagnostics_proof_turn_did_not_finish');
+        const snapshot = await requestHost('usage.diagnostics', { sessionId, action: 'read' });
+        assert.equal(snapshot.result?.enabled, true, 'trusted_desktop_diagnostics_read_failed');
+        assert.ok(Array.isArray(snapshot.result?.entries) && snapshot.result.entries.length > 0, 'native_window_request_was_not_recorded');
+        assert.ok(snapshot.result.entries.some(entry => entry.status === 'completed'), 'completed_native_window_request_missing');
+        assert.ok(snapshot.result.entries.every(entry => entry.promptContentIncluded === false),
+          'diagnostics_must_not_expose_the_prompt');
+        const cleared = await requestHost('usage.diagnostics', { sessionId, action: 'disable' });
+        assert.equal(cleared.result?.enabled, false);
+        assert.equal(cleared.result?.entries?.length, 0, 'disabling_must_clear_native_diagnostics');
+        return '真实 Electron 窗口通过可信 Host 通道启用、读取并清空请求诊断，记录实际本地 stub Provider 请求且不含提示正文';
+      });
+    }
   }
 
   await check(`${providerLabel}流式取消`, async () => {
@@ -1458,6 +1492,10 @@ async function cleanup() {
   } catch (error) {
     exitCode = 1;
     const code = stableErrorCode(error);
+    if (process.env.LIGULE_DESKTOP_TEST_REQUEST_DIAGNOSTICS === '1') {
+      const message = typeof error?.message === 'string' ? error.message.replace(/[A-Z]:\\[^\s)]+/giu, '[path]').slice(0, 160) : 'message_unknown';
+      console.error(`request_diagnostics_native_test_failure:${code}:${message}`);
+    }
     note(`${providerLabel}验收启动`, '失败', `阶段 ${phase}，位置 ${safeErrorLocation(error)}。`, code);
   } finally {
     await cleanup();

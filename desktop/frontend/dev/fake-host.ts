@@ -92,12 +92,21 @@ const eventsOf = (sessionId: string): Record<string, unknown>[] => [
     result: { failed: true, kind: 'refusal', code: 'fetch_metadata_blocked', reason: '那个地址落在链路本地与元数据端点那一类，直接拒（D58）。' } },
   // 一轮正常完整结束留下一条事实：转录里那一行「从这里分支」的把手挂在它上面（D68、方案 4.3）。
   { seq: 16, kind: 'turn', ignorable: true, status: 'completed', userSeq: 0, iterations: 4, modelCalls: 4 },
+  { seq: 17, kind: 'tool', tool: 'subagent_start', runId: 'dev-parent-run',
+    args: { task: '检查异步子任务控制与记录查看' },
+    result: { content: { subrunId: `${sessionId}.sub-2`, sessionId: `${sessionId}.sub-2`, runId: 'dev-child-run', parentRunId: 'dev-parent-run' } } },
 ];
 
 const branchEvents: Record<string, unknown>[] = [
   { seq: 0, kind: 'user', text: '把那段哈希输入逐格核对一遍', raw: '把那段哈希输入逐格核对一遍' },
   { seq: 1, kind: 'assistant', text: '对完：`seq`、kind、工具名三格一致；`callId` 不在输入里。' },
+  { seq: 2, kind: 'user', text: '异步孩子已收到补充输入。', origin: 'human' },
 ];
+
+let childState: 'running' | 'cancelled' | 'completed' = 'running';
+let childInputs = 0;
+let requestDiagnosticsEnabled = false;
+let requestDiagnostics: Record<string, unknown>[] = [];
 
 // 左侧栏那一份列表的夹具：三行是正常读出来的，第四行是读不出来的那一种（D93 要看得见码）。
 type Listed = {
@@ -305,10 +314,19 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
     const fail = (code: string, message: string) => emit({ id, error: { code, message } });
 
     switch (frame.method) {
-      case 'session.create':
+      case 'session.create': {
         opened += 1;
-        status = { ...status, sessionId: `dev-session-${opened}`, eventCount: 0 };
-        return reply({ sessionId: status.sessionId });
+        const id = `dev-session-${opened}`;
+        sessions.push({ id, formatVersion: 4, projectRoot: 'E:/notes', workspace: 'e:/notes', workspaceOrigin: 'default',
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), events: 0, lastSeq: -1,
+          mode: { name: 'full', layer: 'shipped', digest: '0f2b1c3d4e5f' }, name: '', archived: false, unanswered: 0, truncatedBytes: 0 });
+        status = { ...status, sessionId: id, eventCount: 0 };
+        childState = 'running';
+        childInputs = 0;
+        requestDiagnosticsEnabled = false;
+        requestDiagnostics = [];
+        return reply({ sessionId: id });
+      }
       case 'session.open': {
         // 接上一份记录时，那份记录最后生效的模式清单就是现在的模式（D78）；状态那一格跟着换。
         const found = sessions.find((item) => item.id === params.sessionId);
@@ -363,9 +381,59 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
           events: params.fullResults === true ? fillSpills(page) : page,
           // 记录头部交给界面当「这一份属于哪项目录」的那一格：草稿与队列按它存放（方案 5.1）。读不出首行的现存记录交回 null，与宿主一致。
           header: listed === undefined ? null : { kind: 'session', sessionId: id, projectRoot: listed.projectRoot, formatVersion: 1 },
+          label: { name: listed?.name ?? '', archived: listed?.archived ?? false },
           endSeq: page.length === 0 ? null : Number(page.at(-1)?.seq),
           hasMore: page.length > 0 && Number(page[0]?.seq) > 1,
         });
+      }
+      case 'subrun.status': {
+        const subrunId = `${String(params.sessionId)}.sub-2`;
+        if (params.parentRunId !== 'dev-parent-run' || params.subrunId !== subrunId) return fail('subagent_not_found', String(params.subrunId));
+        return reply({ subrunId, sessionId: subrunId, runId: 'dev-child-run', parentRunId: 'dev-parent-run',
+          state: childState, phase: childState === 'running' ? 'model_request' : null,
+          task: null, pendingInteractions: { approvals: 0, questions: 0 },
+          ...(childState === 'cancelled' ? { errorCode: 'subagent_cancelled' } : {}),
+          startedAt: 1, updatedAt: 2, ...(childState === 'running' ? {} : { completedAt: 2 }) });
+      }
+      case 'subrun.wait': {
+        const subrunId = `${String(params.sessionId)}.sub-2`;
+        if (params.parentRunId !== 'dev-parent-run' || !Array.isArray(params.subrunIds) || !params.subrunIds.includes(subrunId)) {
+          return fail('subagent_not_found', subrunId);
+        }
+        return reply({ timedOut: childState === 'running', subruns: [{ subrunId, sessionId: subrunId,
+          runId: 'dev-child-run', parentRunId: 'dev-parent-run', state: childState,
+          phase: childState === 'running' ? 'model_request' : null, task: null,
+          pendingInteractions: { approvals: 0, questions: 0 }, startedAt: 1, updatedAt: 2,
+          ...(childState === 'running' ? {} : { completedAt: 2 }) }] });
+      }
+      case 'subrun.message': {
+        const subrunId = `${String(params.sessionId)}.sub-2`;
+        if (params.parentRunId !== 'dev-parent-run' || params.subrunId !== subrunId || params.runId !== 'dev-child-run') {
+          return fail('subagent_not_found', String(params.subrunId));
+        }
+        if (childState !== 'running') return fail('subagent_not_running', childState);
+        if (typeof params.input !== 'string' || params.input.trim() === '' || params.input.length > 65_536) {
+          return fail('run_steer_input_invalid', 'the child input is invalid');
+        }
+        childInputs += 1;
+        branchEvents.push({ seq: branchEvents.length, kind: 'user', text: params.input, origin: 'human' });
+        return reply({ subrunId, runId: 'dev-child-run', state: 'accepted', source: 'human', pendingCount: childInputs });
+      }
+      case 'subrun.cancel': {
+        const subrunId = `${String(params.sessionId)}.sub-2`;
+        if (params.parentRunId !== 'dev-parent-run' || params.subrunId !== subrunId || params.runId !== 'dev-child-run') {
+          return fail('subagent_not_found', String(params.subrunId));
+        }
+        const cancelRequested = childState === 'running';
+        if (cancelRequested) childState = 'cancelled';
+        return reply({ subrunId, runId: 'dev-child-run', cancelRequested, state: childState });
+      }
+      case 'usage.diagnostics': {
+        const action = String(params.action);
+        if (action === 'enable') requestDiagnosticsEnabled = true;
+        else if (action === 'disable') { requestDiagnosticsEnabled = false; requestDiagnostics = []; }
+        else if (action !== 'read') return fail('protocol_args_invalid', action);
+        return reply({ enabled: requestDiagnosticsEnabled, entries: structuredClone(requestDiagnostics) });
       }
       // 名字与归档标记改的是列表读的那一份事实：这里直接改那几行假记录（实现顺序第 75 步）。
       case 'session.label': {
@@ -602,6 +670,33 @@ export function createFakeHost(options: { events?: number } = {}): Transport & {
     const part = (type: string, text: string) => emit({ notify: 'delta', sessionId, event: { type, text } });
     const callId = 'call_exec_2';
     cancelled.delete(sessionId);
+    if (requestDiagnosticsEnabled) {
+      requestDiagnostics.push({
+        sessionId,
+        runId: `dev-run-${opened}`,
+        logicalRequestId: `dev-logical-${opened}`,
+        requestId: `dev-request-${opened}`,
+        attempt: 1,
+        provider: 'fake-provider',
+        model: 'fake-review-model',
+        preparedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        status: 'completed',
+        components: { systemBytes: 3200, systemPrefixBytes: 2400, projectGuideBytes: 300, dynamicContextBytes: 120,
+        systemOverheadBytes: 380, toolSchemaBytes: 1800, historyBytes: new TextEncoder().encode(input).length,
+          imageReferenceCount: 0, imageReferenceBytes: 0, totalRequestBytes: 5000 },
+        estimatedInputTokens: 1250,
+        estimateMethod: 'request-v1',
+        truncation: { promptFragments: 0, preparationChangedProjection: false, messagesBeforePreparation: 4, messagesAfterPreparation: 4 },
+        compaction: { summaryUsageScope: 'session_to_date', checkpointValidation: 'absent', blocks: [], omittedBlocks: false, summaryRequests: 0,
+          summaryInputTokens: 0, summaryOutputTokens: 0, summaryCachedInputTokens: 0,
+          unknownSummaryInputRequests: 0, unknownSummaryOutputRequests: 0, unknownSummaryCacheRequests: 0 },
+        resolvedImages: { count: 0, bytes: 0 },
+        inputTokens: 1180,
+        outputTokens: 64,
+      });
+      if (requestDiagnostics.length > 32) requestDiagnostics.shift();
+    }
     // 每一步之前看一眼有没有人按下取消：停下的位置就在这一段等待之前，跟真宿主那一轮被信号打断一样。
     const step = (ms: number): Promise<void> => {
       if (cancelled.has(sessionId)) throw new Error('loop_cancelled');

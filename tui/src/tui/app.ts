@@ -4,7 +4,7 @@
 import { resolve } from 'node:path';
 import { createElement as h, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, resolveSessionId, routeInput } from './commands.js';
+import { answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, parseSubrunCommand, resolveSessionId, routeInput } from './commands.js';
 import { pushHistory } from '@ligule/core/tui.js';
 import { searchHistory } from './history.js';
 import { editDraft, isTypingRun, moveDraftCaret, type DraftState } from './draft.js';
@@ -30,7 +30,7 @@ import { controlPresets, textOf as chooseText, type Locale } from '@ligule/core/
 import type { TerminalAction } from './keymap.js';
 import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type ControlWizardValues } from './control-wizard.js';
 import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionHeader, SessionSummary, UsageBucket, UsageSummary } from '@ligule/core/tui.js';
-import type { TemplateCommand } from './commands.js';
+import type { SubrunCommand, TemplateCommand } from './commands.js';
 import type { EditorOutcome } from './editor.js';
 import type { SavedInput } from './input-store.js';
 import type { BranchResult, CredentialStatus, Exported, LoopResult, ModelSelection, ModelService, PathListing, SearchHit } from '@ligule/core/tui.js';
@@ -358,6 +358,19 @@ interface TuiConfigResult extends Record<string, unknown> {
   readonly layers?: readonly { readonly layer: string; readonly version: string }[];
 }
 
+interface TuiSubrunReference {
+  readonly parentRunId: string;
+  readonly subrunId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+}
+
+interface TuiSubrunStatus extends TuiSubrunReference {
+  readonly state: string;
+  readonly phase: string | null;
+  readonly errorCode?: string;
+}
+
 interface TuiRequestResults {
   readonly 'screen-capture.set': { readonly sessionId: string; readonly enabled: boolean; readonly source: string };
   readonly 'browser.stop': { readonly sessionId: string; readonly browser: NonNullable<TuiStatus['browser']> };
@@ -377,6 +390,10 @@ interface TuiRequestResults {
   readonly 'paths.list': PathListing;
   readonly 'run.start': LoopResult;
   readonly 'run.cancel': { readonly cancelled: boolean };
+  readonly 'subrun.status': TuiSubrunStatus;
+  readonly 'subrun.message': { readonly subrunId: string; readonly runId: string; readonly state: 'accepted'; readonly pendingCount: number };
+  readonly 'subrun.wait': { readonly timedOut: boolean; readonly subruns: readonly TuiSubrunStatus[] };
+  readonly 'subrun.cancel': { readonly subrunId: string; readonly runId: string; readonly cancelRequested: boolean; readonly state: string };
   readonly 'run.steer': {
     readonly inputId: string;
     readonly runId: string;
@@ -387,6 +404,7 @@ interface TuiRequestResults {
   };
   readonly 'status.get': TuiStatus;
   readonly 'usage.get': { readonly sessionId: string; readonly summary: UsageSummary };
+  readonly 'usage.diagnostics': { readonly enabled: boolean; readonly entries: readonly Record<string, unknown>[] };
   readonly 'permission.set': { readonly sessionId: string; readonly permission: NonNullable<TuiStatus['permission']>; readonly applies: 'now' | 'unchanged' };
   readonly 'model.select': { readonly model: string | null; readonly serviceId: string; readonly when: 'now' | 'round' };
   readonly 'session.configure': { readonly applies: 'now' | 'next_round' | 'unchanged'; readonly [key: string]: unknown };
@@ -429,7 +447,7 @@ interface QuestionState {
 }
 
 // 将命令表和纯函数导出，供测试及其他界面逻辑使用。
-export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, insertMention, mentionToken, resolveSessionId, routeInput, sessionLines } from './commands.js';
+export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, insertMention, mentionToken, parseSubrunCommand, resolveSessionId, routeInput, sessionLines } from './commands.js';
 export { activeRunBudgetSegment, buildStatusLine, contextSegment } from './status-line.js';
 export { KEYMAP, CURRENT, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec, specOf } from './keymap.js';
 export { markdownLines } from './markdown.js';
@@ -450,17 +468,64 @@ export function findRecord(events: readonly TuiRecord[], argument: string): { re
   return { record: events.find((event) => event.seq === seq) ?? null };
 }
 
-// `/sub` 使用父记录中的事件序号定位派生结果，并从结果中读取支线会话 ID。
-export function branchOf(record: TuiRecord | undefined): { readonly code: 'tui_sub_needs_a_branch' } | { readonly sessionId: string } | { readonly code: 'tui_sub_reference_spilled'; readonly spilled: string | undefined } {
-  if (record?.kind !== 'tool' || record.tool !== 'subagent') return { code: 'tui_sub_needs_a_branch' };
+export function subrunReferenceOf(record: TuiRecord | undefined): TuiSubrunReference | null {
+  if (record?.kind !== 'tool' || record.tool !== 'subagent_start') return null;
   const result = isRecord(record.result) ? record.result : undefined;
   const content = isRecord(result?.content) ? result.content : undefined;
+  const parentRunId = typeof record.runId === 'string' ? record.runId : content?.parentRunId;
+  const subrunId = content?.subrunId;
   const sessionId = content?.sessionId;
+  const runId = content?.runId;
+  if (typeof parentRunId !== 'string' || typeof subrunId !== 'string' || typeof sessionId !== 'string' || typeof runId !== 'string') return null;
+  return { parentRunId, subrunId, sessionId, runId };
+}
+
+// `/sub` 使用父记录中的事件序号定位派生结果，并从结果中读取支线会话 ID。
+export function branchOf(record: TuiRecord | undefined): { readonly code: 'tui_sub_needs_a_branch' } | { readonly sessionId: string } | { readonly code: 'tui_sub_reference_spilled'; readonly spilled: string | undefined } {
+  if (record?.kind !== 'tool' || (record.tool !== 'subagent' && record.tool !== 'subagent_start')) return { code: 'tui_sub_needs_a_branch' };
+  const result = isRecord(record.result) ? record.result : undefined;
+  const content = isRecord(result?.content) ? result.content : undefined;
+  const sessionId = content?.sessionId ?? (record.tool === 'subagent_start' ? content?.subrunId : undefined);
   // 结果超出限制时存入溢出文件；此时支线 ID 可能不在记录内容中。
   if (typeof sessionId !== 'string' || sessionId === '') {
     return { code: 'tui_sub_reference_spilled', spilled: typeof result?.spilled === 'string' ? result.spilled : undefined };
   }
   return { sessionId };
+}
+
+export function requestDiagnosticLines(entries: readonly Record<string, unknown>[], locale: Locale = 'zh'): string[] {
+  const t = (zh: string, en: string) => chooseText(locale, zh, en);
+  return entries.map((entry) => {
+    const components = isRecord(entry.components) ? entry.components : {};
+    const compaction = isRecord(entry.compaction) ? entry.compaction : {};
+    const truncation = isRecord(entry.truncation) ? entry.truncation : {};
+    const resolvedImages = isRecord(entry.resolvedImages) ? entry.resolvedImages : {};
+    const cache = isRecord(entry.cache) ? entry.cache : undefined;
+    const request = typeof entry.requestId === 'string' ? entry.requestId.slice(0, 8) : 'request';
+    const attempt = typeof entry.attempt === 'number' ? entry.attempt : '?';
+    const provider = typeof entry.provider === 'string' ? entry.provider : 'unknown';
+    const model = typeof entry.model === 'string' ? entry.model : 'unknown';
+    const number = (value: unknown) => typeof value === 'number' ? value : 0;
+    const usage = (value: unknown) => typeof value === 'number' ? String(value) : t('未知', 'unknown');
+    const blocks = Array.isArray(compaction.blocks) ? compaction.blocks : [];
+    const ranges = blocks.flatMap((item) => isRecord(item) && typeof item.fromSeq === 'number' && typeof item.toSeq === 'number'
+      ? [`${item.fromSeq}–${item.toSeq}`] : []);
+    const cacheSummary = cache === undefined ? t('缓存用量未报', 'cache usage unreported')
+      : t(`缓存命中 ${usage(cache.hitInputTokens)}、未命中 ${usage(cache.missInputTokens)}`, `cache hit ${usage(cache.hitInputTokens)}, miss ${usage(cache.missInputTokens)}`);
+    return [
+      `${request} · ${provider}/${model} · ${t(`尝试 ${attempt}`, `attempt ${attempt}`)} · ${String(entry.status ?? 'unknown')}`,
+      t(`估算 ${number(entry.estimatedInputTokens)} tokens（${String(entry.estimateMethod ?? 'unknown')}）；实报输入 ${usage(entry.inputTokens)}、输出 ${usage(entry.outputTokens)}`,
+        `estimated ${number(entry.estimatedInputTokens)} tokens (${String(entry.estimateMethod ?? 'unknown')}); reported input ${usage(entry.inputTokens)}, output ${usage(entry.outputTokens)}`) + ` · ${cacheSummary}`,
+      t(`字节：系统 ${number(components.systemBytes)}（前缀 ${number(components.systemPrefixBytes)}、指南 ${number(components.projectGuideBytes)}、动态 ${number(components.dynamicContextBytes)}），工具 Schema ${number(components.toolSchemaBytes)}，历史 ${number(components.historyBytes)}，图片 ${number(components.imageReferenceCount)} 个（引用 ${number(components.imageReferenceBytes)} 字节；已解析 ${number(resolvedImages.count)} 个、${number(resolvedImages.bytes)} 字节）`,
+        `bytes: system ${number(components.systemBytes)} (prefix ${number(components.systemPrefixBytes)}, guides ${number(components.projectGuideBytes)}, dynamic ${number(components.dynamicContextBytes)}), tool schemas ${number(components.toolSchemaBytes)}, history ${number(components.historyBytes)}, images ${number(components.imageReferenceCount)} (${number(components.imageReferenceBytes)} reference bytes; ${number(resolvedImages.count)} resolved, ${number(resolvedImages.bytes)} bytes)`),
+      t(`投影准备：提示片段截断 ${number(truncation.promptFragments)} 处，消息 ${number(truncation.messagesBeforePreparation)} → ${number(truncation.messagesAfterPreparation)}；${truncation.preparationChangedProjection === true ? '压缩或提醒改变了投影' : '未改变投影'}`,
+        `request preparation: ${number(truncation.promptFragments)} prompt fragments truncated, ${number(truncation.messagesBeforePreparation)} → ${number(truncation.messagesAfterPreparation)} messages; ${truncation.preparationChangedProjection === true ? 'compaction or reminder changed it' : 'unchanged'}`),
+      t(`压缩块 ${ranges.length === 0 ? '无' : ranges.join('、')}；摘要请求 ${number(compaction.summaryRequests)} 次（${String(compaction.summaryUsageScope ?? 'unknown')}）：输入 ${usage(compaction.summaryInputTokens)}、输出 ${usage(compaction.summaryOutputTokens)}、缓存 ${usage(compaction.summaryCachedInputTokens)}`,
+        `compaction blocks ${ranges.length === 0 ? 'none' : ranges.join(', ')}; ${number(compaction.summaryRequests)} summary requests (${String(compaction.summaryUsageScope ?? 'unknown')}): input ${usage(compaction.summaryInputTokens)}, output ${usage(compaction.summaryOutputTokens)}, cached ${usage(compaction.summaryCachedInputTokens)}`)
+        + t(` · 检查点 ${String(compaction.checkpointValidation ?? 'unknown')}${typeof compaction.checkpointValidationReason === 'string' ? ` (${compaction.checkpointValidationReason})` : ''}`,
+          ` · checkpoint ${String(compaction.checkpointValidation ?? 'unknown')}${typeof compaction.checkpointValidationReason === 'string' ? ` (${compaction.checkpointValidationReason})` : ''}`),
+    ].join('\n');
+  });
 }
 
 // 标题注明当前显示的是主会话还是派生会话，因为两者使用各自的事件序号。
@@ -2380,6 +2445,45 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'usage') {
+      const parts = argument.trim().split(/\s+/u).filter((part) => part !== '');
+      if (parts[0] === 'requests') {
+        const action = parts[1] ?? 'read';
+        if (parts.length > 2 || !['read', 'on', 'off'].includes(action)) {
+          push({ kind: 'error', text: t('用法：/usage requests [on|off]', 'Usage: /usage requests [on|off]') });
+          return;
+        }
+        const own = sessionId;
+        void client.request('usage.diagnostics', {
+          sessionId: own,
+          action: action === 'on' ? 'enable' : action === 'off' ? 'disable' : 'read',
+        }).then((diagnostics) => {
+          if (activeSession.current !== own) return;
+          if (action === 'on') {
+            push({ kind: 'meta', text: t('本地请求诊断已开启；最多保留最近 32 次请求。', 'Local request diagnostics enabled; the last 32 requests are retained.') });
+            return;
+          }
+          if (action === 'off') {
+            push({ kind: 'meta', text: t('本地请求诊断已关闭并清空。', 'Local request diagnostics disabled and cleared.') });
+            return;
+          }
+          if (!diagnostics.enabled) {
+            push({ kind: 'meta', text: t('本地请求诊断未开启；运行 /usage requests on 后才开始收集。', 'Local request diagnostics are off; run /usage requests on to start collecting.') });
+            return;
+          }
+          const lines = requestDiagnosticLines(diagnostics.entries, locale);
+          push({ kind: 'meta', text: lines.length === 0 ? t('开启后还没有新的模型请求。', 'No model requests were sent after diagnostics were enabled.') : lines.join('\n\n') });
+        }, (error: unknown) => {
+          if (activeSession.current === own) push({ kind: 'error', text: t(
+            `无法读取本地请求诊断：${errorCode(error) ?? 'request_diagnostics_failed'}`,
+            `Could not read local request diagnostics: ${errorCode(error) ?? 'request_diagnostics_failed'}`,
+          ) });
+        });
+        return;
+      }
+      if (parts.length > 0) {
+        push({ kind: 'error', text: t('用法：/usage [requests [on|off]]', 'Usage: /usage [requests [on|off]]') });
+        return;
+      }
       // 用量按用途分开读：主机返回只读聚合，TUI 不自己累加事件。
       // 记录按会话所属项目定位：别的项目的会话不在本进程默认目录里。
       const root = info.boundary ?? '';
@@ -2742,6 +2846,95 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           return;
         }
         setDetail({ seq: picked.record.seq, kind: picked.record.kind ?? 'unknown', rows: projectRecord(picked.record, locale) });
+      })();
+      return;
+    }
+    if (name === 'subrun') {
+      const command: SubrunCommand = parseSubrunCommand(argument);
+      if ('code' in command) {
+        push({ kind: 'error', text: t(
+          `子任务命令格式不正确：${command.code}。用法：/subrun list；/subrun status <序号>；/subrun wait <序号> [毫秒]；/subrun message <序号> <文字>；/subrun cancel <序号>`,
+          `Invalid subtask command: ${command.code}. Use /subrun list, status <seq>, wait <seq> [ms], message <seq> <text>, or cancel <seq>.`,
+        ) });
+        return;
+      }
+      const own = sessionId;
+      void (async () => {
+        const parent = await client.request('session.read', { sessionId: own, fullResults: true })
+          .catch((error: unknown) => requestFailure(error, 'session_read_failed'));
+        if ('code' in parent) {
+          if (activeSession.current === own) push({ kind: 'error', text: t(`无法读取记录：${parent.code}`, `Could not read conversation: ${parent.code}`) });
+          return;
+        }
+        const references = parent.events.map(subrunReferenceOf).filter((item): item is TuiSubrunReference => item !== null);
+        if (command.action === 'list') {
+          if (references.length === 0) {
+            if (activeSession.current === own) push({ kind: 'meta', text: t('当前记录没有异步子任务。', 'This conversation has no asynchronous subtasks.') });
+            return;
+          }
+          const statuses = await Promise.all(references.map(async (reference) => await client.request('subrun.status', {
+            sessionId: own, parentRunId: reference.parentRunId, subrunId: reference.subrunId,
+          }).catch((error: unknown) => requestFailure(error, 'subrun_status_failed'))));
+          if (activeSession.current !== own) return;
+          const lines = references.map((reference, index) => {
+            const status = statuses[index];
+            const state = status !== undefined && 'code' in status ? status.code : status?.state ?? 'unknown';
+            return `${reference.subrunId} · ${state} · /sub ${parent.events.find(event => subrunReferenceOf(event)?.subrunId === reference.subrunId)?.seq ?? '-'}`;
+          });
+          push({ kind: 'meta', text: lines.join('\n') });
+          return;
+        }
+        const picked = findRecord(parent.events, String(command.seq));
+        if ('code' in picked || picked.record === null) {
+          if (activeSession.current === own) push({ kind: 'error', text: t(`没有序号为 ${command.seq} 的子任务启动记录。`, `No child start event exists at sequence ${command.seq}.`) });
+          return;
+        }
+        const reference = subrunReferenceOf(picked.record);
+        if (reference === null) {
+          if (activeSession.current === own) push({ kind: 'error', text: t(`记录 ${command.seq} 不是异步子任务。`, `Event ${command.seq} is not an asynchronous subtask.`) });
+          return;
+        }
+        if (command.action === 'status') {
+          const result = await client.request('subrun.status', {
+            sessionId: own, parentRunId: reference.parentRunId, subrunId: reference.subrunId,
+          }).catch((error: unknown) => requestFailure(error, 'subrun_status_failed'));
+          if (activeSession.current !== own) return;
+          push({ kind: 'meta', text: 'code' in result ? result.code
+            : `${reference.subrunId}: ${result.state}${result.phase === null ? '' : ` · ${result.phase}`}${result.errorCode === undefined ? '' : ` · ${result.errorCode}`}` });
+          return;
+        }
+        if (command.action === 'wait') {
+          const result = await client.request('subrun.wait', {
+            sessionId: own, parentRunId: reference.parentRunId, subrunIds: [reference.subrunId], timeoutMs: command.timeoutMs,
+          }).catch((error: unknown) => requestFailure(error, 'subrun_wait_failed'));
+          if (activeSession.current !== own) return;
+          if ('code' in result) push({ kind: 'error', text: result.code });
+          else {
+            const state = result.subruns[0]?.state ?? 'unknown';
+            push({ kind: 'meta', text: result.timedOut
+              ? t(`等待结束，子任务仍为 ${state}。`, `Wait timed out; child remains ${state}.`)
+              : t(`子任务状态：${state}。`, `Subtask state: ${state}.`) });
+          }
+          return;
+        }
+        if (command.action === 'message') {
+          const result = await client.request('subrun.message', {
+            sessionId: own, parentRunId: reference.parentRunId, subrunId: reference.subrunId,
+            runId: reference.runId, input: command.input,
+          }).catch((error: unknown) => requestFailure(error, 'subrun_message_failed'));
+          if (activeSession.current !== own) return;
+          push('code' in result ? { kind: 'error', text: t(`子任务输入未接受：${result.code}`, `Child input was not accepted: ${result.code}`) }
+            : { kind: 'meta', text: t(`子任务已接受补充输入（待处理 ${result.pendingCount} 条）。`, `Child accepted the input (${result.pendingCount} pending).`) });
+          return;
+        }
+        const result = await client.request('subrun.cancel', {
+          sessionId: own, parentRunId: reference.parentRunId, subrunId: reference.subrunId, runId: reference.runId,
+        }).catch((error: unknown) => requestFailure(error, 'subrun_cancel_failed'));
+        if (activeSession.current !== own) return;
+        push('code' in result ? { kind: 'error', text: t(`取消请求失败：${result.code}`, `Could not request cancellation: ${result.code}`) }
+          : { kind: 'meta', text: result.cancelRequested
+            ? t('已发出取消请求，等待子任务收束。', 'Cancellation requested; waiting for the child to settle.')
+            : t(`当前子任务状态：${result.state}。`, `Child state: ${result.state}.`) });
       })();
       return;
     }

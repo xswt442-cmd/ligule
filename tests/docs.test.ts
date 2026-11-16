@@ -208,6 +208,8 @@ test('development 文档文件名使用大写主体与小写语言标记', () =>
     'GLOSSARY.en.md',
     'GLOSSARY.zh-cn.md',
     'RELEASE.md',
+    'extensions.en.md',
+    'extensions.zh-CN.md',
   ]);
 });
 

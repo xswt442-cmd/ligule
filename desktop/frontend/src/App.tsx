@@ -118,7 +118,7 @@ const menuPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.diagnostics',
     title: '诊断',
-    view: ({ status, counts, waiting, link, logs, onReconnect }) => <DiagnosticsPanel status={status} counts={counts} waiting={waiting} link={link} logs={logs} onReconnect={onReconnect} />,
+    view: ({ client, sessionId, status, counts, waiting, link, logs, onReconnect }) => <DiagnosticsPanel client={client} sessionId={sessionId} status={status} counts={counts} waiting={waiting} link={link} logs={logs} onReconnect={onReconnect} />,
   },
   {
     id: 'panel.branch',

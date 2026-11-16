@@ -45,11 +45,12 @@ export const UI_COMMANDS = Object.freeze([
   { name: 'control', usage: '/control [list|create|revoke <id>|copy <id>]', text: '管理本地外部 Agent 授权', hint: '[操作]', whenRunning: false },
   { name: 'status', usage: '/status', text: '查看会话状态', hint: '', whenRunning: true },
   { name: 'steer', usage: '/steer <文字>', text: '向当前运行补充指令', hint: '<文字>', whenRunning: true },
-  { name: 'usage', usage: '/usage', text: '查看本会话 Token 用量（按主 Agent 与复审分开）', hint: '', whenRunning: true },
+  { name: 'usage', usage: '/usage [requests [on|off]]', text: '查看 Token 用量，或读取本地请求构成诊断', hint: '[requests [on|off]]', whenRunning: true },
   { name: 'compact', usage: '/compact', text: '压缩上下文（需要 limits.contextTokens）', hint: '', whenRunning: true },
   { name: 'tools', usage: '/tools', text: '列出可用工具', hint: '', whenRunning: true },
   { name: 'show', usage: '/show [序号]', text: '查看完整记录；不带序号收起', hint: '[序号]', whenRunning: true },
   { name: 'sub', usage: '/sub [序号]', text: '查看子任务记录；不带序号收起', hint: '[序号]', whenRunning: true },
+  { name: 'subrun', usage: '/subrun [list|status|wait|message|cancel]', text: '查看并控制异步子任务', hint: '[动作]', whenRunning: true },
   { name: 'new', usage: '/new', text: '创建新会话', hint: '', whenRunning: false },
   { name: 'queue', usage: '/queue [list|pause|continue|drop <序号>|clear]', text: '查看、暂停、继续或收回待发送消息', hint: '[动作]', whenRunning: true },
   { name: 'bind', usage: '/bind [<动作> <键的写法>|reset <动作>|default]', text: '查看或修改快捷键', hint: '[动作 键|reset <动作>|default]', whenRunning: true },
@@ -83,11 +84,12 @@ const ENGLISH_COMMANDS: Record<CommandName, readonly [string, string, string]> =
   control: ['/control [list|create|revoke <id>|copy <id>]', 'Manage local external Agent grants', '[action]'],
   status: ['/status', 'Show session status', ''],
   steer: ['/steer <text>', 'Add an instruction to the active run', '<text>'],
-  usage: ['/usage', 'Show this session’s token usage, split by agent and reviewer', ''],
+  usage: ['/usage [requests [on|off]]', 'Show token usage or inspect local request composition diagnostics', '[requests [on|off]]'],
   compact: ['/compact', 'Compact context (requires limits.contextTokens)', ''],
   tools: ['/tools', 'List available tools', ''],
   show: ['/show [seq]', 'View an event; omit seq to close', '[seq]'],
   sub: ['/sub [seq]', 'View a subtask; omit seq to close', '[seq]'],
+  subrun: ['/subrun [list|status|wait|message|cancel]', 'Inspect and control asynchronous subtasks', '[action]'],
   new: ['/new', 'Start a new session', ''],
   queue: ['/queue [list|pause|continue|drop <n>|clear]', 'List, pause, resume, or recover queued messages', '[action]'],
   bind: ['/bind [<action> <key>|reset <action>|default]', 'View or change keyboard shortcuts', '[action key|reset <action>|default]'],
@@ -112,6 +114,35 @@ export function localizedCommand(command: UiCommand, locale: Locale): UiCommand 
 
 export function findUiCommand(name: string): UiCommand | undefined {
   return UI_COMMANDS.find((command) => command.name === name);
+}
+
+export type SubrunCommand =
+  | { readonly action: 'list' }
+  | { readonly action: 'status' | 'cancel'; readonly seq: number }
+  | { readonly action: 'wait'; readonly seq: number; readonly timeoutMs: number }
+  | { readonly action: 'message'; readonly seq: number; readonly input: string }
+  | { readonly code: 'tui_subrun_command_invalid' | 'tui_subrun_sequence_invalid' | 'tui_subrun_timeout_invalid' | 'tui_subrun_input_required' };
+
+export function parseSubrunCommand(argument: string): SubrunCommand {
+  const match = /^(list|status|wait|message|cancel)(?:\s+([\s\S]*))?$/u.exec(argument.trim());
+  if (match === null) return { code: 'tui_subrun_command_invalid' };
+  const action = match[1];
+  const rest = match[2] ?? '';
+  if (action === 'list') return rest === '' ? { action } : { code: 'tui_subrun_command_invalid' };
+  const args = /^(0|[1-9]\d*)(?:\s+([\s\S]*))?$/u.exec(rest);
+  if (args === null) return { code: 'tui_subrun_sequence_invalid' };
+  const seq = Number(args[1]);
+  if (!Number.isSafeInteger(seq)) return { code: 'tui_subrun_sequence_invalid' };
+  const tail = args[2] ?? '';
+  if (action === 'status' || action === 'cancel') {
+    return tail === '' ? { action, seq } : { code: 'tui_subrun_command_invalid' };
+  }
+  if (action === 'message') return tail.trim() === '' ? { code: 'tui_subrun_input_required' } : { action, seq, input: tail };
+  if (action !== 'wait') return { code: 'tui_subrun_command_invalid' };
+  const timeoutMs = tail === '' ? 30_000 : Number(tail);
+  return Number.isSafeInteger(timeoutMs) && timeoutMs >= 0 && timeoutMs <= 30_000
+    ? { action, seq, timeoutMs }
+    : { code: 'tui_subrun_timeout_invalid' };
 }
 
 // 写入摘要说明操作对象、删除内容和新增内容。

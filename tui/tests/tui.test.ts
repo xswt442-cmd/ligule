@@ -14,6 +14,7 @@ import { SEARCH_ROWS, searchHistory } from '../dist/tui/history.js';
 import { helpEntries, helpTabTitle } from '../dist/tui/help.js';
 import type { Locale } from '../../core/dist/tui.js';
 import type { TuiClient } from '../dist/tui/app.js';
+import type { TuiRecord } from '../dist/tui/transcript.js';
 import type { SavedInput } from '../dist/tui/input-store.js';
 import type { StatusLike } from '../dist/tui/status-line.js';
 import type { TranscriptItem } from '../dist/tui/transcript.js';
@@ -39,7 +40,7 @@ try {
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
 const mcpServerFixture = fileURLToPath(new URL('../../tests/fixtures/mcp-minimal.mjs', import.meta.url));
-const { foldText, editDraft, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, detailTitle, routeInput, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
+const { foldText, editDraft, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, subrunReferenceOf, parseSubrunCommand, requestDiagnosticLines, detailTitle, routeInput, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
 // 界面记录只带界面关心的字段；测试直接写这种不带 `seq` 的投影输入。
 const projectRecord = rows.projectRecord as (record: Record<string, unknown>, locale?: Locale) => TranscriptItem[];
 const quoted = (value: string) => `"${value.replaceAll('"', '\\"')}"`;
@@ -262,9 +263,16 @@ test('/show takes the number from the record, not the row on screen', options, (
 
 // 派生会话使用父记录中对应结果的编号，并从结果内容读取派生会话 ID。
 test('/sub reads the branch reference out of the delegation result', options, () => {
-  assert.ok(UI_COMMANDS.some((command) => command.name === 'sub'), 'the command is listed in help');
+  assert.ok(UI_COMMANDS.some((command) => command.name === 'sub'), 'the legacy viewer remains listed in help');
+  assert.ok(UI_COMMANDS.some((command) => command.name === 'subrun'), 'async child controls are listed in help');
   const branch = { kind: 'tool', tool: 'subagent', result: { failed: false, content: { sessionId: 'parent.sub-1', text: 'done' } } };
   assert.deepEqual(branchOf({ seq: 4, ...branch }), { sessionId: 'parent.sub-1' });
+  const asyncBranch = { seq: 5, kind: 'tool', tool: 'subagent_start', runId: 'parent-run', result: { failed: false,
+    content: { subrunId: 'parent.sub-2', sessionId: 'parent.sub-2', runId: 'child-run', parentRunId: 'parent-run' } } };
+  assert.deepEqual(branchOf(asyncBranch), { sessionId: 'parent.sub-2' });
+  assert.deepEqual(subrunReferenceOf(asyncBranch), {
+    parentRunId: 'parent-run', subrunId: 'parent.sub-2', sessionId: 'parent.sub-2', runId: 'child-run',
+  });
   assert.equal((branchOf({ seq: 4, kind: 'tool', tool: 'read', result: { content: { sessionId: 'x' } } }) as { code: string }).code, 'tui_sub_needs_a_branch');
   assert.equal((branchOf({ seq: 4, kind: 'user', text: 'hi' }) as { code: string }).code, 'tui_sub_needs_a_branch');
   // 结果过长时内容写入文件，记录中不包含 sessionId。
@@ -276,6 +284,159 @@ test('/sub reads the branch reference out of the delegation result', options, ()
   assert.match(detailTitle({ seq: 4, kind: 'subagent', branch: 'parent.sub-1' }), /^支线 parent\.sub-1，父记录第 4 那一次派生/);
   assert.match(detailTitle({ seq: 4, kind: 'subagent', branch: 'parent.sub-1' }), /支线自己的 · \/sub 收起$/);
 });
+
+test('/subrun parses bounded controls by parent event sequence', options, () => {
+  assert.deepEqual(parseSubrunCommand('list'), { action: 'list' });
+  assert.deepEqual(parseSubrunCommand('status 0'), { action: 'status', seq: 0 });
+  assert.deepEqual(parseSubrunCommand('wait 12 0'), { action: 'wait', seq: 12, timeoutMs: 0 });
+  assert.deepEqual(parseSubrunCommand('message 4 Keep the work inside the requested folder.'), {
+    action: 'message', seq: 4, input: 'Keep the work inside the requested folder.',
+  });
+  assert.deepEqual(parseSubrunCommand('cancel 7'), { action: 'cancel', seq: 7 });
+  assert.deepEqual(parseSubrunCommand('wait 1 30001'), { code: 'tui_subrun_timeout_invalid' });
+  assert.deepEqual(parseSubrunCommand('message 1   '), { code: 'tui_subrun_input_required' });
+  assert.deepEqual(parseSubrunCommand('status -1'), { code: 'tui_subrun_sequence_invalid' });
+});
+
+test('request diagnostics show component counts without exposing the message body', options, () => {
+  const lines = requestDiagnosticLines([{
+    requestId: '12345678-opaque', attempt: 2, provider: 'local-provider', model: 'local-model', status: 'completed',
+    estimatedInputTokens: 456, estimateMethod: 'request-v1', inputTokens: null, outputTokens: 32,
+    cache: { hitInputTokens: 20, missInputTokens: null }, resolvedImages: { count: 1, bytes: 2048 },
+    truncation: { promptFragments: 1, preparationChangedProjection: true, messagesBeforePreparation: 12, messagesAfterPreparation: 5 },
+    privateText: 'PRIVATE_REQUEST_INPUT_MARKER',
+    components: { systemBytes: 800, systemPrefixBytes: 500, projectGuideBytes: 100, dynamicContextBytes: 50,
+      toolSchemaBytes: 150, historyBytes: 900, imageReferenceCount: 1, imageReferenceBytes: 120 },
+    compaction: { checkpointValidation: 'valid', blocks: [{ fromSeq: 2, toSeq: 19 }], summaryRequests: 1, summaryUsageScope: 'session_to_date',
+      summaryInputTokens: 300, summaryOutputTokens: null, summaryCachedInputTokens: 20 },
+  }]);
+  assert.match(lines[0]!, /12345678 · local-provider\/local-model · 尝试 2/);
+  assert.match(lines[0]!, /估算 456 tokens.*实报输入 未知、输出 32/);
+  assert.match(lines[0]!, /工具 Schema 150，历史 900，图片 1 个（引用 120 字节；已解析 1 个、2048 字节）/);
+  assert.match(lines[0]!, /缓存命中 20.*未命中 未知/);
+  assert.match(lines[0]!, /提示片段截断 1 处，消息 12 → 5/);
+  assert.match(lines[0]!, /压缩块 2–19.*摘要请求 1 次.*输入 300、输出 未知、缓存 20/);
+  assert.match(lines[0]!, /检查点 valid/);
+  assert.doesNotMatch(lines[0]!, /PRIVATE_REQUEST_INPUT_MARKER/);
+});
+
+test('TUI steers an asynchronous child by its parent event and opens the child Session', options, async () => {
+  let releaseChild!: () => void;
+  const childGate = new Promise<void>((resolve) => { releaseChild = resolve; });
+  let childReached = false;
+  try {
+    await withTuiHost(async ({ client, sessionId, projectDirectory, providerRequests, requests }) => {
+      const run = client.request('run.start', { sessionId, input: JSON.stringify({
+        tool: 'subagent_start', args: { task: 'hold child for TUI control' },
+      }) });
+      void run.catch(() => undefined);
+      await waitFor(() => childReached, { within: 5_000, read: () => JSON.stringify(providerRequests.map((request) => request.messages)) });
+      const parent = await client.request('session.read', { sessionId, fullResults: true }) as { events: TuiRecord[] };
+      const started = parent.events.find((event) => event.kind === 'tool' && event.tool === 'subagent_start');
+      assert.ok(started?.seq !== undefined);
+      const reference = subrunReferenceOf(started);
+      assert.ok(reference);
+
+      const { createElement } = await import('react');
+      const { render } = await import('ink');
+      const { PassThrough } = await import('node:stream');
+      const { setTimeout: delay } = await import('node:timers/promises');
+      const { App } = await import('../dist/tui/app.js');
+      const stdout = new PassThrough() as unknown as FakeOutput;
+      stdout.columns = 120;
+      stdout.isTTY = true;
+      let painted = '';
+      stdout.on('data', (chunk) => { painted += chunk; });
+      const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+      const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true }), {
+        stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true,
+      });
+      const sendCommand = async (value: string) => {
+        stdin.write(value);
+        await delay(80);
+        stdin.write('\r');
+      };
+      try {
+        await sendCommand(`/subrun message ${started.seq} Check the requested files and do not create anything.`);
+        await waitFor(() => painted.includes('子任务已接受补充输入'), { within: 5_000, read: () => plainOutput(painted) });
+        assert.ok(requests.some((request) => request.method === 'subrun.message'
+          && (request.params as { runId?: string; input?: string }).runId === reference.runId
+          && (request.params as { input?: string }).input === 'Check the requested files and do not create anything.'));
+
+        releaseChild();
+        await run;
+        await sendCommand(`/subrun status ${started.seq}`);
+        await waitFor(() => plainOutput(painted).includes(`${reference.subrunId}: completed`), { within: 5_000, read: () => plainOutput(painted) });
+        await sendCommand('/subrun list');
+        await waitFor(() => plainOutput(painted).includes(`${reference.subrunId} · completed`), { within: 5_000, read: () => plainOutput(painted) });
+        await sendCommand(`/sub ${started.seq}`);
+        await waitFor(() => plainOutput(painted).includes('Local response: hold child for TUI control'), {
+          within: 5_000, read: () => plainOutput(painted),
+        });
+      } finally {
+        instance.unmount();
+      }
+    }, {
+      modeName: 'full',
+      config: { loop: { iterations: 6, modelCalls: 6, totalModelCalls: 12 }, policy: { mode: 'auto' } },
+      beforeResponse: async (body) => {
+        const lastUser = [...body.messages].reverse().find((message) => message.role === 'user');
+        if (lastUser?.content === 'hold child for TUI control') {
+          childReached = true;
+          await childGate;
+        }
+      },
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    releaseChild();
+  }
+});
+
+test('TUI enables and reads bounded local request diagnostics on demand', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+  const stdout = new PassThrough() as unknown as FakeOutput;
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+  const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true }), {
+    stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true,
+  });
+  const sendCommand = async (value: string) => {
+    stdin.write(value);
+    await delay(80);
+    stdin.write('\r');
+  };
+  try {
+    await sendCommand('/usage requests on');
+    await waitFor(() => plainOutput(painted).includes('本地请求诊断已开启'), { read: () => plainOutput(painted) });
+    await client.request('run.start', { sessionId, input: 'PRIVATE_REQUEST_INPUT_MARKER' });
+    const beforeRead = painted.length;
+    await sendCommand('/usage requests');
+    await waitFor(() => plainOutput(painted.slice(beforeRead)).includes('估算'), { read: () => plainOutput(painted.slice(beforeRead)) });
+    const shown = plainOutput(painted.slice(beforeRead));
+    assert.match(shown, /系统 \d+.*工具 Schema \d+.*历史 \d+/);
+    assert.match(shown, /实报输入 \d+、输出 \d+/);
+    assert.doesNotMatch(shown, /PRIVATE_REQUEST_INPUT_MARKER/);
+    assert.ok(requests.some((request) => request.method === 'usage.diagnostics'
+      && (request.params as { action?: string }).action === 'enable'));
+    assert.ok(requests.some((request) => request.method === 'usage.diagnostics'
+      && (request.params as { action?: string }).action === 'read'));
+    await sendCommand('/usage requests off');
+    await waitFor(() => plainOutput(painted).includes('本地请求诊断已关闭并清空'), { read: () => plainOutput(painted) });
+    const beforeDisabledRead = painted.length;
+    await sendCommand('/usage requests');
+    await waitFor(() => plainOutput(painted.slice(beforeDisabledRead)).includes('未开启'), { read: () => plainOutput(painted.slice(beforeDisabledRead)) });
+  } finally {
+    instance.unmount();
+  }
+}, { permissionControl: true, config: { policy: { mode: 'auto' }, prompt: { static: 'TUI_REQUEST_DIAGNOSTIC_PREFIX' } } }));
 
 // 审批提示应显示命令语法和实际执行的程序，因为不同后端可能对同一命令给出不同结论。
 test('the approval box names the shell backend and its executable', options, async (t) => {

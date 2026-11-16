@@ -47,6 +47,7 @@ export type Record_ = {
   toolCalls?: ToolCall[];
   tool?: string;
   callId?: string;
+  runId?: string;
   // 执行耗时由 Kernel 写入事件。未执行或恢复补写结果的调用没有耗时。
   durationMs?: number;
   // 工具调用记录保存输入参数，供派生结果说明其来源。

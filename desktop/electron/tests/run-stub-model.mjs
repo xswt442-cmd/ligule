@@ -171,6 +171,11 @@ const server = createServer(async (request, response) => {
     finish('stop');
     return;
   }
+  if (prompt.includes('desktop-request-diagnostics-proof')) {
+    streamChunk(response, { choices: [{ index: 0, delta: { content: '本地请求诊断已记录。' } }] });
+    finish('stop');
+    return;
+  }
   if (desktopSteerToolReturned) {
     streamChunk(response, { choices: [{ index: 0, delta: { content: '已按当前运行中的补充指令结束。' } }] });
     finish('stop');
@@ -348,6 +353,7 @@ environment.LIGULE_MODEL_EVIDENCE_NAME = 'stub-model';
 environment.LIGULE_STUB_CONTROL = `http://127.0.0.1:${server.address().port}/stub`;
 environment.LIGULE_STUB_FETCH_TARGET = externalFetchTarget;
 environment.LIGULE_EXTERNAL_CONTROL_TEST = '1';
+environment.LIGULE_DESKTOP_TEST_REQUEST_DIAGNOSTICS = '1';
 if (externalControlOnly) environment.LIGULE_EXTERNAL_CONTROL_ONLY = '1';
 if (externalControlGapOnly) environment.LIGULE_EXTERNAL_CONTROL_GAP_ONLY = '1';
 

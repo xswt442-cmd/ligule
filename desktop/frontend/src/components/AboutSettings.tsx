@@ -89,7 +89,7 @@ export function AboutSettings({ client, projectRoot, sessionId, status, counts, 
     </details>
     <details className="about-fold">
       <summary>{t('系统与 Host 诊断', 'System and Host diagnostics')}</summary>
-      <DiagnosticsPanel status={status} counts={counts} waiting={waiting} link={link} logs={logs} onReconnect={onReconnect} />
+      <DiagnosticsPanel client={client} sessionId={sessionId} status={status} counts={counts} waiting={waiting} link={link} logs={logs} onReconnect={onReconnect} />
     </details>
   </div>;
 }
