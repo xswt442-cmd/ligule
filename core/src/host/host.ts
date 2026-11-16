@@ -287,8 +287,8 @@ interface HostSessionBase {
   readonly childMcp: Map<McpRegistry, string>;
   readonly session: SessionLog;
   readonly listeners: ((event: SessionEvent) => void)[];
-  readonly asks: Set<() => void>;
-  readonly asksByRun: Map<string, Set<() => void>>;
+  readonly asks: Set<PendingRunAsk>;
+  readonly asksByRun: Map<string, Set<PendingRunAsk>>;
   readonly requestDiagnostics: RequestDiagnosticStore;
   readonly mcpTrust: Map<string, { readonly source: 'trusted-ui'; readonly trusted: boolean; readonly updatedAt: string }>;
   sessionPolicyRules: PolicyRule[];
@@ -317,6 +317,11 @@ interface HostSessionBase {
   progressNotificationAt?: number;
   operation?: Promise<unknown>;
   adopt(file: ModeFile): Promise<void>;
+}
+
+interface PendingRunAsk {
+  readonly requestId: string;
+  readonly settle: () => void;
 }
 
 interface HostRunProgress {
@@ -397,24 +402,26 @@ function requiredString(value: unknown, field: string): string {
   return value;
 }
 
-function trackAsk(state: HostSessionBase, settle: () => void, runId?: string): void {
-  state.asks.add(settle);
+function trackAsk(state: HostSessionBase, pending: PendingRunAsk, runId?: string): void {
+  state.asks.add(pending);
   if (runId === undefined) return;
-  const asks = state.asksByRun.get(runId) ?? new Set<() => void>();
-  asks.add(settle);
+  const asks = state.asksByRun.get(runId) ?? new Set<PendingRunAsk>();
+  asks.add(pending);
   state.asksByRun.set(runId, asks);
 }
 
-function untrackAsk(state: HostSessionBase, settle: () => void, runId?: string): void {
-  state.asks.delete(settle);
+function untrackAsk(state: HostSessionBase, pending: PendingRunAsk, runId?: string): void {
+  state.asks.delete(pending);
   if (runId === undefined) return;
   const asks = state.asksByRun.get(runId);
-  asks?.delete(settle);
+  asks?.delete(pending);
   if (asks?.size === 0) state.asksByRun.delete(runId);
 }
 
-function settleRunAsks(state: HostSessionBase, runId: string): void {
-  for (const settle of [...(state.asksByRun.get(runId) ?? [])]) settle();
+function settleRunAsks(state: HostSessionBase, runId: string): string[] {
+  const pending = [...(state.asksByRun.get(runId) ?? [])];
+  for (const ask of pending) ask.settle();
+  return pending.map((ask) => ask.requestId);
 }
 
 function modelConfigOf(config: HostConfigSnapshot): Record<string, unknown> {
@@ -1485,7 +1492,7 @@ export function createHost({
     const stopBrowser = () => { browserCleanup = revokeSessionMcp(state, BROWSER_SERVER).then(() => undefined, error => error); };
     controller.signal.addEventListener('abort', stopBrowser, { once: true });
     const progress = beginProgress(state, connection, initialPhase);
-    const settleAsks = (): void => { for (const settle of state.asks) settle(); };
+    const settleAsks = (): void => { for (const ask of state.asks) ask.settle(); };
     controller.signal.addEventListener('abort', settleAsks, { once: true });
     state.running = controller;
     const operation = (async (): Promise<T> => {
@@ -1689,8 +1696,8 @@ export function createHost({
     }
     // 将已持久化的会话事件同时发送给客户端和已加载扩展。
     const listeners: ((event: SessionEvent) => void)[] = [];
-    const asks = new Set<() => void>();
-    const asksByRun = new Map<string, Set<() => void>>();
+    const asks = new Set<PendingRunAsk>();
+    const asksByRun = new Map<string, Set<PendingRunAsk>>();
     const requestDiagnostics = createRequestDiagnosticStore();
     const modeState: ModeState = { file: undefined, tools: [], undo: () => {} };
     const configuredLoopLimits = loopLimitsOf(config);
@@ -2068,7 +2075,8 @@ export function createHost({
         const cancelled = new Promise<{ decision: 'cancelled'; code: string }>((resolve) => {
           settle = () => { approvalActive = false; resolve({ decision: 'cancelled', code: 'policy_approval_cancelled' }); };
         });
-        trackAsk(state, settle, interactionRunId);
+        const pendingAsk = { requestId, settle };
+        trackAsk(state, pendingAsk, interactionRunId);
         if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'approval', true);
         const endInteraction = state.taskBudget?.startInteraction();
         updateWaitingForUser(state as HostSessionState, connection, true, 'approval');
@@ -2163,7 +2171,7 @@ export function createHost({
           approvalActive = false;
           endInteraction?.();
           pendingApprovalDetails.delete(requestId);
-          untrackAsk(state, settle, interactionRunId);
+          untrackAsk(state, pendingAsk, interactionRunId);
           if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'approval', false);
           updateWaitingForUser(state as HostSessionState, connection, false, 'approval');
         }
@@ -2277,18 +2285,20 @@ export function createHost({
         const questionSteeringRevision = state.runInputRevision ?? 0;
         const childRunId = currentKernelExecutionContext()?.runId;
         const interactionRunId = childRunId ?? state.activeRunId;
+        const requestId = randomUUID();
         let settle = (): void => {};
         const cancelled = new Promise<'cancelled'>((resolve) => {
           settle = () => resolve('cancelled');
         });
-        trackAsk(state, settle, interactionRunId);
+        const pendingAsk = { requestId, settle };
+        trackAsk(state, pendingAsk, interactionRunId);
         if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'question', true);
         const endInteraction = state.taskBudget?.startInteraction();
         updateWaitingForUser(state as HostSessionState, connection, true, 'input');
         try {
           const outcome = await Promise.race([
             // 交互等待受整次任务累计等待预算约束。
-            connection.request(QUESTION_METHOD, { sessionId: id, projectRoot: env.projectRoot, questions }).then((value) => {
+            connection.request(QUESTION_METHOD, { requestId, sessionId: id, projectRoot: env.projectRoot, questions }).then((value) => {
               if (questionSteeringRevision !== (state.runInputRevision ?? 0)) {
                 throw new KernelError('ask_user_cancelled', { detail: `${id}: the question was superseded by steering input` });
               }
@@ -2307,7 +2317,7 @@ export function createHost({
           throw new KernelError('ask_user_host_gone', { detail: `${id}: ${errorMessage(error) ?? String(error)}` });
         } finally {
           endInteraction?.();
-          untrackAsk(state, settle, interactionRunId);
+          untrackAsk(state, pendingAsk, interactionRunId);
           if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'question', false);
           updateWaitingForUser(state as HostSessionState, connection, false, 'input');
         }
@@ -3990,13 +4000,12 @@ export function createHost({
           const steering = state.runSteering;
           if (steering === undefined) throw new KernelError('run_steer_not_ready');
           const source = runOriginOf(undefined, 'human', mayRecordHumanRun(controlTrust, bridge));
-          let cancelledInteractions = 0;
+          let cancelledInteractionIds: string[] = [];
           const accepted = await steering.accept(source, requiredString(message.params.input, 'input'), () => {
             state.runInputRevision = (state.runInputRevision ?? 0) + 1;
-            cancelledInteractions = state.asks.size;
-            for (const settle of [...state.asks]) settle();
+            cancelledInteractionIds = settleRunAsks(state, runId);
           });
-          return { ...accepted, cancelledInteractions };
+          return { ...accepted, cancelledInteractions: cancelledInteractionIds.length, cancelledInteractionIds };
         }
         case 'subrun.start': {
           const state = open(sessionId);

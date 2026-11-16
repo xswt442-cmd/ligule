@@ -186,9 +186,8 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
 
     const type: InteractionType = method === APPROVAL_METHOD ? 'approval' : 'question';
     const requestedId = typeof input.requestId === 'string' ? input.requestId : undefined;
-    const requestId = type === 'approval' && requestedId !== undefined && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(requestedId)
-      ? requestedId
-      : randomUUID();
+    const requestId = requestedId !== undefined && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(requestedId)
+      ? requestedId : randomUUID();
     if (interactions.has(requestId)) return method === APPROVAL_METHOD
       ? Promise.resolve({ decision: 'unavailable', code: 'control_interaction_duplicate' })
       : Promise.reject(new KernelError('control_interaction_duplicate'));
@@ -513,11 +512,22 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
     return { ...status(found, after, limit), ownership: takenOver.has(sessionId) ? 'human' : 'external' };
   }
 
+  function settleInteraction(interaction: PendingInteraction, errorCode: string): void {
+    if (interactions.get(interaction.requestId) !== interaction) return;
+    interactions.delete(interaction.requestId);
+    if (interaction.type === 'approval') interaction.resolve({ decision: 'cancelled', code: errorCode });
+    else interaction.reject(new KernelError(errorCode));
+  }
+
   function settleInteractions(found: Operation, errorCode = 'control_interaction_stale'): void {
-    for (const interaction of pendingFor(found)) {
-      interactions.delete(interaction.requestId);
-      if (interaction.type === 'approval') interaction.resolve({ decision: 'cancelled', code: errorCode });
-      else interaction.reject(new KernelError(errorCode));
+    for (const interaction of pendingFor(found)) settleInteraction(interaction, errorCode);
+  }
+
+  function settleCancelledInteractions(found: Operation, requestIds: readonly string[]): void {
+    for (const requestId of requestIds) {
+      const interaction = interactions.get(requestId);
+      if (interaction === undefined || interaction.sessionId !== found.sessionId || interaction.operationId !== found.operationId) continue;
+      settleInteraction(interaction, 'ask_user_cancelled');
     }
   }
 
@@ -811,7 +821,14 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       case 'configuration': return await host.handle({ method: 'status.get', params: { sessionId } }, bridgeConnection);
       case 'details': return await host.handle({ method: 'approval.details', params: { sessionId, requestId: request.requestId } }, bridgeConnection);
       case 'send': return send(sessionId, 'send', request.input, undefined, 'human', bridgeConnection);
-      case 'steer': return await host.handle({ method: 'run.steer', params: { sessionId, runId: request.runId, input: request.input } }, bridgeConnection);
+      case 'steer': {
+        const found = active.get(sessionId);
+        const result = record(await host.handle({ method: 'run.steer', params: { sessionId, runId: request.runId, input: request.input } }, bridgeConnection));
+        if (found?.state === 'running' && Array.isArray(result.cancelledInteractionIds)) {
+          settleCancelledInteractions(found, result.cancelledInteractionIds.filter((value): value is string => typeof value === 'string'));
+        }
+        return result;
+      }
       case 'reply': return replyInteraction({
         sessionId,
         requestId: request.requestId,

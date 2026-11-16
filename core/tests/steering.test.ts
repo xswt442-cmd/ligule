@@ -259,11 +259,18 @@ test('P10 steering accepts at most 16 pending inputs for one Run', { timeout: 20
 test('P10 steering cancels a pending question without applying a late answer', { timeout: 20_000 }, async () => {
   let reportQuestion!: () => void;
   let answerQuestion!: (value: unknown) => void;
+  let questionRequestId: string | undefined;
   const questionRequested = new Promise<void>((resolve) => { reportQuestion = resolve; });
   const lateAnswer = new Promise<unknown>((resolve) => { answerQuestion = resolve; });
 
   await withTuiHost(async ({ client, sessionId, providerRequests }) => {
-    client.onRequest((message) => message.method === 'question.request' ? (reportQuestion(), lateAnswer) : undefined);
+    client.onRequest((message) => {
+      if (message.method !== 'question.request') return undefined;
+      const params = typeof message.params === 'object' && message.params !== null ? message.params as Record<string, unknown> : {};
+      questionRequestId = typeof params.requestId === 'string' ? params.requestId : undefined;
+      reportQuestion();
+      return lateAnswer;
+    });
     const running = client.request('run.start', {
       sessionId,
       input: JSON.stringify({ tool: 'ask_user_question', args: { questions: '[{"question":"Choose a route"}]' } }),
@@ -276,8 +283,11 @@ test('P10 steering cancels a pending question without applying a late answer', {
     assert.equal(typeof runId, 'string');
     const steering = await client.request('run.steer', { sessionId, runId, input: 'use the existing route' }) as {
       cancelledInteractions: number;
+      cancelledInteractionIds?: string[];
     };
     assert.equal(steering.cancelledInteractions, 1);
+    assert.equal(typeof questionRequestId, 'string');
+    assert.deepEqual(steering.cancelledInteractionIds, [questionRequestId]);
     answerQuestion({ answers: [{ id: 'q1', selected: ['new route'] }] });
     assert.equal(await running, undefined);
     assert.ok(providerRequests[1].messages.some((message) =>

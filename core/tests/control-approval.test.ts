@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createControl } from '../dist/host/control.js';
 import { requestAgentControl } from '../dist/host/agent-control-runtime.js';
@@ -74,6 +75,76 @@ test('external operation status exposes only an approval summary and the local h
     const finished = await control.await(started.operationId, 5_000);
     assert.equal(finished.state, 'done');
     assert.deepEqual(answer, { decision: 'allow', source: 'human', rememberScope: 'project', rememberTarget: 'file' });
+  } finally {
+    await control.release();
+    if (previousHome === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previousHome;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('steering removes only the Host-cancelled question and rejects its late reply', async () => {
+  const testplace = resolve(dirname(fileURLToPath(import.meta.url)), '../../testplace/tmp');
+  await mkdir(testplace, { recursive: true });
+  const root = await mkdtemp(join(testplace, 'control-steer-'));
+  const projectRoot = join(root, 'project');
+  const home = join(root, 'home');
+  await Promise.all([mkdir(projectRoot), mkdir(home)]);
+  const previousHome = process.env.LIGULE_HOME;
+  process.env.LIGULE_HOME = home;
+  let activeQuestionId = '';
+  let questionSequence = 0;
+  const host: Host = {
+    async handle(message, connection) {
+      if (message.method === 'session.create') return { sessionId: 'steer-session' };
+      if (message.method === 'run.start') {
+        for (let index = 0; index < 10; index += 1) {
+          activeQuestionId = `question-${++questionSequence}`;
+          try {
+            await connection.request('question.request', {
+              requestId: activeQuestionId,
+              sessionId: 'steer-session',
+              questions: [{ id: 'q1', question: 'Choose a route', options: [{ id: 'a', label: 'A' }] }],
+            });
+            return { text: 'answered', iterations: 1, modelCalls: 1 };
+          } catch (error) {
+            if ((error as { code?: string }).code !== 'ask_user_cancelled') throw error;
+          }
+        }
+        return { text: 'still running', iterations: 1, modelCalls: 1 };
+      }
+      if (message.method === 'run.steer') {
+        return { accepted: true, cancelledInteractions: 1, cancelledInteractionIds: [activeQuestionId] };
+      }
+      if (message.method === 'run.cancel') return { cancelled: true };
+      if (message.method === 'session.close') return { sessionId: 'steer-session' };
+      throw new Error(`unexpected host method: ${message.method}`);
+    },
+    async release() {},
+  };
+  const control = createControl(host, projectRoot, { operator: true });
+  try {
+    const opened = await control.create(projectRoot);
+    const started = control.start(opened.sessionId, 'ask and wait');
+    for (let index = 1; index <= 9; index += 1) {
+      const deadline = Date.now() + 5_000;
+      let pending: ReturnType<typeof control.status>['pendingInteractions'] = [];
+      while (Date.now() < deadline) {
+        pending = control.status(started.operationId).pendingInteractions;
+        if (pending.length === 1 && pending[0].requestId === `question-${index}`) break;
+        await delay(10);
+      }
+      assert.equal(pending?.length, 1);
+      assert.equal(pending?.[0]?.requestId, `question-${index}`);
+      const accepted = await requestAgentControl(projectRoot, opened.sessionId, {
+        action: 'steer', runId: 'active-run', input: `continue after question ${index}`,
+      }) as { cancelledInteractionIds?: string[] };
+      assert.deepEqual(accepted.cancelledInteractionIds, [`question-${index}`]);
+      await assert.rejects(requestAgentControl(projectRoot, opened.sessionId, {
+        action: 'reply', requestId: `question-${index}`, type: 'question', answers: [{ id: 'q1', selected: ['a'] }],
+      }), { code: 'control_interaction_stale' });
+    }
+    assert.equal(control.status(started.operationId).pendingInteractions[0]?.requestId, 'question-10');
   } finally {
     await control.release();
     if (previousHome === undefined) delete process.env.LIGULE_HOME;
