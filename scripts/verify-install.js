@@ -360,7 +360,8 @@ const { Client } = coreRequire('@modelcontextprotocol/sdk/client');
 const { StdioClientTransport, getDefaultEnvironment } = coreRequire('@modelcontextprotocol/sdk/client/stdio.js');
 const expected = [
   'ligule_interaction_reply', 'ligule_run', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_get', 'ligule_run_start', 'ligule_run_status', 'ligule_session_close', 'ligule_session_configure',
-  'ligule_session_create', 'ligule_session_list', 'ligule_session_open', 'ligule_session_read', 'ligule_session_send', 'ligule_usage_get',
+  'ligule_session_create', 'ligule_session_list', 'ligule_session_open', 'ligule_session_read', 'ligule_session_send', 'ligule_subrun_cancel',
+  'ligule_subrun_message', 'ligule_subrun_start', 'ligule_subrun_status', 'ligule_subrun_wait', 'ligule_usage_get',
 ].sort();
 const projectRoot = ${JSON.stringify(mcpProject)};
 const { setTrusted } = await import(pathToFileURL(join(${JSON.stringify(bundledCoreDirectory)}, 'dist', 'kernel', 'workspace-trust.js')).href);
