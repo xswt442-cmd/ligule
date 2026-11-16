@@ -286,7 +286,7 @@ test('refreshing one child preserves its newer status and another child first st
   }, { childCount: 2 });
 });
 
-test('a failed refresh leaves an explicit status when another child first read is pending', { skip: skipReason, timeout: 30_000 }, async () => {
+test('a failed refresh leaves an explicit status and a successful retry clears its error', { skip: skipReason, timeout: 30_000 }, async () => {
   await withChildRun(async ({ client, sessionId, branches, branch }) => {
     const other = branches[1];
     assert.ok(other);
@@ -329,6 +329,13 @@ test('a failed refresh leaves an explicit status when another child first read i
         assert.match(await branchRow().innerText(), /unknown/);
         assert.match(await branchRow().innerText(), /child_status_refresh_failed/);
         assert.doesNotMatch(await branchRow().innerText(), /读取状态中/);
+
+        await page.getByRole('button', { name: '刷新状态' }).click();
+        await page.waitForFunction((seq) => [...document.querySelectorAll('li')].some((row) =>
+          row.querySelector('button')?.textContent === `记录 ${seq}`
+            && row.textContent?.includes('completed') && !row.textContent?.includes('child_status_refresh_failed')),
+        branch.seq);
+        assert.doesNotMatch(await branchRow().innerText(), /child_status_refresh_failed/);
       });
     } finally {
       releaseOtherStatus();

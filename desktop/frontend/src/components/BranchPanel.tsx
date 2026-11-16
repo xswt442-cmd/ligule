@@ -23,6 +23,10 @@ function statusAfterReadFailure(branches: Branch[], branchId: string, errorCode:
     ? { ...branch, state: 'unknown', errorCode } : branch);
 }
 
+function withStatus(branch: Branch, state: string, errorCode: unknown): Branch {
+  return { ...branch, state, errorCode: typeof errorCode === 'string' ? errorCode : undefined };
+}
+
 function noteText(note: { kind: 'parent' | 'branch' | 'control'; code: string }, t: (chinese: string, english: string) => string): string {
   if (note.kind === 'control') {
     if (note.code === 'subrun_message_accepted') return t('补充输入已接受。', 'The child accepted the message.');
@@ -129,11 +133,8 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
       }) as { state?: unknown; errorCode?: unknown };
       if (requestGeneration.current !== generation
         || !isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) return;
-      setBranches((current) => current.map((item) => item.id === branch.id ? {
-        ...item,
-        state: typeof status.state === 'string' ? status.state : 'unknown',
-        ...(typeof status.errorCode === 'string' ? { errorCode: status.errorCode } : {}),
-      } : item));
+      setBranches((current) => current.map((item) => item.id === branch.id
+        ? withStatus(item, typeof status.state === 'string' ? status.state : 'unknown', status.errorCode) : item));
     } catch (error) {
       if (requestGeneration.current === generation
         && isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) {
@@ -162,11 +163,8 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
       if (requestGeneration.current !== generation
         || !isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) return;
       const status = result.subruns?.[0];
-      setBranches((current) => current.map((item) => item.id === branch.id ? {
-        ...item,
-        state: typeof status?.state === 'string' ? status.state : 'unknown',
-        ...(typeof status?.errorCode === 'string' ? { errorCode: status.errorCode } : {}),
-      } : item));
+      setBranches((current) => current.map((item) => item.id === branch.id
+        ? withStatus(item, typeof status?.state === 'string' ? status.state : 'unknown', status?.errorCode) : item));
       if (result.timedOut === true) setNote({ kind: 'control', code: 'subrun_wait_timed_out' });
     } catch (error) {
       if (requestGeneration.current === generation
@@ -207,11 +205,11 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
         sessionId,
         parentRunId: branch.reference.parentRunId,
         subrunId: branch.reference.subrunId,
-      }) as { state?: unknown };
+      }) as { state?: unknown; errorCode?: unknown };
       if (requestGeneration.current !== generation
         || !isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) return;
       setBranches((current) => current.map((item) => item.id === branch.id
-        ? { ...item, state: typeof status.state === 'string' ? status.state : 'unknown' } : item));
+        ? withStatus(item, typeof status.state === 'string' ? status.state : 'unknown', status.errorCode) : item));
     } catch (error) {
       if (requestGeneration.current === generation
         && isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) {
@@ -240,7 +238,8 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
       if (requestGeneration.current !== generation
         || !isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) return;
       if (typeof result.state === 'string') {
-        setBranches((current) => current.map((item) => item.id === branch.id ? { ...item, state: result.state as string } : item));
+        setBranches((current) => current.map((item) => item.id === branch.id
+          ? withStatus(item, result.state as string, undefined) : item));
       }
       setNote({ kind: 'control', code: result.cancelRequested === true ? 'subrun_cancel_requested' : 'subrun_cancel_not_running' });
     } catch (error) {
