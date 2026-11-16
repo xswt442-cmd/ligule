@@ -42,7 +42,7 @@ type ToolReply = {
     state: string;
     source: string;
     events: { cursor?: number; kind: string; source?: string }[];
-    pendingInteractions?: { type: string }[];
+    pendingInteractions?: { type: string; requestId: string }[];
     eventGap?: boolean;
     firstAvailableCursor?: number;
     hasMoreEvents?: boolean;
@@ -569,6 +569,110 @@ test('stdio MCP child controls use the Host manager and preserve wait, steering,
       releaseMessageChild();
       releaseCancelChild();
       await client?.close().catch(() => undefined);
+      if (previousHome === undefined) delete process.env.LIGULE_HOME;
+      else process.env.LIGULE_HOME = previousHome;
+      await model.close();
+    }
+  });
+});
+
+test('stdio MCP exposes bounded finite-command status and log controls for the owning Run', { timeout: 40_000 }, async () => {
+  await fixture(async ({ projectRoot, home }) => {
+    const scriptPath = join(projectRoot, 'mcp-finite-command.mjs');
+    await writeFile(scriptPath, "console.log('mcp-finite-output');\n");
+    const model = await startModelServer({
+      questionFirst: false,
+      toolCalls: [{ inputTag: 'mcp-finite-command', name: 'exec', args: {
+        command: `node "${scriptPath.replaceAll('\\', '/')}"`, waitMs: 0,
+      } }],
+    });
+    const previousHome = process.env.LIGULE_HOME;
+    process.env.LIGULE_HOME = home;
+    let client: Client | undefined;
+    let stderr = () => '';
+    try {
+      const trustPath = join(home, 'tui-trust.json');
+      const storePath = join(home, 'agent-control.json');
+      await setTrusted(projectRoot, true, trustPath);
+      const grantInput: CreateDelegationGrantInput = {
+        name: 'finite command acceptance', projectRoot,
+        defaultPermissionProfile: 'workspace-write', maxPermissionProfile: 'workspace-write',
+        defaultNetwork: 'unrestricted', maxNetwork: 'unrestricted',
+        defaultPolicy: 'auto', allowedPolicies: ['ask', 'auto'], allowOperator: true,
+        confirmPartialWorkspaceWrite: true,
+        confirmFullAccess: false, confirmUnrestrictedNetwork: true, expiresAt: null,
+      };
+      const grant = await createDelegationGrant(storePath, grantInput, (await listDelegationGrants(storePath)).version);
+      const grantId = grant.grants[0]?.id;
+      assert.equal(typeof grantId, 'string');
+      await writeFile(join(home, 'config.toml'), [
+        '[model]', 'api = "chat-completions"', `baseURL = "${model.baseURL}"`,
+        'model = "agent-control-test-model"', 'apiKeyEnv = "LIGULE_AGENT_CONTROL_TEST_KEY"',
+        '[loop]', 'iterations = 8', 'modelCalls = 16',
+        '[policy]', 'mode = "auto"', '',
+      ].join('\n'));
+      const connected = await connect(projectRoot, home, grantId, true, { LIGULE_AGENT_CONTROL_TEST_KEY: 'test-key' });
+      client = connected.client;
+      stderr = connected.stderr;
+      const names = (await client.listTools()).tools.map((tool) => tool.name);
+      for (const name of ['ligule_execution_status', 'ligule_execution_wait', 'ligule_execution_logs', 'ligule_execution_cancel']) {
+        assert.ok(names.includes(name), `missing MCP command control ${name}`);
+      }
+
+      const created = await callTool(client, 'ligule_session_create', {
+        projectRoot,
+        initial: { mode: 'full', policy: 'auto' },
+      });
+      assert.equal(created.isError, undefined, `${JSON.stringify(created)}\n${stderr()}`);
+      const sessionId = created.structuredContent.sessionId;
+      const started = await callTool(client, 'ligule_run_start', { sessionId, input: 'mcp-finite-command' });
+      assert.equal(started.isError, undefined, `${JSON.stringify(started)}\n${stderr()}`);
+      const operationId = started.structuredContent.operationId;
+      const runId = started.structuredContent.receipt?.runId;
+      assert.equal(typeof runId, 'string');
+
+      await withTimeout((async () => {
+        for (;;) {
+          const state = await callTool(client!, 'ligule_run_status', { operationId });
+          assert.equal(state.isError, undefined, `${JSON.stringify(state)}\n${stderr()}`);
+          const pendingApproval = state.structuredContent.pendingInteractions?.find((item) => item.type === 'approval');
+          if (pendingApproval !== undefined) {
+            const reply = await callTool(client!, 'ligule_interaction_reply', {
+              sessionId, requestId: pendingApproval.requestId, type: 'approval', decision: 'allow',
+            });
+            assert.equal(reply.isError, undefined, `${JSON.stringify(reply)}\n${stderr()}`);
+          }
+          if (state.structuredContent.state !== 'running') return;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      })(), 'mcp_finite_command_run_settle', 15_000);
+      const completed = await callTool(client, 'ligule_run_await', { operationId, timeoutMs: 0 });
+      assert.equal(completed.isError, undefined, `${JSON.stringify(completed)}\n${stderr()}`);
+      assert.equal(completed.structuredContent.state, 'done');
+
+      const records = await callTool(client, 'ligule_session_read', { sessionId, limit: 50 });
+      assert.equal(records.isError, undefined, `${JSON.stringify(records)}\n${stderr()}`);
+      const events = records.structuredContent.records.map((entry) => JSON.parse(entry.json) as Record<string, unknown>);
+      const tool = events.find((event) => event.kind === 'tool' && event.tool === 'exec');
+      const content = typeof tool?.result === 'object' && tool.result !== null
+        ? (tool.result as Record<string, unknown>).content as Record<string, unknown>
+        : undefined;
+      const executionId = content?.executionId;
+      assert.equal(typeof executionId, 'string', JSON.stringify(tool));
+
+      const status = await callTool(client, 'ligule_execution_status', { sessionId, runId, executionId }) as unknown as {
+        isError?: boolean; structuredContent: { state: string; exitCode?: number };
+      };
+      assert.equal(status.isError, undefined, `${JSON.stringify(status)}\n${stderr()}`);
+      assert.equal(status.structuredContent.state, 'exited');
+      assert.equal(status.structuredContent.exitCode, 0);
+      const logs = await callTool(client, 'ligule_execution_logs', { sessionId, runId, executionId }) as unknown as {
+        isError?: boolean; structuredContent: { events: { text: string }[]; nextCursor: string };
+      };
+      assert.equal(logs.isError, undefined, `${JSON.stringify(logs)}\n${stderr()}`);
+      assert.match(logs.structuredContent.events.map((event) => event.text).join(''), /mcp-finite-output/);
+    } finally {
+      await client?.close();
       if (previousHome === undefined) delete process.env.LIGULE_HOME;
       else process.env.LIGULE_HOME = previousHome;
       await model.close();

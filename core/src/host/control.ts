@@ -958,6 +958,32 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       } }, channel)));
       return { receipt, result: page };
     },
+    async executionStatus(sessionId: string, runId: string, executionId: string) {
+      owned(sessionId);
+      return record(await tracked(host.handle({ method: 'execution.status', params: {
+        sessionId, runId, executionId,
+      } }, connection)));
+    },
+    async executionWait(sessionId: string, runId: string, executionId: string, waitMs = 30_000) {
+      owned(sessionId);
+      if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 30_000) throw new KernelError('execution_wait_invalid');
+      return record(await tracked(host.handle({ method: 'execution.wait', params: {
+        sessionId, runId, executionId, waitMs,
+      } }, connection)));
+    },
+    async executionLogs(sessionId: string, runId: string, executionId: string, cursor?: string, limitBytes = 4_096) {
+      owned(sessionId);
+      if (!Number.isSafeInteger(limitBytes) || limitBytes < 1 || limitBytes > 4_096) throw new KernelError('execution_log_page_limit');
+      return record(await tracked(host.handle({ method: 'execution.logs', params: {
+        sessionId, runId, executionId, ...(cursor === undefined ? {} : { cursor }), limitBytes,
+      } }, connection)));
+    },
+    async executionCancel(sessionId: string, runId: string, executionId: string) {
+      writable(sessionId);
+      return record(await tracked(host.handle({ method: 'execution.cancel', params: {
+        sessionId, runId, executionId,
+      } }, connection)));
+    },
     async subrunStart(sessionId: string, parentRunId: string, task: string) {
       writable(sessionId);
       return record(await tracked(host.handle({ method: 'subrun.start', params: { sessionId, parentRunId, task } }, connection)));

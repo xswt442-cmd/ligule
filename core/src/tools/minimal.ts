@@ -3,11 +3,12 @@
 import { createTool, deleteTool, editTool, writeTool } from './write.js';
 import { findTool, readTool, searchTool } from './read-only.js';
 import { execTool } from '../capability/exec.js';
+import { execControlTool } from '../capability/finite-command.js';
 import type { Kernel, ToolDefinition } from '../kernel/kernel.js';
 import type { Plugin } from '../kernel/assembly.js';
 
 export const minimalTools: readonly ToolDefinition[] = Object.freeze([
-  execTool, findTool, searchTool, readTool, createTool, writeTool, editTool, deleteTool,
+  execTool, execControlTool, findTool, searchTool, readTool, createTool, writeTool, editTool, deleteTool,
 ]);
 
 export const minimalPlugin: Plugin<Kernel> = {

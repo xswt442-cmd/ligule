@@ -324,10 +324,10 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
       return requests[0];
     };
 
-    // 没有模式收紧时九件基础能力、可选工具、技能披露与派生工具都在。
+    // 没有模式收紧时基础能力、可选工具、技能披露与派生工具都在。
     const everything = await capture(undefined);
     assert.ok(everything.tools.some((entry) => entry.name === 'skill'), 'the disclosure entry is offered');
-    assert.equal(everything.tools.length, 23);
+    assert.equal(everything.tools.length, 24);
     assert.deepEqual(everything.tools.map((entry) => entry.name).filter((name) => name.startsWith('subagent_')),
       ['subagent_cancel', 'subagent_message', 'subagent_start', 'subagent_status', 'subagent_wait']);
     assert.ok(everything.tools.some((entry) => entry.name === 'present'));
@@ -346,6 +346,6 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
     assert.ok(minimal.tools.some((entry) => entry.name === 'managed_process'));
     // 模式可以隐藏可选的第一方工具；`minimal` 未列出的 `fetch` 不会提供给模型。
     assert.ok(!minimal.tools.some((entry) => entry.name === 'fetch'), 'minimal keeps the optional tool out');
-    assert.equal(minimal.tools.length, 11);
+    assert.equal(minimal.tools.length, 12);
   });
 });

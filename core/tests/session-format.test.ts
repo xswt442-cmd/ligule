@@ -282,6 +282,25 @@ test('an event kind this build does not know is refused unless the record says i
   });
 });
 
+test('finite execution events are ignorable Session facts but stay scoped to their Session', () => {
+  const header = { kind: 'session', formatVersion: 4, sessionId: 'exec-session', projectRoot: '/repo' };
+  const identity = {
+    projectIdentity: '/repo', sessionId: 'exec-session', runId: 'run-1', callId: 'call-1',
+    executionId: 'execution-1', cursorGeneration: '00000000-0000-4000-8000-000000000001',
+    timeoutMs: 120_000, logTotalBytes: 0, logFirstAvailableOffset: 0, cancelRequested: false, deadlineExceeded: false,
+    terminationPending: false, cleanupPending: false,
+  };
+  const accepted = { seq: 0, kind: 'execution', ignorable: true, state: 'accepted', acceptedAt: '2026-11-17T00:00:00.000Z', ...identity };
+  const started = { seq: 1, kind: 'execution', ignorable: true, state: 'started', startedAt: '2026-11-17T00:00:01.000Z', ...identity };
+  const exited = { seq: 2, kind: 'execution', ignorable: true, state: 'exited', startedAt: started.startedAt,
+    finishedAt: '2026-11-17T00:00:02.000Z', exitCode: 0, ...identity };
+  assert.deepEqual(parseSessionEvents([header, accepted, started, exited] as unknown as SessionEvent[]).events
+    .map((event) => event.state), ['accepted', 'started', 'exited']);
+  assert.throws(() => parseSessionEvents([header, { ...accepted, sessionId: 'other-session' }] as unknown as SessionEvent[]), {
+    code: 'session_execution_event_invalid',
+  });
+});
+
 test('session Permission events require format 2 and remain in the canonical record', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'permission.jsonl');

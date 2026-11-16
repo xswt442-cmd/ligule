@@ -96,7 +96,7 @@ function checkedSessionHeader(event: SessionEvent, version: number): SessionHead
 const WRITTEN_KINDS = [
   'session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection',
   'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule',
-  'compaction', 'todoWrite', 'image', 'screenCapture', 'policyReview', 'runInput',
+  'compaction', 'todoWrite', 'image', 'screenCapture', 'policyReview', 'runInput', 'execution',
 ];
 
 // 会话里保存的审批档位。返回 `unknown` 表示值无法解释，调用方必须拒绝该记录。
@@ -210,6 +210,44 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         pendingRunInputs.delete(inputId);
       } else {
         throw new KernelRuntimeError('session_run_input_event_invalid');
+      }
+    }
+    if (kind === 'execution') {
+      const validId = (value: unknown): value is string => typeof value === 'string'
+        && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(value);
+      if (event.ignorable !== true
+        || !['accepted', 'started', 'exited', 'cancelled', 'failed'].includes(String(event.state))
+        || !validId(event.executionId)
+        || typeof event.cursorGeneration !== 'string' || !/^[0-9a-f-]{36}$/u.test(event.cursorGeneration)
+        || typeof event.projectIdentity !== 'string' || event.projectIdentity === '' || event.projectIdentity.length > 8192
+        || header?.sessionId === undefined || event.sessionId !== header.sessionId
+        || !validId(event.runId) || !validId(event.callId)
+        || (event.parentRunId !== undefined && !validId(event.parentRunId))
+        || (event.startedAt === undefined
+          ? typeof event.acceptedAt !== 'string' || !Number.isFinite(Date.parse(event.acceptedAt))
+          : typeof event.startedAt !== 'string' || !Number.isFinite(Date.parse(event.startedAt)))
+        || (event.state === 'exited' || event.state === 'cancelled' || event.state === 'failed')
+          && (typeof event.finishedAt !== 'string' || !Number.isFinite(Date.parse(event.finishedAt)))
+        || !Number.isSafeInteger(event.timeoutMs) || Number(event.timeoutMs) < 1 || Number(event.timeoutMs) > 600_000
+        || (event.exitCode !== undefined && !Number.isSafeInteger(event.exitCode))
+        || (event.errorCode !== undefined && (typeof event.errorCode !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/u.test(event.errorCode)))
+        || !Number.isSafeInteger(event.logTotalBytes) || Number(event.logTotalBytes) < 0
+        || !Number.isSafeInteger(event.logFirstAvailableOffset) || Number(event.logFirstAvailableOffset) < 0
+        || Number(event.logFirstAvailableOffset) > Number(event.logTotalBytes)
+        || (event.logsRef !== undefined && (typeof event.logsRef !== 'object' || event.logsRef === null || Array.isArray(event.logsRef)
+          || typeof (event.logsRef as Record<string, unknown>).name !== 'string'
+          || !/^execution-[0-9a-f-]{36}\.log\.json$/u.test((event.logsRef as Record<string, unknown>).name as string)
+          || !Number.isSafeInteger((event.logsRef as Record<string, unknown>).bytes)
+          || Number((event.logsRef as Record<string, unknown>).bytes) < 1
+          || Number((event.logsRef as Record<string, unknown>).bytes) > 1024 * 1024
+          || typeof (event.logsRef as Record<string, unknown>).sha256 !== 'string'
+          || !/^[a-f0-9]{64}$/u.test((event.logsRef as Record<string, unknown>).sha256 as string)))
+        || (event.logUnavailableReason !== undefined && (typeof event.logUnavailableReason !== 'string'
+          || !/^[a-z][a-z0-9_]{0,79}$/u.test(event.logUnavailableReason)))
+        || (event.recordFailure !== undefined && typeof event.recordFailure !== 'boolean')
+        || typeof event.cancelRequested !== 'boolean' || typeof event.deadlineExceeded !== 'boolean'
+        || typeof event.terminationPending !== 'boolean' || typeof event.cleanupPending !== 'boolean') {
+        throw new KernelRuntimeError('session_execution_event_invalid');
       }
     }
     if (kind === 'sessionPolicy') {

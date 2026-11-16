@@ -69,6 +69,8 @@ import { foldLabel, readPolicyOverride } from '../session/format.js';
 import { SPILL_NAME } from '../session/spill.js';
 import { assertNoLegacyTrashConfig, boundaryOf, limitsOf, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
+import { runManagedExec, type ExecControlArguments, type ExecRunContext } from '../capability/exec.js';
+import { createFiniteCommandRegistry, type FiniteCommandOwner } from '../capability/finite-command.js';
 import { createManagedProcessRegistry, managedProcessPlugin, type ManagedProcessRegistry } from '../capability/managed-process.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
@@ -354,6 +356,7 @@ interface HostSessionState extends HostSessionBase {
 
 interface HostSessionRetirement {
   managedProcessesClosed: boolean;
+  finiteCommandsClosed: boolean;
   mcpClosed: boolean;
   extensionsDisposed: boolean;
   assemblyDisposed: boolean;
@@ -1121,6 +1124,17 @@ export function createHost({
   const pendingApprovalDetails = new Map<string, { sessionId: string; args: Record<string, unknown>; argumentSha256: string }>();
   const building = new Set<Promise<unknown>>();
   let closing: Promise<void> | undefined;
+  const finiteCommands = createFiniteCommandRegistry({
+    validateOwner: async (owner) => {
+      if (owner.grantId !== undefined) {
+        const active = await activeDelegation();
+        if (active?.id !== owner.grantId) throw new KernelError('agent_control_grant_revoked');
+      }
+      if (owner.workspaceTrusted && !(await isTrusted(owner.projectRoot))) {
+        throw new KernelError('exec_workspace_untrusted', { detail: 'workspace trust was revoked while a finite command was running' });
+      }
+    },
+  });
 
   function open(id: string): HostSessionState {
     const state = sessions.get(id);
@@ -1338,6 +1352,7 @@ export function createHost({
     if (progress === undefined) {
       progress = {
         managedProcessesClosed: false,
+        finiteCommandsClosed: false,
         mcpClosed: false,
         extensionsDisposed: false,
         assemblyDisposed: false,
@@ -1355,6 +1370,7 @@ export function createHost({
       if (!waited && !shutdown) await state.operation?.catch(() => undefined);
       const failures: unknown[] = [];
       const resources = [
+        ['finiteCommandsClosed', () => finiteCommands.stopSession(state.id)],
         ['managedProcessesClosed', () => state.managedProcesses.close()],
         ['mcpClosed', async () => { await state.mcp.close(); await state.browser.closeSession(state.id); }],
         ['extensionsDisposed', () => state.extensions.dispose()],
@@ -1728,7 +1744,16 @@ export function createHost({
       connection.notify({ notify: 'event', sessionId: id, event });
       for (const listener of listeners) withoutKernelExecutionContext(() => listener(event));
     });
-    const inheritedImages = recover ? (await session.read()).flatMap(event =>
+    await finiteCommands.accountDirectory(directory);
+    const existingEvents = await session.read();
+    await finiteCommands.restoreSession({
+      sessionId: id,
+      projectIdentity: workspaceIdentity(env.projectRoot),
+      projectRoot: env.projectRoot,
+      session,
+      events: existingEvents,
+    });
+    const inheritedImages = recover ? existingEvents.flatMap(event =>
       event.kind === 'tool' && isRecord(event.result) && event.result.images !== undefined
         ? checkedImageReferences(event.result.images) : []) : [];
     const media = createMediaStore({ ...config, workspaceRoot: env.projectRoot }, id, inheritedImages);
@@ -2194,12 +2219,62 @@ export function createHost({
       chain.restore({ ...recoveredPolicyState, override: recoveredPolicyState.override ?? (grant?.defaultPolicy ?? null) });
     }
     let extensionHookRegistry: ExtensionHookRegistry | undefined;
+    const createFiniteCommandController = (commandSessionId: string, commandSession: SessionLog, projectRoot: string) => {
+      const projectIdentity = workspaceIdentity(projectRoot);
+      const ownerOf = (context: ExecRunContext): FiniteCommandOwner => {
+        if (context.sessionId !== commandSessionId || typeof context.runId !== 'string' || context.runId === ''
+          || typeof context.callId !== 'string' || context.callId === '') {
+          throw new KernelError('execution_context_unavailable');
+        }
+        return {
+          projectIdentity,
+          projectRoot,
+          sessionId: commandSessionId,
+          runId: context.runId,
+          callId: context.callId,
+          ...(context.parentRunId === undefined ? {} : { parentRunId: context.parentRunId }),
+          ...(state.managedGrantId === undefined ? {} : { grantId: state.managedGrantId }),
+          workspaceTrusted: context.permission.workspaceTrusted,
+        };
+      };
+      return {
+        async start(args: { command?: unknown; cwd?: string }, context: ExecRunContext, waitMs: number) {
+          const owner = ownerOf(context);
+          const budget = state.taskBudget;
+          if (budget === undefined) throw new KernelError('execution_task_budget_unavailable');
+          const reservation = await finiteCommands.reserve({
+            owner,
+            session: commandSession,
+            timeoutMs: limitsOf(config).execTimeoutMs,
+            signal: context.signal,
+            startWork: () => budget.startWork(),
+          });
+          try {
+            return await runManagedExec(args, context, (lease) => finiteCommands.attach(reservation, lease, context.signal, waitMs),
+              { capturePagedLogs: true });
+          } catch (error) {
+            await finiteCommands.failReservation(reservation, error).catch(() => undefined);
+            throw error;
+          }
+        },
+        async control(args: ExecControlArguments, context: ExecRunContext) {
+          const owner = ownerOf(context);
+          switch (args.action) {
+            case 'status': return finiteCommands.status(owner, args.executionId);
+            case 'wait': return await finiteCommands.wait(owner, args.executionId, args.waitMs ?? 30_000, context.signal);
+            case 'logs': return finiteCommands.logs(owner, args.executionId, args.cursor, args.limitBytes);
+            case 'cancel': return await finiteCommands.cancel(owner, args.executionId);
+          }
+        },
+      };
+    };
     const kernel = createKernel({ config, policy: chain, session, logger,
       fileWriteQueue,
       permissionForCall: () => state.permission,
       policyOverrideForSession: () => state.policyOverride,
       extensionHooks: () => extensionHookRegistry,
       taskBudget: () => state.taskBudget,
+      execController: () => createFiniteCommandController(id, state.session, env.projectRoot),
     });
     cleanup.push(() => managedProcesses.close());
     if (!recover && initial?.policy !== undefined) await appendPolicyState(session, chain, initial.policy);
@@ -2345,6 +2420,8 @@ export function createHost({
       customToolPlugin,
       authorizeScreenCapture,
       taskBudget: () => state.taskBudget,
+      finiteCommands,
+      createExecController: (childId, childSession) => createFiniteCommandController(childId, childSession, env.projectRoot),
       extensionHooks: () => extensionHookRegistry,
       telemetry,
       requestDiagnosticsEnabled: () => state.requestDiagnostics.enabled,
@@ -2699,10 +2776,33 @@ export function createHost({
           },
           ...(options.acceptance === undefined ? {} : {
             runId: options.acceptance.runId,
-            settleSubruns: async (status) => await subagents.settleParent(options.acceptance!.runId, status),
-            beginCompletionCandidate: () => subagents.beginCompletionCandidate(options.acceptance!.runId),
-            resumeSubruns: () => subagents.resumeParent(options.acceptance!.runId),
-            finishSubruns: async () => await subagents.finishParent(options.acceptance!.runId),
+            settleSubruns: async (status) => {
+              const outcomes = await Promise.allSettled([
+                subagents.settleParent(options.acceptance!.runId, status),
+                finiteCommands.settleRun(state.id, options.acceptance!.runId,
+                  status === 'completed' ? 'completed' : status === 'cancelled' ? 'cancelled' : 'failed'),
+              ]);
+              const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
+                .map((outcome) => outcome.reason);
+              if (failures.length > 0) throw new AggregateError(failures, 'run_resources_settle_failed');
+            },
+            beginCompletionCandidate: () => {
+              try { subagents.beginCompletionCandidate(options.acceptance!.runId); }
+              finally { finiteCommands.beginCompletionCandidate(state.id, options.acceptance!.runId); }
+            },
+            resumeSubruns: () => {
+              try { subagents.resumeParent(options.acceptance!.runId); }
+              finally { finiteCommands.resumeRun(state.id, options.acceptance!.runId); }
+            },
+            finishSubruns: async () => {
+              const outcomes = await Promise.allSettled([
+                subagents.finishParent(options.acceptance!.runId),
+                finiteCommands.finishRun(state.id, options.acceptance!.runId),
+              ]);
+              const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
+                .map((outcome) => outcome.reason);
+              if (failures.length > 0) throw new AggregateError(failures, 'run_resources_finish_failed');
+            },
             persistTerminal: async (status, summary, fields) => {
               const runId = options.acceptance!.runId;
               const result = status === 'completed'
@@ -3163,8 +3263,11 @@ export function createHost({
         });
       }, connection);
     } finally {
-      if (state.runSteering === steering) state.runSteering = undefined;
-      if (state.activeRunId === acceptance.runId) state.activeRunId = undefined;
+      try { await finiteCommands.finishRun(state.id, acceptance.runId); }
+      finally {
+        if (state.runSteering === steering) state.runSteering = undefined;
+        if (state.activeRunId === acceptance.runId) state.activeRunId = undefined;
+      }
     }
   }
 
@@ -3208,7 +3311,10 @@ export function createHost({
             state.permission = createPermissionContext(state.permission.profile, state.permission.network, state.permission.capabilities,
               permissionOptionsOf(state.permission, state.permission.partialWorkspaceWriteConfirmed, message.params.trusted));
           }
-          if (!message.params.trusted) await Promise.all(affectedSessions.map((state) => state.managedProcesses.stopWorkspaceTrusted()));
+          if (!message.params.trusted) await Promise.all([
+            finiteCommands.stopProject(identity),
+            ...affectedSessions.map((state) => state.managedProcesses.stopWorkspaceTrusted()),
+          ]);
           return { projectRoot: environment.projectRoot, trusted: message.params.trusted };
         }
         case 'session.create': {
@@ -3994,8 +4100,31 @@ export function createHost({
           if (state.running === undefined) throw new KernelError('run_not_running', { detail: sessionId });
           // 通过当前循环处理取消，让工具和模型请求收到同一个取消信号。
           state.running.abort();
+          if (state.activeRunId !== undefined) await finiteCommands.stopRun(state.id, state.activeRunId, 'run_cancel');
           await state.managedProcesses.stopAll();
           return { cancelled: true };
+        }
+        case 'execution.status':
+        case 'execution.wait':
+        case 'execution.logs':
+        case 'execution.cancel': {
+          const state = open(sessionId);
+          const runId = requiredString(message.params.runId, 'runId');
+          const executionId = requiredString(message.params.executionId, 'executionId');
+          const scope = runAcceptanceScope(await state.session.read(), sessionId, runId);
+          if (scope === undefined || (runScopes !== undefined && !runScopes.includes(scope))) {
+            throw new KernelError('run_not_found');
+          }
+          if (grant !== undefined) assertGrantSessionScope(grant, state);
+          const owner = { projectIdentity: workspaceIdentity(state.environment.projectRoot), sessionId, runId };
+          if (message.method === 'execution.status') return finiteCommands.status(owner, executionId);
+          if (message.method === 'execution.wait') {
+            return await finiteCommands.wait(owner, executionId, message.params.waitMs ?? 30_000);
+          }
+          if (message.method === 'execution.logs') {
+            return finiteCommands.logs(owner, executionId, message.params.cursor, message.params.limitBytes);
+          }
+          return await finiteCommands.cancel(owner, executionId);
         }
         case 'run.steer': {
           const state = open(sessionId);
@@ -4325,9 +4454,12 @@ export function createHost({
           const result = await revokeDelegationGrant(
             delegationPathOf(), grantId, requiredString(message.params.version, 'version'),
           );
-          await Promise.all([...sessions.values()]
-            .filter((state) => state.managedGrantId === grantId)
-            .map((state) => state.managedProcesses.stopAll()));
+          await Promise.all([
+            finiteCommands.stopGrant(grantId),
+            ...[...sessions.values()]
+              .filter((state) => state.managedGrantId === grantId)
+              .map((state) => state.managedProcesses.stopAll()),
+          ]);
           return result;
         }
         case 'mcp.trust.list': {
@@ -4713,6 +4845,8 @@ export function createHost({
             failures.push(...failure.errors);
           } else failures.push(failure);
         }
+        try { await finiteCommands.close(); }
+        catch (error) { failures.push(error); }
         sessions.clear();
         pendingApprovalDetails.clear();
         await telemetry.shutdown().catch(() => {});

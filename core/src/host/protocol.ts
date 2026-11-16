@@ -36,10 +36,14 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly delegation?: DelegationSpec;
   readonly requestKey?: string;
   readonly runId?: string;
+  readonly executionId?: string;
   readonly parentRunId?: string;
   readonly subrunId?: string;
   readonly subrunIds?: string[];
   readonly timeoutMs?: number;
+  readonly waitMs?: number;
+  readonly cursor?: string;
+  readonly limitBytes?: number;
   readonly task?: string;
   readonly artifactKey?: string;
   readonly offset?: number;
@@ -415,6 +419,32 @@ export const METHODS = Object.freeze({
   'run.cancel': {
     description: 'Stop the round this session is running; the call answering run.start reports loop_cancelled between model calls and provider_cancelled while one is in flight',
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
+  },
+  'execution.status': {
+    description: 'Read the state of one finite command owned by a Run in this Session. The executionId is not an authorization token.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID, runId: { type: 'string', minLength: 1, maxLength: 160 }, executionId: { type: 'string', minLength: 1, maxLength: 160 },
+    }, required: ['sessionId', 'runId', 'executionId'] },
+  },
+  'execution.wait': {
+    description: 'Wait for one finite command to settle for a bounded time. A wait timeout does not cancel the command.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID, runId: { type: 'string', minLength: 1, maxLength: 160 }, executionId: { type: 'string', minLength: 1, maxLength: 160 },
+      waitMs: { type: 'integer', minimum: 0, maximum: 30_000 },
+    }, required: ['sessionId', 'runId', 'executionId'] },
+  },
+  'execution.logs': {
+    description: 'Read one bounded log page using an opaque cursor bound to the execution and its retained log generation.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID, runId: { type: 'string', minLength: 1, maxLength: 160 }, executionId: { type: 'string', minLength: 1, maxLength: 160 },
+      cursor: { type: 'string', minLength: 1, maxLength: 512 }, limitBytes: { type: 'integer', minimum: 1, maximum: 8192 },
+    }, required: ['sessionId', 'runId', 'executionId'] },
+  },
+  'execution.cancel': {
+    description: 'Request cancellation of one finite command owned by this Run and report whether termination and cleanup are confirmed.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID, runId: { type: 'string', minLength: 1, maxLength: 160 }, executionId: { type: 'string', minLength: 1, maxLength: 160 },
+    }, required: ['sessionId', 'runId', 'executionId'] },
   },
   'run.steer': {
     description: 'Persist one bounded input for the expected active Run; the Host derives the source from the trusted connection and applies it at the next safe model or tool-group boundary',

@@ -20,6 +20,7 @@ import { runExtensionHook } from './extensions.js';
 import type { ExtensionAfterToolContext, ExtensionHookRegistry } from './extensions.js';
 import { currentKernelExecutionContext } from './execution-context.js';
 import type { TaskBudget } from './task-budget.js';
+import type { ExecController } from '../capability/exec.js';
 
 export interface ToolContext {
   readonly config: ConfigSnapshot;
@@ -40,6 +41,8 @@ export interface ToolContext {
   readonly parentCallId?: string;
   readonly parentRunId?: string;
   readonly parentExecutionId?: string;
+  /** Host-owned finite-command control, injected only into the built-in exec tools. */
+  readonly execController?: ExecController;
 }
 
 type BivariantToolCallback<TArgs, TResult> = {
@@ -117,6 +120,7 @@ export interface KernelOptions {
   readonly policyOverrideForSession?: () => PolicyMode | null;
   readonly extensionHooks?: () => ExtensionHookRegistry | undefined;
   readonly taskBudget?: () => TaskBudget | undefined;
+  readonly execController?: () => ExecController | undefined;
   /** Shared by Sessions that belong to the same Host; omitted Kernels get a private queue. */
   readonly fileWriteQueue?: FileWriteQueue;
 }
@@ -212,6 +216,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
 
   const tools = new Map<string, RegisteredTool>();
   const policyOverrideForSession = options.policyOverrideForSession;
+  const execControllerProvider = options.execController;
   // 按工具名维护 Host 添加的拒绝规则；多次 `restrict()` 可以为同一工具添加多条规则。
   const restrictions: Set<string>[] = [];
 
@@ -711,8 +716,10 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       };
       let success: ReturnType<typeof resultOf>;
       try {
-          const runTool = (runPermission: PermissionContext, runArgs: unknown = args) => tool.run(runArgs, { ...context,
+      const execController = name === 'exec' || name === 'exec_control' ? execControllerProvider?.() : undefined;
+      const runTool = (runPermission: PermissionContext, runArgs: unknown = args) => tool.run(runArgs, { ...context,
             permission: runPermission, signal: options.signal, target: network, shell,
+            ...(execController === undefined ? {} : { execController }),
             ...(preflightResult === undefined ? {} : { preflightResult }),
             ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
             ...(options.runId === undefined ? {} : { runId: options.runId }),

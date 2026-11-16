@@ -107,6 +107,27 @@ test('guardian IPC disconnect reclaims its Linux descendants', {
   }
 });
 
+test('Linux guardian reclaims descendants when its Host process is killed', {
+  skip: process.platform === 'linux' ? false : 'Linux guardian Host-process exit verification',
+  timeout: 15_000,
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'owned-linux-host-exit-'));
+  const marker = join(directory, 'linux-host-leaf.json');
+  const host = spawn(process.execPath, [hostFixture, descendant, marker, directory], { windowsHide: true, stdio: 'ignore' });
+  const closed = once(host, 'close');
+  try {
+    const leaf = await waitForDescendant(marker);
+    host.kill('SIGKILL');
+    await closed;
+    await assertLinuxStopped(leaf.processId);
+    await assertLinuxStopped(leaf.parentId);
+  } finally {
+    if (host.exitCode === null && host.signalCode === null) host.kill('SIGKILL');
+    await closed;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('cancellation during startup and execution terminates the entire owned command tree', options, async () => {
   await withDirectory(async (directory) => {
     const shell = resolveShell({});

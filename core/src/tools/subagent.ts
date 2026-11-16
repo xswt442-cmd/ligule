@@ -8,6 +8,8 @@ import { randomUUID } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
+import type { ExecController } from '../capability/exec.js';
+import type { FiniteCommandRegistry } from '../capability/finite-command.js';
 import type { FileWriteQueue } from '../kernel/file-write-queue.js';
 import { createLoop, DEFAULT_LOOP_LIMITS, type LoopLimits, type LoopProgressEvent } from '../kernel/loop.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
@@ -67,6 +69,8 @@ function stableErrorCode(error: unknown): string {
 export interface SubagentDeps {
   readonly fileWriteQueue?: FileWriteQueue;
   readonly taskBudget?: () => TaskBudget | undefined;
+  readonly finiteCommands?: FiniteCommandRegistry;
+  readonly createExecController?: (sessionId: string, session: SessionLog) => ExecController;
   readonly createMcp?: (id: string, media: MediaStore) => Promise<{ plugin: Parameters<typeof loadAssembly>[1][number]; close(): Promise<void> }>;
   readonly authorizeScreenCapture?: () => Promise<AbortSignal>;
   config: ReturnType<typeof createConfig>;
@@ -702,6 +706,9 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                 permission,
                 extensionHooks: deps.extensionHooks,
                 taskBudget: deps.taskBudget,
+                ...(deps.createExecController === undefined ? {} : {
+                  execController: () => deps.createExecController!(id, session),
+                }),
               });
               // 派生执行继承父会话的插件工具，但不注册 `subagent`，从而禁止递归派生。
               const media = createMediaStore({ boundary: boundaryOf(deps.config),
@@ -856,6 +863,13 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                     structuredSubmitted = false;
                     structuredResult = undefined;
                   },
+                  ...(deps.finiteCommands === undefined ? {} : {
+                    beginCompletionCandidate: () => deps.finiteCommands!.beginCompletionCandidate(id, acceptance.runId),
+                    settleSubruns: async (status: 'completed' | 'cancelled' | 'failed') =>
+                      await deps.finiteCommands!.settleRun(id, acceptance.runId, status),
+                    resumeSubruns: () => deps.finiteCommands!.resumeRun(id, acceptance.runId),
+                    finishSubruns: async () => await deps.finiteCommands!.finishRun(id, acceptance.runId),
+                  }),
                   user: { origin: source, run: acceptance },
                   steering,
                   onAccepted: () => {
@@ -959,7 +973,10 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                     try { disposeResultTool?.(); }
                     finally {
                       try { disposeAssembly?.(); }
-                      finally { try { await closeMcp?.(); } finally { await session.close(); } }
+                      finally {
+                        try { await deps.finiteCommands?.finishRun(id, acceptance.runId); }
+                        finally { try { await closeMcp?.(); } finally { await session.close(); } }
+                      }
                     }
                   }
                 }

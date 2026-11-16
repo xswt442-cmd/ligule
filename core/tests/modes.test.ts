@@ -21,7 +21,7 @@ import type { PolicyMode } from '../dist/kernel/policy.js';
 import { testHostProvider } from './helpers/provider.ts';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
-const MINIMAL = ['create', 'delete', 'edit', 'exec', 'find', 'read', 'search', 'write'];
+const MINIMAL = ['create', 'delete', 'edit', 'exec', 'exec_control', 'find', 'read', 'search', 'write'];
 const HOST_MINIMAL = [...MINIMAL, 'managed_process'];
 
 type ModeLayout = {
@@ -194,7 +194,7 @@ test('a mode cannot name the disclosure entry, and hiding the rest still leaves 
     const narrowed = kernelWithDisclosure();
     applyMode(narrowed, await loadMode('justread', directories));
     assert.deepEqual(narrowed.manifest().map((entry) => entry.name), ['read', 'skill']);
-    assert.equal(narrowed.list().length, 9);
+    assert.equal(narrowed.list().length, 10);
   });
 });
 

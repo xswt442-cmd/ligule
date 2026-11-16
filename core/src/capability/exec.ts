@@ -19,10 +19,26 @@ import { permissionDenial, type PermissionContext } from '../kernel/permission.j
 import type { ShellSelection } from './shell.js';
 import { assertInterpreterIdentity, assertScriptBinding, bindScript, commandUsesNodeRuntime, readBoundScript, resolveNodeRuntime, type ScriptBinding } from './script-binding.js';
 
-type ExecArguments = { command?: unknown; cwd?: string };
+type ExecArguments = { command?: unknown; cwd?: string; waitMs?: unknown };
+
+export interface ExecLogChunk {
+  readonly sequence: number;
+  readonly stream: 'stdout' | 'stderr';
+  readonly offset: number;
+  readonly data: Buffer;
+}
+
+export interface ExecLogSnapshot {
+  readonly totalBytes: number;
+  readonly firstAvailableOffset: number;
+  readonly chunks: readonly ExecLogChunk[];
+}
+
 export interface ManagedExecLease {
   readonly completion: Promise<number>;
   readonly logs: () => string;
+  /** Read a bounded byte range without moving another reader's cursor. */
+  readonly readLogs?: (offset: number, limitBytes: number) => ExecLogSnapshot;
   /** Resolves only after owned-process completion and temporary-resource cleanup are confirmed. */
   stop(): Promise<void>;
 }
@@ -32,7 +48,30 @@ export interface ExecRunContext {
   signal?: AbortSignal;
   shell?: ShellSelection;
   scriptBinding?: ScriptBinding;
+  readonly sessionId?: string;
+  readonly runId?: string;
+  readonly callId?: string;
+  readonly parentRunId?: string;
+  readonly parentCallId?: string;
+  readonly execController?: ExecController;
 }
+
+export interface ExecController {
+  start(args: { command?: unknown; cwd?: string }, context: ExecRunContext, waitMs: number): Promise<unknown>;
+  control(args: ExecControlArguments, context: ExecRunContext): Promise<unknown>;
+}
+
+export interface ExecControlArguments {
+  readonly action: 'status' | 'wait' | 'logs' | 'cancel';
+  readonly executionId: string;
+  readonly waitMs?: number;
+  readonly cursor?: string;
+  readonly limitBytes?: number;
+}
+
+const MAX_EXEC_WAIT_MS = 30_000;
+const MAX_EXEC_LOG_BYTES = 256 * 1024;
+const MAX_EXEC_LOG_EVENTS = 4096;
 type ExecResult = { text: string; exitCode: number | null };
 
 const MAX_EXEC_TIMEOUT_MS = 600_000;
@@ -309,7 +348,7 @@ async function createPrivateTempDir(): Promise<string> {
 export const execTool = {
   name: 'exec',
   access: 'exec' as const,
-  description: 'Run a command line with the shell backend the host chose. The default working directory is the workspace root; an explicit cwd is relative to that root and must resolve inside the workspace boundary.',
+  description: 'Run a command line with the shell backend the host chose. The default working directory is the workspace root; an explicit cwd is relative to that root and must resolve inside the workspace boundary. Set waitMs to return a controllable handle if a finite command is still running.',
   // 该命令必须使用 Kernel 选定的解释器；解析、权限判定、执行记录均依据同一后端。
   commandArgument: 'command',
   parameters: {
@@ -317,10 +356,20 @@ export const execTool = {
     properties: {
       command: { type: 'string', description: 'The command line to run.' },
       cwd: { type: 'string', description: 'Optional working directory relative to the workspace root, within the workspace boundary.' },
+      waitMs: { type: 'integer', minimum: 0, maximum: MAX_EXEC_WAIT_MS,
+        description: 'Optional bounded initial wait. When omitted, preserve the synchronous result. When supplied, return a handle if the command is still running.' },
     },
     required: ['command'],
   },
   run(args: ExecArguments, context: ExecRunContext): Promise<ExecResult> {
+    if (args.waitMs !== undefined) {
+      if (!Number.isSafeInteger(args.waitMs) || Number(args.waitMs) < 0 || Number(args.waitMs) > MAX_EXEC_WAIT_MS) {
+        throw new KernelError('execution_wait_invalid');
+      }
+      if (context.execController === undefined) throw new KernelError('exec_control_unavailable');
+      return context.execController.start({ command: args.command, ...(args.cwd === undefined ? {} : { cwd: args.cwd }) },
+        context, Number(args.waitMs)) as Promise<ExecResult>;
+    }
     return runExec(args, context);
   },
 };
@@ -330,11 +379,13 @@ function runExec<TResult>(
   args: ExecArguments,
   context: ExecRunContext,
   onManagedProcess: (lease: ManagedExecLease) => Promise<TResult>,
+  capturePagedLogs?: boolean,
 ): Promise<TResult>;
 async function runExec<TResult>(
   args: ExecArguments,
   { config, permission, signal, shell, scriptBinding }: ExecRunContext,
   onManagedProcess?: (lease: ManagedExecLease) => Promise<TResult>,
+  capturePagedLogs = false,
 ): Promise<ExecResult | TResult> {
     if (typeof args.command !== 'string' || args.command.trim() === '') {
       throw new KernelError('exec_command_required', { detail: 'the command to run is missing' });
@@ -547,7 +598,11 @@ async function runExec<TResult>(
     const tail: Buffer[] = [];
     let tailSize = 0;
     let total = 0;
-    const collect = (chunk: Buffer): void => {
+    const logChunks: ExecLogChunk[] = [];
+    let retainedLogBytes = 0;
+    let nextLogSequence = 0;
+    const collect = (stream: ExecLogChunk['stream']) => (chunk: Buffer): void => {
+      const offset = total;
       total += chunk.length;
       if (head.length < half) head = Buffer.concat([head, chunk.subarray(0, half - head.length)]);
       tail.push(chunk);
@@ -561,9 +616,22 @@ async function runExec<TResult>(
         tail[0] = tail[0].subarray(tailSize - execBytes);
         tailSize = execBytes;
       }
+      if (!capturePagedLogs || chunk.length === 0) return;
+      const copied = Buffer.from(chunk);
+      const retained = copied.length > MAX_EXEC_LOG_BYTES
+        ? copied.subarray(copied.length - MAX_EXEC_LOG_BYTES)
+        : copied;
+      logChunks.push({ sequence: nextLogSequence++, stream,
+        offset: offset + copied.length - retained.length, data: retained });
+      retainedLogBytes += retained.length;
+      while (retainedLogBytes > MAX_EXEC_LOG_BYTES || logChunks.length > MAX_EXEC_LOG_EVENTS) {
+        const discarded = logChunks.shift();
+        if (discarded === undefined) break;
+        retainedLogBytes -= discarded.data.length;
+      }
     };
-    stdout.on('data', collect);
-    stderr.on('data', collect);
+    stdout.on('data', collect('stdout'));
+    stderr.on('data', collect('stderr'));
 
     const completion: Promise<number | null> = owned?.completion ?? new Promise((resolve, reject) => {
       child.once('error', reject);
@@ -603,6 +671,26 @@ async function runExec<TResult>(
         logs: () => {
           const bytes = Buffer.concat(tail).subarray(-16_384);
           return decode(bytes);
+        },
+        readLogs: (offset, limitBytes) => {
+          if (!capturePagedLogs) return { totalBytes: 0, firstAvailableOffset: 0, chunks: [] };
+          const firstAvailableOffset = logChunks[0]?.offset ?? total;
+          let nextOffset = Math.max(offset, firstAvailableOffset);
+          let remaining = Math.max(1, Math.min(MAX_EXEC_LOG_BYTES, Math.floor(limitBytes)));
+          const chunks: ExecLogChunk[] = [];
+          for (const item of logChunks) {
+            const itemEnd = item.offset + item.data.length;
+            if (itemEnd <= nextOffset) continue;
+            const start = Math.max(0, nextOffset - item.offset);
+            const length = Math.min(item.data.length - start, remaining);
+            if (length <= 0) break;
+            chunks.push({ sequence: item.sequence, stream: item.stream,
+              offset: item.offset + start, data: item.data.subarray(start, start + length) });
+            nextOffset += length;
+            remaining -= length;
+            if (remaining === 0) break;
+          }
+          return { totalBytes: total, firstAvailableOffset, chunks };
         },
         async stop() {
           if (child.exitCode === null && child.signalCode === null) {
@@ -719,6 +807,7 @@ export function runManagedExec<TResult>(
   args: ExecArguments,
   context: ExecRunContext,
   onManagedProcess: (lease: ManagedExecLease) => Promise<TResult>,
+  options: { readonly capturePagedLogs?: boolean } = {},
 ): Promise<TResult> {
-  return runExec(args, context, onManagedProcess);
+  return runExec(args, context, onManagedProcess, options.capturePagedLogs === true);
 }

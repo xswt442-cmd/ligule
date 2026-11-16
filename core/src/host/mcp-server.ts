@@ -92,6 +92,65 @@ const subrunStatusOutput = object({
     validation: { type: 'object', additionalProperties: true } }, ['state', 'textCharacters']),
   startedAt: { type: 'number', minimum: 0 }, updatedAt: { type: 'number', minimum: 0 }, completedAt: { type: 'number', minimum: 0 },
 }, ['subrunId', 'sessionId', 'runId', 'parentRunId', 'state', 'phase', 'task', 'pendingInteractions', 'startedAt', 'updatedAt']);
+const finiteExecutionProperties: Record<string, object> = {
+  executionId: id,
+  projectIdentity: { type: 'string', minLength: 1, maxLength: 4096 },
+  sessionId: id,
+  runId: id,
+  callId,
+  parentRunId: id,
+  state: { type: 'string', enum: ['starting', 'running', 'stopping', 'exited', 'cancelled', 'failed', 'unknown'] },
+  acceptedAt: { type: 'string', maxLength: 64 },
+  startedAt: { type: 'string', maxLength: 64 },
+  finishedAt: { type: 'string', maxLength: 64 },
+  deadlineAt: { type: 'string', maxLength: 64 },
+  timeoutMs: { type: 'integer', minimum: 1, maximum: 600_000 },
+  exitCode: { type: 'integer' },
+  errorCode: { type: 'string', maxLength: 80 },
+  cancelRequested: { type: 'boolean' },
+  deadlineExceeded: { type: 'boolean' },
+  terminationPending: { type: 'boolean' },
+  cleanupPending: { type: 'boolean' },
+  recordFailure: { type: 'boolean' },
+  logTotalBytes: { type: 'integer', minimum: 0 },
+  logFirstAvailableOffset: { type: 'integer', minimum: 0 },
+  logAvailable: { type: 'boolean' },
+  logUnavailableReason: { type: 'string', maxLength: 80 },
+};
+const finiteExecutionStatusOutput = object(finiteExecutionProperties,
+  ['executionId', 'projectIdentity', 'sessionId', 'runId', 'callId', 'state', 'acceptedAt', 'timeoutMs',
+    'cancelRequested', 'deadlineExceeded', 'terminationPending', 'cleanupPending', 'recordFailure', 'logTotalBytes',
+    'logFirstAvailableOffset', 'logAvailable']);
+const finiteExecutionWaitOutput = object({ ...finiteExecutionProperties, waitTimedOut: { type: 'boolean' } },
+  ['executionId', 'projectIdentity', 'sessionId', 'runId', 'callId', 'state', 'acceptedAt', 'timeoutMs',
+    'cancelRequested', 'deadlineExceeded', 'terminationPending', 'cleanupPending', 'recordFailure', 'logTotalBytes',
+    'logFirstAvailableOffset', 'logAvailable', 'waitTimedOut']);
+const finiteExecutionLogPageOutput = object({
+  executionId: id,
+  cursor: { type: 'string', maxLength: 512 },
+  firstAvailableCursor: { type: 'string', maxLength: 512 },
+  nextCursor: { type: 'string', maxLength: 512 },
+  hasMore: { type: 'boolean' },
+  gap: { type: 'boolean' },
+  missingRange: object({ fromOffset: { type: 'integer', minimum: 0 }, toOffset: { type: 'integer', minimum: 0 } }, ['fromOffset', 'toOffset']),
+  terminal: { type: 'boolean' },
+  truncated: { type: 'boolean' },
+  totalBytes: { type: 'integer', minimum: 0 },
+  firstAvailableOffset: { type: 'integer', minimum: 0 },
+  nextOffset: { type: 'integer', minimum: 0 },
+  events: { type: 'array', maxItems: 64, items: object({
+    sequence: { type: 'integer', minimum: 0 },
+    stream: { type: 'string', enum: ['stdout', 'stderr'] },
+    offset: { type: 'integer', minimum: 0 },
+    byteLength: { type: 'integer', minimum: 1, maximum: 4096 },
+    text: { type: 'string', maxLength: 4096 },
+    dataBase64: { type: 'string', maxLength: 5464 },
+    decodeLossPossible: { type: 'boolean' },
+  }, ['sequence', 'stream', 'offset', 'byteLength', 'text', 'dataBase64', 'decodeLossPossible']) },
+  available: { type: 'boolean' },
+  unavailableReason: { type: 'string', maxLength: 80 },
+}, ['executionId', 'cursor', 'events', 'firstAvailableCursor', 'nextCursor', 'hasMore', 'gap', 'terminal', 'truncated',
+  'available', 'totalBytes', 'firstAvailableOffset', 'nextOffset']);
 const operationProperties = {
   operationId: id, sessionId: id, state: { type: 'string', enum: ['running', 'done', 'failed', 'cancelled'] },
   reused: { type: 'boolean' }, receipt: durableReceiptOutput,
@@ -362,6 +421,20 @@ const tools: Tool[] = [
     outputSchema: object({ subrunId: id, runId: id, cancelRequested: { type: 'boolean' },
       state: { type: 'string', enum: ['starting', 'running', 'completed', 'failed', 'cancelled', 'unknown'] } },
       ['subrunId', 'runId', 'cancelRequested', 'state']) },
+  { name: 'ligule_execution_status', description: 'Read a finite command owned by a Run in this Session. executionId and runId identify the resource but are not authorization tokens.',
+    inputSchema: object({ sessionId: id, runId: id, executionId: id }, ['sessionId', 'runId', 'executionId']),
+    outputSchema: finiteExecutionStatusOutput },
+  { name: 'ligule_execution_wait', description: 'Wait up to 30 seconds for one finite command. A wait timeout does not cancel the command.',
+    inputSchema: object({ sessionId: id, runId: id, executionId: id,
+      waitMs: { type: 'integer', minimum: 0, maximum: 30_000, default: 30_000 } }, ['sessionId', 'runId', 'executionId']),
+    outputSchema: finiteExecutionWaitOutput },
+  { name: 'ligule_execution_logs', description: 'Read one bounded stdout/stderr page. Continue with nextCursor; each reader keeps its own opaque cursor.',
+    inputSchema: object({ sessionId: id, runId: id, executionId: id, cursor: { type: 'string', minLength: 1, maxLength: 512 },
+      limitBytes: { type: 'integer', minimum: 1, maximum: 4_096, default: 4_096 } }, ['sessionId', 'runId', 'executionId']),
+    outputSchema: finiteExecutionLogPageOutput },
+  { name: 'ligule_execution_cancel', description: 'Request cancellation of one finite command. The result separates the request from confirmed process-tree termination and cleanup.',
+    inputSchema: object({ sessionId: id, runId: id, executionId: id }, ['sessionId', 'runId', 'executionId']),
+    outputSchema: finiteExecutionStatusOutput },
   { name: 'ligule_session_read', description: 'Read real persistent records, newest page first (records inside a page are chronological). Use nextBefore as before for older pages. Each json field is a record JSON fragment, at most 8192 UTF-16 characters. If nextOffset is non-null, call with at=that seq and offset=nextOffset until null, concatenating fragments before JSON.parse. at and before are exclusive. This preserves complete large records without unbounded responses.',
     inputSchema: object({ sessionId: id, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 }, before: { type: 'integer', minimum: 1 }, at: { type: 'integer', minimum: 1 }, offset: { type: 'integer', minimum: 0, default: 0 } }, ['sessionId']),
     outputSchema: object({ sessionId: id, nextBefore: { type: ['integer', 'null'] }, hasMore: { type: 'boolean' }, provisionalOutput, provisionalOutputError: { type: ['string', 'null'] }, records: { type: 'array', maxItems: 50, items: object({ seq: { type: 'integer' }, kind: { type: 'string' }, json: { type: 'string', maxLength: 8192 }, offset: { type: 'integer' }, nextOffset: { type: ['integer', 'null'] }, totalCharacters: { type: 'integer' } }, ['seq', 'kind', 'json', 'offset', 'nextOffset', 'totalCharacters']) } }, ['sessionId', 'records', 'nextBefore', 'hasMore']) },
@@ -380,6 +453,10 @@ interface Arguments {
   delegation?: DelegationSpec;
   requestKey?: string;
   runId?: string;
+  executionId?: string;
+  waitMs?: number;
+  cursor?: string;
+  limitBytes?: number;
   parentRunId?: string;
   subrunId?: string;
   subrunIds?: string[];
@@ -521,6 +598,10 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
         case 'ligule_subrun_message': result = await control.subrunMessage(input.sessionId!, input.parentRunId!, input.subrunId!, input.runId!, input.input!); break;
         case 'ligule_subrun_wait': result = await control.subrunWait(input.sessionId!, input.parentRunId!, input.subrunIds!, input.timeoutMs ?? 30_000); break;
         case 'ligule_subrun_cancel': result = await control.subrunCancel(input.sessionId!, input.parentRunId!, input.subrunId!, input.runId!); break;
+        case 'ligule_execution_status': result = await control.executionStatus(input.sessionId!, input.runId!, input.executionId!); break;
+        case 'ligule_execution_wait': result = await control.executionWait(input.sessionId!, input.runId!, input.executionId!, input.waitMs ?? 30_000); break;
+        case 'ligule_execution_logs': result = await control.executionLogs(input.sessionId!, input.runId!, input.executionId!, input.cursor, input.limitBytes ?? 4_096); break;
+        case 'ligule_execution_cancel': result = await control.executionCancel(input.sessionId!, input.runId!, input.executionId!); break;
         case 'ligule_session_read': result = await control.read(input.sessionId!, input.before, input.limit ?? 20, input.at, input.offset); break;
   case 'ligule_usage_get': result = await control.usage(input.sessionId!); break;
         default: throw new KernelError('tool_unknown');
