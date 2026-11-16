@@ -18,6 +18,11 @@ function isCurrentStatusGeneration(generations: Map<string, number>, branchId: s
   return generations.get(branchId) === generation;
 }
 
+function statusAfterReadFailure(branches: Branch[], branchId: string, errorCode: string): Branch[] {
+  return branches.map((branch) => branch.id === branchId && branch.state === undefined
+    ? { ...branch, state: 'unknown', errorCode } : branch);
+}
+
 function noteText(note: { kind: 'parent' | 'branch' | 'control'; code: string }, t: (chinese: string, english: string) => string): string {
   if (note.kind === 'control') {
     if (note.code === 'subrun_message_accepted') return t('补充输入已接受。', 'The child accepted the message.');
@@ -130,7 +135,12 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
         ...(typeof status.errorCode === 'string' ? { errorCode: status.errorCode } : {}),
       } : item));
     } catch (error) {
-      if (requestGeneration.current === generation) setNote({ kind: 'control', code: code(error) });
+      if (requestGeneration.current === generation
+        && isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) {
+        const errorCode = code(error);
+        setNote({ kind: 'control', code: errorCode });
+        setBranches((current) => statusAfterReadFailure(current, branch.id, errorCode));
+      }
     } finally {
       if (requestGeneration.current === generation) setBusyId(null);
     }
@@ -159,7 +169,12 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
       } : item));
       if (result.timedOut === true) setNote({ kind: 'control', code: 'subrun_wait_timed_out' });
     } catch (error) {
-      if (requestGeneration.current === generation) setNote({ kind: 'control', code: code(error) });
+      if (requestGeneration.current === generation
+        && isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) {
+        const errorCode = code(error);
+        setNote({ kind: 'control', code: errorCode });
+        setBranches((current) => statusAfterReadFailure(current, branch.id, errorCode));
+      }
     } finally {
       if (requestGeneration.current === generation) setBusyId(null);
     }
@@ -198,7 +213,12 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
       setBranches((current) => current.map((item) => item.id === branch.id
         ? { ...item, state: typeof status.state === 'string' ? status.state : 'unknown' } : item));
     } catch (error) {
-      if (requestGeneration.current === generation) setNote({ kind: 'control', code: code(error) });
+      if (requestGeneration.current === generation
+        && isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) {
+        const errorCode = code(error);
+        setNote({ kind: 'control', code: errorCode });
+        setBranches((current) => statusAfterReadFailure(current, branch.id, errorCode));
+      }
     } finally {
       if (requestGeneration.current === generation) setBusyId(null);
     }
@@ -224,7 +244,12 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
       }
       setNote({ kind: 'control', code: result.cancelRequested === true ? 'subrun_cancel_requested' : 'subrun_cancel_not_running' });
     } catch (error) {
-      if (requestGeneration.current === generation) setNote({ kind: 'control', code: code(error) });
+      if (requestGeneration.current === generation
+        && isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) {
+        const errorCode = code(error);
+        setNote({ kind: 'control', code: errorCode });
+        setBranches((current) => statusAfterReadFailure(current, branch.id, errorCode));
+      }
     } finally {
       if (requestGeneration.current === generation) setBusyId(null);
     }

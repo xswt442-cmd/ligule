@@ -285,3 +285,53 @@ test('refreshing one child preserves its newer status and another child first st
     }
   }, { childCount: 2 });
 });
+
+test('a failed refresh leaves an explicit status when another child first read is pending', { skip: skipReason, timeout: 30_000 }, async () => {
+  await withChildRun(async ({ client, sessionId, branches, branch }) => {
+    const other = branches[1];
+    assert.ok(other);
+    let markOtherStatusStarted;
+    let releaseOtherStatus;
+    const otherStatusStarted = new Promise((resolve) => { markOtherStatusStarted = resolve; });
+    const otherStatusGate = new Promise((resolve) => { releaseOtherStatus = resolve; });
+    let held = false;
+    let branchStatusReads = 0;
+    const hostCall = async (method, params) => {
+      if (method === 'subrun.status' && params.subrunId === other.subrunId && !held) {
+        held = true;
+        markOtherStatusStarted();
+        await otherStatusGate;
+      }
+      if (method === 'subrun.status' && params.subrunId === branch.subrunId) {
+        branchStatusReads += 1;
+        if (branchStatusReads === 2) {
+          throw Object.assign(new Error('child_status_refresh_failed'), { code: 'child_status_refresh_failed' });
+        }
+        const result = await client.request(method, params);
+        return { ...result, state: 'completed' };
+      }
+      return await client.request(method, params);
+    };
+    try {
+      await withBranchPanel(sessionId, branch, hostCall, async (page) => {
+        await otherStatusStarted;
+        const branchRow = () => page.locator('li').filter({ has: page.getByRole('button', { name: `记录 ${branch.seq}` }) });
+        const otherRow = () => page.locator('li').filter({ has: page.getByRole('button', { name: `记录 ${other.seq}` }) });
+        assert.equal(branchStatusReads, 1, 'A first status response has returned while B is still pending');
+        assert.match(await otherRow().innerText(), /读取状态中/);
+
+        await page.getByRole('button', { name: '刷新状态' }).click();
+        await page.getByText('子任务操作失败：child_status_refresh_failed').waitFor();
+        releaseOtherStatus();
+        await page.waitForFunction((seq) => [...document.querySelectorAll('li')].some((row) =>
+          row.querySelector('button')?.textContent === `记录 ${seq}` && row.textContent?.includes('completed')),
+        other.seq);
+        assert.match(await branchRow().innerText(), /unknown/);
+        assert.match(await branchRow().innerText(), /child_status_refresh_failed/);
+        assert.doesNotMatch(await branchRow().innerText(), /读取状态中/);
+      });
+    } finally {
+      releaseOtherStatus();
+    }
+  }, { childCount: 2 });
+});
