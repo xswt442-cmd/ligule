@@ -79,6 +79,16 @@ function findUnfinishedTurns(events: SessionEvent[]): number[] {
   return [...started].filter((userSeq) => !terminal.has(userSeq));
 }
 
+function pendingRunInputs(events: readonly SessionEvent[], runId: string): SessionEvent[] {
+  const pending = new Map<string, SessionEvent>();
+  for (const event of events) {
+    if (event.kind !== 'runInput' || event.runId !== runId || typeof event.inputId !== 'string') continue;
+    if (event.state === 'accepted') pending.set(event.inputId, event);
+    else if (event.state === 'applied' || event.state === 'cancelled' || event.state === 'invalidated') pending.delete(event.inputId);
+  }
+  return [...pending.values()];
+}
+
 export function buildRepairEvents(
   unresolved: UnresolvedCall[],
   { readOnly }: { readOnly: Set<string> },
@@ -119,8 +129,15 @@ export async function repairUnresolvedCalls(
   for (const event of buildRepairEvents(unresolved, { readOnly })) appended.push(await session.append(event));
   for (const userSeq of findUnfinishedTurns(events)) {
     const user = events.find(event => event.kind === 'user' && event.seq === userSeq);
+    const run = user?.kind === 'user' && isRunAcceptance(user.run) ? user.run : undefined;
+    if (run !== undefined) {
+      for (const input of pendingRunInputs(events, run.runId)) {
+        await session.append({ kind: 'runInput', mode: 'steer', state: 'invalidated', inputId: input.inputId as string,
+          runId: run.runId, invalidatedAt: new Date().toISOString() });
+      }
+    }
     await session.append({ kind: 'turn', ignorable: true, status: 'interrupted', userSeq,
-      ...(isRunAcceptance(user?.run) ? { runId: user.run.runId } : {}), code: 'host_restarted' });
+      ...(run === undefined ? {} : { runId: run.runId }), code: 'host_restarted' });
   }
   return appended;
 }

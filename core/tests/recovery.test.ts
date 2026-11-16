@@ -8,6 +8,7 @@ import {
   buildRepairEvents, createConnection, createConfig, createKernel, createMemoryConnectionPair, createPermissionContext, createSessionLog, createTool,
   findUnresolvedCalls, providerFromConfig, repairUnresolvedCalls, serveHost, sessionDirectory,
 } from '../dist/index.js';
+import { createRunAcceptance } from '../dist/session/run.js';
 import type { HostOptions } from '../dist/host/host.js';
 import type { ModelMessage } from '../dist/kernel/loop.js';
 import type { SessionEvent } from '../dist/session/format.js';
@@ -200,6 +201,30 @@ test('turn recovery uses input evidence, keeps legacy completed turns, and does 
     await repairUnresolvedCalls(empty, { readOnly: READ_ONLY });
     assert.equal((await empty.read()).some((event) => event.kind === 'turn'), false, '没有用户输入时不补中断轮次');
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('turn recovery invalidates accepted steering before appending its interrupted terminal', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'tmp', 'ligule-steering-recovery-'));
+  const session = createSessionLog({ directory: root, id: 'steering-recovery' });
+  try {
+    const run = createRunAcceptance('steering-recovery', 'continue the route', null, 'human');
+    const user = await session.append({ kind: 'user', text: 'continue the route', run });
+    await session.append({ kind: 'runInput', mode: 'steer', state: 'accepted', inputId: 'pending-steer', runId: run.runId,
+      source: 'human', text: 'keep the current route', acceptedAt: '2026-11-16T00:00:00.000Z' });
+
+    await repairUnresolvedCalls(session, { readOnly: READ_ONLY });
+    const events = await session.read();
+    assert.deepEqual(events.filter((event) => event.kind === 'runInput').map((event) => event.state), ['accepted', 'invalidated']);
+    assert.deepEqual(events.filter((event) => event.kind === 'turn').map((event) => [event.userSeq, event.status, event.code]), [
+      [user.seq, 'interrupted', 'host_restarted'],
+    ]);
+    await repairUnresolvedCalls(session, { readOnly: READ_ONLY });
+    assert.deepEqual((await session.read()).filter((event) => event.kind === 'turn').length, 1,
+      'a repeated recovery does not append a second terminal');
+  } finally {
+    await session.close();
     await rm(root, { recursive: true, force: true });
   }
 });
