@@ -582,12 +582,15 @@ export function createLoop({
           let messagesAfterPreparation = 0;
           let preparationChangedProjection = false;
           let requestCompactionDiagnostics = emptyRequestCompactionDiagnostics();
-          const prepareMessages = async (): Promise<unknown[]> => {
+          const prepareMessages = async (baseMessages?: unknown[]): Promise<unknown[]> => {
             const baseSystem = systemBase();
             system = baseSystem;
             const diagnosticsEnabled = requestDiagnosticsEnabled?.() === true;
             let prepared: unknown[];
-            if (session !== undefined && diagnosticsEnabled && session.modelViewWithDiagnostics !== undefined) {
+            if (baseMessages !== undefined) {
+              prepared = baseMessages;
+              requestCompactionDiagnostics = compaction?.diagnostics?.() ?? emptyRequestCompactionDiagnostics();
+            } else if (session !== undefined && diagnosticsEnabled && session.modelViewWithDiagnostics !== undefined) {
               const view = await session.modelViewWithDiagnostics();
               prepared = view.messages;
               requestCompactionDiagnostics = view.compaction;
@@ -851,7 +854,7 @@ export function createLoop({
               const cleanup = await draft?.discard();
               if (cleanup !== undefined && session !== undefined) await session.append({ kind: 'streamDiagnostic', ignorable: true, code: cleanup.code });
               events.length = 0;
-              messages = await prepareMessages();
+              messages = await prepareMessages(retried);
             }
           }
           // 使用服务端报告的真实用量校准本地估算，并将用量事件写入记录供界面和恢复读取。

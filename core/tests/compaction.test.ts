@@ -20,7 +20,7 @@ import {
   loadCheckpointFile,
 } from '../dist/index.js';
 import { resolveModel } from '../dist/kernel/model-services.js';
-import type { LoopCompactionRequest, ModelProvider, ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
+import type { LoopCompaction, LoopCompactionRequest, ModelProvider, ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
 import type { SessionEvent } from '../dist/session/format.js';
 import type { SessionLog } from '../dist/session/session.js';
 
@@ -142,6 +142,30 @@ test('pressure over the line compacts once and the next request carries the summ
 });
 
 const overflow = new KernelError('provider_http_error', { detail: '400 the input is longer than the maximum context length' });
+
+test('context overflow recovery retries with its returned projection when it does not mutate Session', async () => {
+  await withSession(async ({ session }) => {
+    const provider = fakeProvider([overflow, [{ type: 'text', text: 'after returned recovery' }]]);
+    const recovered = [{ role: 'user', text: 'RECOVERED REQUEST PROJECTION' }];
+    const prepared: unknown[][] = [];
+    const compaction: LoopCompaction = {
+      async prepare(request) {
+        prepared.push(request.messages);
+        return request.messages;
+      },
+      async recover() { return recovered; },
+      async observe() {},
+    };
+
+    const result = await createLoop({ kernel, provider, prompt, session, compaction }).run('original input', {});
+
+    assert.equal(result.text, 'after returned recovery');
+    assert.deepEqual(prepared[1], recovered, 'the retry preparation starts from the recovery projection');
+    assert.deepEqual(provider.seen.at(-1)?.messages, recovered);
+    assert.ok((await session.modelView()).some((message) => (message as { text?: string }).text === 'original input'),
+      'the test recovery implementation leaves the Session unchanged');
+  });
+});
 
 // 端点返回用量后才检查是否超出上下文预算；一轮最多压缩一次并重试一次。
 test('an endpoint overflow answer gets one compaction and one retry', async () => {
