@@ -8,6 +8,16 @@ import { RowView } from './RowView';
 
 type Branch = SubrunBranch & { readonly state?: string; readonly errorCode?: string };
 
+function nextStatusGeneration(generations: Map<string, number>, branchId: string): number {
+  const generation = (generations.get(branchId) ?? 0) + 1;
+  generations.set(branchId, generation);
+  return generation;
+}
+
+function isCurrentStatusGeneration(generations: Map<string, number>, branchId: string, generation: number): boolean {
+  return generations.get(branchId) === generation;
+}
+
 function noteText(note: { kind: 'parent' | 'branch' | 'control'; code: string }, t: (chinese: string, english: string) => string): string {
   if (note.kind === 'control') {
     if (note.code === 'subrun_message_accepted') return t('补充输入已接受。', 'The child accepted the message.');
@@ -26,6 +36,7 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
   const requestGeneration = useRef(0);
   const sessionGeneration = useRef(0);
   const branchReadGeneration = useRef(0);
+  const statusGenerations = useRef(new Map<string, number>());
   const messageRevision = useRef(0);
   const [branches, setBranches] = useState<Branch[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -38,6 +49,7 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
     const generation = ++sessionGeneration.current;
     requestGeneration.current += 1;
     branchReadGeneration.current += 1;
+    statusGenerations.current.clear();
     setBranches([]);
     setSelectedId(null);
     setShown(null);
@@ -53,22 +65,24 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
         const found = events.map(subrunBranchOf).filter((item): item is SubrunBranch => item !== null);
         setBranches(found);
         const states = await Promise.all(found.filter((item) => item.reference !== undefined).map(async (branch) => {
+          const statusGeneration = nextStatusGeneration(statusGenerations.current, branch.id);
           try {
             const status = await client.call('subrun.status', {
               sessionId,
               parentRunId: branch.reference!.parentRunId,
               subrunId: branch.reference!.subrunId,
             }) as { state?: unknown; errorCode?: unknown };
-            return { id: branch.id, state: typeof status.state === 'string' ? status.state : 'unknown',
+            return { id: branch.id, statusGeneration, state: typeof status.state === 'string' ? status.state : 'unknown',
               ...(typeof status.errorCode === 'string' ? { errorCode: status.errorCode } : {}) };
           } catch (error) {
-            return { id: branch.id, state: 'unknown', errorCode: code(error) };
+            return { id: branch.id, statusGeneration, state: 'unknown', errorCode: code(error) };
           }
         }));
         if (sessionGeneration.current !== generation) return;
         setBranches((current) => current.map((branch) => {
           const status = states.find((item) => item.id === branch.id);
-          return status === undefined ? branch : { ...branch, state: status.state, errorCode: status.errorCode };
+          return status === undefined || !isCurrentStatusGeneration(statusGenerations.current, branch.id, status.statusGeneration)
+            ? branch : { ...branch, state: status.state, errorCode: status.errorCode };
         }));
       } catch (error) {
         if (sessionGeneration.current === generation) setNote({ kind: 'parent', code: code(error) });
@@ -99,6 +113,7 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
   const refresh = useCallback(async (branch: Branch) => {
     if (sessionId === null || branch.reference === undefined) return;
     const generation = ++requestGeneration.current;
+    const statusGeneration = nextStatusGeneration(statusGenerations.current, branch.id);
     setBusyId(branch.id);
     setNote(null);
     try {
@@ -107,7 +122,8 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
         parentRunId: branch.reference.parentRunId,
         subrunId: branch.reference.subrunId,
       }) as { state?: unknown; errorCode?: unknown };
-      if (requestGeneration.current !== generation) return;
+      if (requestGeneration.current !== generation
+        || !isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) return;
       setBranches((current) => current.map((item) => item.id === branch.id ? {
         ...item,
         state: typeof status.state === 'string' ? status.state : 'unknown',
@@ -123,6 +139,7 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
   const wait = useCallback(async (branch: Branch) => {
     if (sessionId === null || branch.reference === undefined) return;
     const generation = ++requestGeneration.current;
+    const statusGeneration = nextStatusGeneration(statusGenerations.current, branch.id);
     setBusyId(branch.id);
     setNote(null);
     try {
@@ -132,7 +149,8 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
         subrunIds: [branch.reference.subrunId],
         timeoutMs: 30_000,
       }, 35_000) as { timedOut?: unknown; subruns?: { state?: unknown; errorCode?: unknown }[] };
-      if (requestGeneration.current !== generation) return;
+      if (requestGeneration.current !== generation
+        || !isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) return;
       const status = result.subruns?.[0];
       setBranches((current) => current.map((item) => item.id === branch.id ? {
         ...item,
@@ -152,6 +170,7 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
     const submittedMessage = message;
     const submittedRevision = messageRevision.current;
     const generation = ++requestGeneration.current;
+    const statusGeneration = nextStatusGeneration(statusGenerations.current, branch.id);
     setBusyId(branch.id);
     setNote(null);
     try {
@@ -162,7 +181,8 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
         runId: branch.reference.runId,
         input: submittedMessage,
       }, 15_000);
-      if (requestGeneration.current !== generation) return;
+      if (requestGeneration.current !== generation
+        || !isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) return;
       if (messageRevision.current === submittedRevision) {
         messageRevision.current += 1;
         setMessage('');
@@ -173,7 +193,8 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
         parentRunId: branch.reference.parentRunId,
         subrunId: branch.reference.subrunId,
       }) as { state?: unknown };
-      if (requestGeneration.current !== generation) return;
+      if (requestGeneration.current !== generation
+        || !isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) return;
       setBranches((current) => current.map((item) => item.id === branch.id
         ? { ...item, state: typeof status.state === 'string' ? status.state : 'unknown' } : item));
     } catch (error) {
@@ -186,6 +207,7 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
   const cancel = useCallback(async (branch: Branch) => {
     if (sessionId === null || branch.reference === undefined) return;
     const generation = ++requestGeneration.current;
+    const statusGeneration = nextStatusGeneration(statusGenerations.current, branch.id);
     setBusyId(branch.id);
     setNote(null);
     try {
@@ -195,7 +217,8 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
         subrunId: branch.reference.subrunId,
         runId: branch.reference.runId,
       }) as { cancelRequested?: unknown; state?: unknown };
-      if (requestGeneration.current !== generation) return;
+      if (requestGeneration.current !== generation
+        || !isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) return;
       if (typeof result.state === 'string') {
         setBranches((current) => current.map((item) => item.id === branch.id ? { ...item, state: result.state as string } : item));
       }

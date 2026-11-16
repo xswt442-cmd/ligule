@@ -238,7 +238,7 @@ test('typing a new child message during send preserves that unsent draft', { ski
   });
 });
 
-test('refreshing one child does not discard another child first status read', { skip: skipReason, timeout: 30_000 }, async () => {
+test('refreshing one child preserves its newer status and another child first status read', { skip: skipReason, timeout: 30_000 }, async () => {
   await withChildRun(async ({ client, sessionId, parentRunId, branches, branch }) => {
     const other = branches[1];
     assert.ok(other);
@@ -247,19 +247,26 @@ test('refreshing one child does not discard another child first status read', { 
     const otherStatusStarted = new Promise((resolve) => { markOtherStatusStarted = resolve; });
     const otherStatusGate = new Promise((resolve) => { releaseOtherStatus = resolve; });
     let held = false;
+    let branchStatusReads = 0;
     const hostCall = async (method, params) => {
       if (method === 'subrun.status' && params.subrunId === other.subrunId && !held) {
         held = true;
         markOtherStatusStarted();
         await otherStatusGate;
       }
-      return await client.request(method, params);
+      const result = await client.request(method, params);
+      if (method === 'subrun.status' && params.subrunId === branch.subrunId) {
+        branchStatusReads += 1;
+        return { ...result, state: branchStatusReads === 1 ? 'completed' : 'running' };
+      }
+      return result;
     };
     try {
       await withBranchPanel(sessionId, branch, hostCall, async (page) => {
         await otherStatusStarted;
         const otherRow = () => page.locator('li').filter({ has: page.getByRole('button', { name: `记录 ${other.seq}` }) });
         assert.match(await otherRow().innerText(), /读取状态中/);
+        assert.equal(branchStatusReads, 1, 'A initial status response has returned as completed while B is still pending');
         await page.getByRole('button', { name: '刷新状态' }).click();
         await page.waitForFunction((seq) => [...document.querySelectorAll('li')].some((row) =>
           row.querySelector('button')?.textContent === `记录 ${seq}` && row.textContent?.includes('running')),
@@ -269,6 +276,9 @@ test('refreshing one child does not discard another child first status read', { 
           row.querySelector('button')?.textContent === `记录 ${seq}` && row.textContent?.includes('completed')),
         other.seq);
         assert.match(await otherRow().innerText(), /completed/);
+        await page.waitForFunction((seq) => [...document.querySelectorAll('li')].some((row) =>
+          row.querySelector('button')?.textContent === `记录 ${seq}` && row.textContent?.includes('running')),
+        branch.seq);
       });
     } finally {
       releaseOtherStatus();
