@@ -155,7 +155,7 @@ test('screen capture startup permission cannot be enabled on an MCP controller o
 });
 
 test('tools prints the members of the minimal manifest plus the first-party optional tools', () => {
-  assert.deepEqual(capture('tools').stdout.trim().split('\n'), ['create', 'delete', 'edit', 'exec', 'fetch', 'find', 'read', 'search', 'write']);
+  assert.deepEqual(capture('tools').stdout.trim().split('\n'), ['create', 'delete', 'edit', 'exec', 'exec_control', 'fetch', 'find', 'read', 'search', 'write']);
 });
 
 test('call runs a tool in the same process and prints what it returned', () => {

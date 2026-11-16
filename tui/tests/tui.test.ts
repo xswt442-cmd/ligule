@@ -40,7 +40,7 @@ try {
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
 const mcpServerFixture = fileURLToPath(new URL('../../tests/fixtures/mcp-minimal.mjs', import.meta.url));
-const { foldText, editDraft, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, subrunReferenceOf, parseSubrunCommand, requestDiagnosticLines, detailTitle, routeInput, clearCancelledLocalQuestion, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
+const { foldText, editDraft, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, subrunReferenceOf, executionReferenceOf, parseExecCommand, parseSubrunCommand, requestDiagnosticLines, detailTitle, routeInput, clearCancelledLocalQuestion, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
 // 界面记录只带界面关心的字段；测试直接写这种不带 `seq` 的投影输入。
 const projectRecord = rows.projectRecord as (record: Record<string, unknown>, locale?: Locale) => TranscriptItem[];
 const quoted = (value: string) => `"${value.replaceAll('"', '\\"')}"`;
@@ -309,6 +309,102 @@ test('/subrun parses bounded controls by parent event sequence', options, () => 
   assert.deepEqual(parseSubrunCommand('wait 1 30001'), { code: 'tui_subrun_timeout_invalid' });
   assert.deepEqual(parseSubrunCommand('message 1   '), { code: 'tui_subrun_input_required' });
   assert.deepEqual(parseSubrunCommand('status -1'), { code: 'tui_subrun_sequence_invalid' });
+});
+
+test('/exec parses bounded finite-command controls by execution ID', options, () => {
+  assert.deepEqual(parseExecCommand('status execution-1'), { action: 'status', executionId: 'execution-1' });
+  assert.deepEqual(parseExecCommand('wait execution-1 0'), { action: 'wait', executionId: 'execution-1', waitMs: 0 });
+  assert.deepEqual(parseExecCommand('logs execution-1 cursor-1'), { action: 'logs', executionId: 'execution-1', cursor: 'cursor-1' });
+  assert.deepEqual(parseExecCommand('cancel execution-1'), { action: 'cancel', executionId: 'execution-1' });
+  assert.deepEqual(parseExecCommand('wait execution-1 30001'), { code: 'tui_exec_wait_invalid' });
+  assert.deepEqual(parseExecCommand('status'), { code: 'tui_exec_id_required' });
+  assert.deepEqual(routeInput('/exec status execution-1', false), { kind: 'command', name: 'exec', argument: 'status execution-1' });
+  assert.deepEqual(executionReferenceOf({ seq: 0, kind: 'execution', executionId: 'execution-1', runId: 'run-1' }),
+    { executionId: 'execution-1', runId: 'run-1' });
+});
+
+test('TUI /exec status, wait, logs, and cancel use the owning Host execution controls', options, async (t) => {
+  const permission = await measuredPermissionContext('full-access', 'unrestricted');
+  if (permission.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');
+  let commandPath = '';
+  let providerStep = 0;
+  await withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+    commandPath = join(projectDirectory, 'tui-finite-command.mjs');
+    await writeFile(commandPath, "process.stdout.write('TUI_FINITE_STDOUT\\n'); process.stderr.write('TUI_FINITE_STDERR\\n');\n");
+    await client.request('workspace.trust', { projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true });
+    client.onRequest((message) => message.method === 'approval.request' ? { decision: 'allow' } : undefined);
+    await client.request('run.start', { sessionId, input: 'start a command for the TUI control check' });
+    const record = await client.request('session.read', { sessionId, fullResults: true }) as { events: TuiRecord[] };
+    const started = record.events.find((event) => event.kind === 'tool' && event.tool === 'exec');
+    const reference = executionReferenceOf(started);
+    assert.ok(reference, JSON.stringify(started));
+
+    const { createElement } = await import('react');
+    const { render } = await import('ink');
+    const { PassThrough } = await import('node:stream');
+    const { setTimeout: delay } = await import('node:timers/promises');
+    const { App } = await import('../dist/tui/app.js');
+    const stdout = new PassThrough() as unknown as FakeOutput;
+    stdout.columns = 120;
+    stdout.isTTY = true;
+    let painted = '';
+    stdout.on('data', (chunk) => { painted += chunk; });
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+    const instance = render(createElement(App, { client: client as TuiClient, sessionId,
+      info: { boundary: projectDirectory }, interactive: true }), {
+      stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true,
+    });
+    const sendCommand = async (command: string) => {
+      stdin.write(command);
+      await delay(80);
+      stdin.write('\r');
+    };
+    try {
+      let before = painted.length;
+      await sendCommand(`/exec status ${reference.executionId}`);
+      await waitFor(() => plainOutput(painted.slice(before)).includes(`${reference.executionId}: exited`), {
+        within: 5_000, read: () => plainOutput(painted.slice(before)),
+      });
+      assert.ok(requests.some((request) => request.method === 'execution.status'
+        && (request.params as { executionId?: string }).executionId === reference.executionId));
+
+      before = painted.length;
+      await sendCommand(`/exec wait ${reference.executionId} 0`);
+      await waitFor(() => plainOutput(painted.slice(before)).includes('命令状态：exited'), {
+        within: 5_000, read: () => plainOutput(painted.slice(before)),
+      });
+      assert.ok(requests.some((request) => request.method === 'execution.wait'
+        && (request.params as { executionId?: string; waitMs?: number }).executionId === reference.executionId
+        && (request.params as { waitMs?: number }).waitMs === 0));
+
+      before = painted.length;
+      await sendCommand(`/exec logs ${reference.executionId}`);
+      await waitFor(() => plainOutput(painted.slice(before)).includes('TUI_FINITE_STDOUT')
+        && plainOutput(painted.slice(before)).includes('[stderr] TUI_FINITE_STDERR'), {
+        within: 5_000, read: () => plainOutput(painted.slice(before)),
+      });
+      assert.ok(requests.some((request) => request.method === 'execution.logs'
+        && (request.params as { executionId?: string }).executionId === reference.executionId));
+
+      before = painted.length;
+      await sendCommand(`/exec cancel ${reference.executionId}`);
+      await waitFor(() => plainOutput(painted.slice(before)).includes('命令状态：exited'), {
+        within: 5_000, read: () => plainOutput(painted.slice(before)),
+      });
+      assert.ok(requests.some((request) => request.method === 'execution.cancel'
+        && (request.params as { executionId?: string }).executionId === reference.executionId));
+    } finally {
+      instance.unmount();
+    }
+  }, {
+    providerReply: () => providerStep++ === 0
+      ? { toolCalls: [{ tool: 'exec', args: { command: 'node ' + JSON.stringify(commandPath.replaceAll('\\', '/')), waitMs: 0 } }] }
+      : { text: 'TUI command started and controlled' },
+    permission,
+    permissionControl: true,
+    modeName: 'full',
+    testDirectory: 'testplace/tmp',
+  });
 });
 
 test('request diagnostics show component counts without exposing the message body', options, () => {

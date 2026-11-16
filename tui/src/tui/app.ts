@@ -4,7 +4,7 @@
 import { resolve } from 'node:path';
 import { createElement as h, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, parseSubrunCommand, resolveSessionId, routeInput } from './commands.js';
+import { answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, parseExecCommand, parseSubrunCommand, resolveSessionId, routeInput } from './commands.js';
 import { pushHistory } from '@ligule/core/tui.js';
 import { searchHistory } from './history.js';
 import { editDraft, isTypingRun, moveDraftCaret, type DraftState } from './draft.js';
@@ -371,6 +371,40 @@ interface TuiSubrunStatus extends TuiSubrunReference {
   readonly errorCode?: string;
 }
 
+interface TuiExecutionReference {
+  readonly executionId: string;
+  readonly runId: string;
+}
+
+interface TuiExecutionStatus {
+  readonly executionId: string;
+  readonly state: string;
+  readonly exitCode?: number;
+  readonly errorCode?: string;
+  readonly cancelRequested: boolean;
+  readonly deadlineExceeded: boolean;
+  readonly terminationPending: boolean;
+  readonly cleanupPending: boolean;
+  readonly logAvailable: boolean;
+  readonly logUnavailableReason?: string;
+}
+
+interface TuiExecutionWait extends TuiExecutionStatus {
+  readonly waitTimedOut: boolean;
+}
+
+interface TuiExecutionLogPage {
+  readonly executionId: string;
+  readonly cursor: string;
+  readonly nextCursor: string;
+  readonly hasMore: boolean;
+  readonly gap: boolean;
+  readonly truncated: boolean;
+  readonly available: boolean;
+  readonly unavailableReason?: string;
+  readonly events: readonly { readonly stream: 'stdout' | 'stderr'; readonly text: string; readonly decodeLossPossible: boolean }[];
+}
+
 interface TuiRequestResults {
   readonly 'screen-capture.set': { readonly sessionId: string; readonly enabled: boolean; readonly source: string };
   readonly 'browser.stop': { readonly sessionId: string; readonly browser: NonNullable<TuiStatus['browser']> };
@@ -394,6 +428,10 @@ interface TuiRequestResults {
   readonly 'subrun.message': { readonly subrunId: string; readonly runId: string; readonly state: 'accepted'; readonly pendingCount: number };
   readonly 'subrun.wait': { readonly timedOut: boolean; readonly subruns: readonly TuiSubrunStatus[] };
   readonly 'subrun.cancel': { readonly subrunId: string; readonly runId: string; readonly cancelRequested: boolean; readonly state: string };
+  readonly 'execution.status': TuiExecutionStatus;
+  readonly 'execution.wait': TuiExecutionWait;
+  readonly 'execution.logs': TuiExecutionLogPage;
+  readonly 'execution.cancel': TuiExecutionStatus;
   readonly 'run.steer': {
     readonly inputId: string;
     readonly runId: string;
@@ -456,7 +494,7 @@ export function clearCancelledLocalQuestion<T extends { readonly id: string; rea
 }
 
 // 将命令表和纯函数导出，供测试及其他界面逻辑使用。
-export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, insertMention, mentionToken, parseSubrunCommand, resolveSessionId, routeInput, sessionLines } from './commands.js';
+export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, insertMention, mentionToken, parseExecCommand, parseSubrunCommand, resolveSessionId, routeInput, sessionLines } from './commands.js';
 export { activeRunBudgetSegment, buildStatusLine, contextSegment } from './status-line.js';
 export { KEYMAP, CURRENT, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec, specOf } from './keymap.js';
 export { markdownLines } from './markdown.js';
@@ -487,6 +525,18 @@ export function subrunReferenceOf(record: TuiRecord | undefined): TuiSubrunRefer
   const runId = content?.runId;
   if (typeof parentRunId !== 'string' || typeof subrunId !== 'string' || typeof sessionId !== 'string' || typeof runId !== 'string') return null;
   return { parentRunId, subrunId, sessionId, runId };
+}
+
+export function executionReferenceOf(record: TuiRecord | undefined): TuiExecutionReference | null {
+  if (record?.kind !== 'execution' && (record?.kind !== 'tool' || record.tool !== 'exec')) return null;
+  const result = isRecord(record.result) ? record.result : undefined;
+  const content = record.kind === 'execution'
+    ? record
+    : isRecord(result?.content) ? result.content : undefined;
+  const executionId = content?.executionId;
+  const runId = typeof record.runId === 'string' ? record.runId : content?.runId;
+  if (typeof executionId !== 'string' || typeof runId !== 'string') return null;
+  return { executionId, runId };
 }
 
 // `/sub` 使用父记录中的事件序号定位派生结果，并从结果中读取支线会话 ID。
@@ -2948,6 +2998,82 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           : { kind: 'meta', text: result.cancelRequested
             ? t('已发出取消请求，等待子任务收束。', 'Cancellation requested; waiting for the child to settle.')
             : t(`当前子任务状态：${result.state}。`, `Child state: ${result.state}.`) });
+      })();
+      return;
+    }
+    if (name === 'exec') {
+      const command = parseExecCommand(argument);
+      if ('code' in command) {
+        push({ kind: 'error', text: t(
+          `命令格式不正确：${command.code}。用法：/exec status <executionId>；/exec wait <executionId> [毫秒]；/exec logs <executionId> [游标]；/exec cancel <executionId>`,
+          `Invalid command: ${command.code}. Use /exec status <executionId>, wait <executionId> [ms], logs <executionId> [cursor], or cancel <executionId>.`,
+        ) });
+        return;
+      }
+      const own = sessionId;
+      void (async () => {
+        const page = await client.request('session.read', { sessionId: own, fullResults: true })
+          .catch((error: unknown) => requestFailure(error, 'session_read_failed'));
+        if ('code' in page) {
+          if (activeSession.current === own) push({ kind: 'error', text: t(`无法读取记录：${page.code}`, `Could not read conversation: ${page.code}`) });
+          return;
+        }
+        const reference = page.events.map(executionReferenceOf).filter((item): item is TuiExecutionReference => item !== null)
+          .findLast((item) => item.executionId === command.executionId);
+        if (reference === undefined) {
+          if (activeSession.current === own) push({ kind: 'error', text: t(
+            `当前会话找不到命令 ${command.executionId}。`, `Execution ${command.executionId} was not found in this Session.`,
+          ) });
+          return;
+        }
+        const params = { sessionId: own, runId: reference.runId, executionId: reference.executionId };
+        if (command.action === 'status') {
+          const result = await client.request('execution.status', params)
+            .catch((error: unknown) => requestFailure(error, 'execution_status_failed'));
+          if (activeSession.current !== own) return;
+          if ('code' in result) push({ kind: 'error', text: result.code });
+          else push({ kind: 'meta', text: `${reference.executionId}: ${result.state}`
+            + (result.exitCode === undefined ? '' : ` · exit ${result.exitCode}`)
+            + (result.errorCode === undefined ? '' : ` · ${result.errorCode}`)
+            + (result.terminationPending ? t(' · 进程仍未确认停止', ' · process termination unconfirmed') : '')
+            + (result.cleanupPending ? t(' · 清理未完成', ' · cleanup pending') : '') });
+          return;
+        }
+        if (command.action === 'wait') {
+          const result = await client.request('execution.wait', { ...params, waitMs: command.waitMs })
+            .catch((error: unknown) => requestFailure(error, 'execution_wait_failed'));
+          if (activeSession.current !== own) return;
+          if ('code' in result) push({ kind: 'error', text: result.code });
+          else push({ kind: 'meta', text: result.waitTimedOut
+            ? t(`等待结束，命令仍为 ${result.state}。`, `Wait timed out; execution remains ${result.state}.`)
+            : t(`命令状态：${result.state}${result.exitCode === undefined ? '' : ` · exit ${result.exitCode}`}。`,
+              `Execution state: ${result.state}${result.exitCode === undefined ? '' : ` · exit ${result.exitCode}`}.`) });
+          return;
+        }
+        if (command.action === 'logs') {
+          const result = await client.request('execution.logs', { ...params, ...(command.cursor === undefined ? {} : { cursor: command.cursor }) })
+            .catch((error: unknown) => requestFailure(error, 'execution_logs_failed'));
+          if (activeSession.current !== own) return;
+          if ('code' in result) push({ kind: 'error', text: result.code });
+          else {
+            const output = result.events.map((event) => `${event.stream === 'stderr' ? '[stderr] ' : ''}${event.text}`).join('');
+            const notes = [
+              ...(!result.available ? [t(`日志内容暂不可用：${result.unavailableReason ?? '未知原因'}`, `Log content is unavailable: ${result.unavailableReason ?? 'unknown reason'}`)] : []),
+              ...(result.gap ? [t('日志页之间有丢失内容。', 'Some log bytes were lost before this page.')] : []),
+              ...(result.truncated ? [t('较早日志已超出保留范围。', 'Older logs are outside the retention window.')] : []),
+              ...(result.hasMore ? [t(`下一页游标：${result.nextCursor}`, `Next cursor: ${result.nextCursor}`)] : []),
+            ];
+            push({ kind: 'meta', text: [output || t('当前没有新的日志。', 'No new logs are available.'), ...notes].join('\n') });
+          }
+          return;
+        }
+        const result = await client.request('execution.cancel', params)
+          .catch((error: unknown) => requestFailure(error, 'execution_cancel_failed'));
+        if (activeSession.current !== own) return;
+        push('code' in result ? { kind: 'error', text: result.code }
+          : { kind: 'meta', text: result.terminationPending || result.cleanupPending
+            ? t('已请求取消，但进程停止或清理尚未确认。', 'Cancellation requested; process termination or cleanup is not yet confirmed.')
+            : t(`命令状态：${result.state}。`, `Execution state: ${result.state}.`) });
       })();
       return;
     }
