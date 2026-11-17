@@ -5,6 +5,7 @@ import {
   closeWorkbenchTab,
   openWorkbenchResource,
   selectWorkbenchTab,
+  updateWorkbenchFileDraft,
   workbenchStateFrom,
 } from '../../frontend/src/workbench.ts';
 import { defaultSettings, loadSettings, saveWorkbenchSettings, updateSettings } from '../../frontend/src/settings.ts';
@@ -62,6 +63,20 @@ test('file and diff resources accept Session file versions while artifact IDs re
   assert.equal(diff.tabs[1].resource.kind, 'diff');
   assert.equal(artifact.tabs.length, 3);
   assert.equal(invalidArtifact.tabs.length, 0);
+});
+
+test('file drafts persist with their read version and respect file and aggregate byte limits', () => {
+  const state = openWorkbenchResource(DEFAULT_WORKBENCH_STATE,
+    { kind: 'file', projectRoot: 'C:/repo', path: 'src/app.ts' }, 'app.ts');
+  const fileKey = state.activeKey;
+  const draft = { version: 'a'.repeat(16), text: 'changed contents' };
+  const withDraft = updateWorkbenchFileDraft(state, fileKey, draft);
+  const restored = workbenchStateFrom(JSON.parse(JSON.stringify(withDraft)));
+
+  assert.deepEqual(restored.tabs[0].fileDraft, draft);
+  assert.throws(() => updateWorkbenchFileDraft(state, fileKey, { ...draft, text: 'x'.repeat(256 * 1024 + 1) }), {
+    code: 'workbench_file_draft_too_large',
+  });
 });
 
 test('workbench accepts filesystem roots while keeping the file target relative', () => {

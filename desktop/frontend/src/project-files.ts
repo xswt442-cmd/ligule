@@ -35,6 +35,14 @@ export type ProjectFilePage = {
 };
 
 export type ProjectFileSnapshot = ProjectFilePage & { readonly text?: string };
+export type ProjectFileSaveResult = {
+  readonly saved: boolean;
+  readonly changed: boolean | null;
+  readonly version: string | null;
+  readonly recorded: boolean;
+  readonly outcome: 'written' | 'unchanged' | 'unknown';
+  readonly errorCode?: string;
+};
 
 export const MAX_PROJECT_FILE_BYTES = 256 * 1024;
 const MAX_PAGE_BYTES = 64_000;
@@ -150,4 +158,28 @@ export async function readProjectFile(client: Client, sessionId: string, path: s
     page = await readProjectFilePage(client, sessionId, path, page.nextOffsetBytes, signal);
   }
   throw Object.assign(new Error('project_file_page_limit_exceeded'), { code: 'project_file_page_limit_exceeded' });
+}
+
+export async function saveProjectFile(client: Client, sessionId: string, path: string,
+  expectedVersion: string, text: string): Promise<ProjectFileSaveResult> {
+  if (!/^[a-f0-9]{16}$/iu.test(expectedVersion)) {
+    throw Object.assign(new Error('project_file_version_invalid'), { code: 'project_file_version_invalid' });
+  }
+  if (typeof text !== 'string' || text.includes('\u0000')
+    || new TextEncoder().encode(text).byteLength > MAX_PROJECT_FILE_BYTES) {
+    throw Object.assign(new Error('project_file_text_invalid'), { code: 'project_file_text_invalid' });
+  }
+  const raw = await client.call('project.file.save', { sessionId, path, expectedVersion, text }, 30_000);
+  const allowed = ['saved', 'changed', 'version', 'recorded', 'outcome', 'errorCode'];
+  if (!object(raw) || Object.keys(raw).some(key => !allowed.includes(key))
+    || typeof raw.saved !== 'boolean' || raw.changed !== null && typeof raw.changed !== 'boolean'
+    || raw.version !== null && (typeof raw.version !== 'string' || !/^[a-f0-9]{16}$/iu.test(raw.version))
+    || typeof raw.recorded !== 'boolean' || !['written', 'unchanged', 'unknown'].includes(String(raw.outcome))
+    || raw.errorCode !== undefined && (typeof raw.errorCode !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/u.test(raw.errorCode))
+    || raw.saved && (raw.version === null || raw.outcome === 'unknown' || raw.changed === null)
+    || raw.outcome === 'unknown' && (raw.saved || raw.changed !== null)
+    || !raw.recorded && raw.errorCode !== 'workspace_file_change_record_failed') {
+    throw Object.assign(new Error('project_file_save_response_invalid'), { code: 'project_file_save_response_invalid' });
+  }
+  return raw as ProjectFileSaveResult;
 }

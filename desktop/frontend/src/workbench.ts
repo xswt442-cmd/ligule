@@ -15,7 +15,10 @@ export type WorkbenchTab = {
   readonly title: string;
   readonly resource: WorkbenchResource;
   readonly pinned: boolean;
+  readonly fileDraft?: WorkbenchFileDraft;
 };
+
+export type WorkbenchFileDraft = { readonly version: string; readonly text: string };
 
 export type WorkbenchState = {
   readonly version: 1;
@@ -28,6 +31,8 @@ export type WorkbenchState = {
 };
 
 export const MAX_WORKBENCH_TABS = 24;
+export const MAX_WORKBENCH_FILE_DRAFT_BYTES = 256 * 1024;
+export const MAX_WORKBENCH_DRAFT_BYTES = 768 * 1024;
 const MAX_TITLE_LENGTH = 160;
 const MAX_ID_LENGTH = 160;
 const MAX_PATH_LENGTH = 4096;
@@ -80,6 +85,18 @@ function hash(value: unknown): string | undefined {
 
 function fileVersion(value: unknown): string | undefined {
   return typeof value === 'string' && /^(?:[a-f0-9]{16}|[a-f0-9]{64})$/iu.test(value) ? value.toLowerCase() : undefined;
+}
+
+function byteLength(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
+}
+
+function fileDraftFrom(value: unknown): WorkbenchFileDraft | undefined {
+  if (!object(value) || Object.keys(value).some(key => key !== 'version' && key !== 'text')) return undefined;
+  const version = fileVersion(value.version);
+  if (version === undefined || typeof value.text !== 'string' || value.text.includes('\u0000')
+    || byteLength(value.text) > MAX_WORKBENCH_FILE_DRAFT_BYTES) return undefined;
+  return { version, text: value.text };
 }
 
 function resourceFrom(value: unknown): WorkbenchResource | undefined {
@@ -201,7 +218,10 @@ function tabFrom(value: unknown): WorkbenchTab | undefined {
   const resource = resourceFrom(value.resource);
   const title = titleOf(value.title);
   if (resource === undefined || title === undefined) return undefined;
-  return { key: resourceKey(resource), title, resource, pinned: value.pinned === true };
+  const fileDraft = value.fileDraft === undefined ? undefined : fileDraftFrom(value.fileDraft);
+  if (value.fileDraft !== undefined && (resource.kind !== 'file' || fileDraft === undefined)) return undefined;
+  return { key: resourceKey(resource), title, resource, pinned: value.pinned === true,
+    ...(fileDraft === undefined ? {} : { fileDraft }) };
 }
 
 function size(value: unknown, min: number, max: number, fallback: number): number {
@@ -237,7 +257,30 @@ function checkedState(value: WorkbenchState): WorkbenchState {
   if (value.version !== 1 || !Array.isArray(value.tabs) || value.tabs.length > MAX_WORKBENCH_TABS) {
     throw Object.assign(new Error('workbench_state_invalid'), { code: 'workbench_state_invalid' });
   }
-  return workbenchStateFrom(value);
+  const current = workbenchStateFrom(value);
+  const draftBytes = current.tabs.reduce((total, tab) => total + (tab.fileDraft === undefined ? 0 : byteLength(tab.fileDraft.text)), 0);
+  if (draftBytes > MAX_WORKBENCH_DRAFT_BYTES) {
+    throw Object.assign(new Error('workbench_file_draft_limit'), { code: 'workbench_file_draft_limit' });
+  }
+  return current;
+}
+
+export function updateWorkbenchFileDraft(state: WorkbenchState, key: string, value: WorkbenchFileDraft | undefined): WorkbenchState {
+  const current = checkedState(state);
+  const index = current.tabs.findIndex(tab => tab.key === key);
+  const tab = current.tabs[index];
+  if (tab === undefined || tab.resource.kind !== 'file') {
+    throw Object.assign(new Error('workbench_file_resource_required'), { code: 'workbench_file_resource_required' });
+  }
+  const fileDraft = value === undefined ? undefined : fileDraftFrom(value);
+  if (value !== undefined && fileDraft === undefined) {
+    throw Object.assign(new Error('workbench_file_draft_too_large'), { code: 'workbench_file_draft_too_large' });
+  }
+  const nextTab: WorkbenchTab = { key: tab.key, title: tab.title, resource: tab.resource, pinned: tab.pinned,
+    ...(fileDraft === undefined ? {} : { fileDraft }) };
+  const tabs = [...current.tabs];
+  tabs[index] = nextTab;
+  return checkedState({ ...current, tabs });
 }
 
 export function openWorkbenchResource(state: WorkbenchState, input: WorkbenchResource, rawTitle: string): WorkbenchState {

@@ -37,7 +37,8 @@ import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { appendProjectedRecords, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import { taskSummaryLabelOf, taskSummaryOf, type Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, saveWorkbenchSettings, updateSettings, type Settings } from './settings';
-import { closeWorkbenchTab, openWorkbenchResource, selectWorkbenchTab, workbenchStateFrom, type WorkbenchResource } from './workbench';
+import { closeWorkbenchTab, openWorkbenchResource, selectWorkbenchTab, updateWorkbenchFileDraft, workbenchStateFrom,
+  type WorkbenchFileDraft, type WorkbenchResource } from './workbench';
 import { LocaleProvider, localeOf } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
 import { SessionStreamBuffer } from './session-stream';
@@ -278,6 +279,7 @@ export function App({ transport }: { transport: Transport }) {
   const [settings, setSettings] = useState(readSettings);
   const workbenchRef = useRef(settings.workbench);
   const workbenchEditRevision = useRef(0);
+  const workbenchDraftSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [workbenchError, setWorkbenchError] = useState<string | null>(null);
   const activeWorkbenchTab = settings.workbench.tabs.find(tab => tab.key === settings.workbench.activeKey) ?? null;
   const activePanelId = activeWorkbenchTab?.resource.kind === 'panel' ? activeWorkbenchTab.resource.panelId : null;
@@ -458,6 +460,10 @@ export function App({ transport }: { transport: Transport }) {
   const [prefsDetails, setPrefsDetails] = useState('');
   const [prefsRevision, setPrefsRevision] = useState(0);
   const applyWorkbenchState = useCallback((value: ReturnType<typeof workbenchStateFrom>) => {
+    if (workbenchDraftSaveTimer.current !== null) {
+      clearTimeout(workbenchDraftSaveTimer.current);
+      workbenchDraftSaveTimer.current = null;
+    }
     const next = workbenchStateFrom(value);
     workbenchRef.current = next;
     const revision = workbenchEditRevision.current + 1;
@@ -469,6 +475,30 @@ export function App({ transport }: { transport: Transport }) {
       setPrefsFailure(code(error));
       setPrefsDetails(error instanceof Error ? error.message : String(error));
     });
+  }, [client]);
+  const updateProjectFileDraft = useCallback((key: string, draft: WorkbenchFileDraft | undefined) => {
+    try {
+      const next = updateWorkbenchFileDraft(workbenchRef.current, key, draft);
+      workbenchRef.current = next;
+      const revision = workbenchEditRevision.current + 1;
+      workbenchEditRevision.current = revision;
+      setSettings(current => ({ ...current, workbench: next }));
+      if (workbenchDraftSaveTimer.current !== null) clearTimeout(workbenchDraftSaveTimer.current);
+      workbenchDraftSaveTimer.current = setTimeout(() => {
+        workbenchDraftSaveTimer.current = null;
+        if (workbenchEditRevision.current !== revision) return;
+        void Promise.resolve(prefsSettled.current).then(() => saveWorkbenchSettings(client, workbenchRef.current)).then(() => {
+          if (workbenchEditRevision.current === revision) workbenchEditRevision.current = 0;
+        }).catch(error => {
+          setPrefsFailure(code(error));
+          setPrefsDetails(error instanceof Error ? error.message : String(error));
+        });
+      }, 250);
+      return true;
+    } catch (error) {
+      setWorkbenchError(code(error));
+      return false;
+    }
   }, [client]);
   const openPanel = useCallback((item: Panel<PanelProps>) => {
     const panelIds = ['panel.diagnostics', 'panel.branch', 'panel.export', 'panel.help'] as const;
@@ -2190,7 +2220,10 @@ export function App({ transport }: { transport: Transport }) {
               ? sessionId === null || projectRoot === '' || !sameProjectRoot(activeFileResource.projectRoot, projectRoot)
                 ? <p className="stub" role="status">{t('请切换到这个工作区的会话后再查看文件。', 'Select a session in this project to view the file.')}</p>
                 : <ProjectFileView key={`${sessionId}:${activeFileResource.projectRoot}:${activeFileResource.path}`}
-                  client={client} sessionId={sessionId} path={activeFileResource.path} expectedVersion={activeFileResource.version} />
+                  client={client} sessionId={sessionId} path={activeFileResource.path} expectedVersion={activeFileResource.version}
+                  fileDraft={activeWorkbenchTab?.fileDraft} readOnly={observingExternalSession}
+                  onDraftChange={draft => activeWorkbenchTab !== null && updateProjectFileDraft(activeWorkbenchTab.key, draft)}
+                  onEdit={reportDock} />
           : <p className="stub" role="status">{t('这个资源暂时无法显示。', 'This resource is not available to display.')}</p>}
     </WorkbenchDock>}
 

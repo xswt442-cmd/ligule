@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createRequire } from 'node:module';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createPermissionContext } from '../../../core/dist/kernel/permission.js';
@@ -39,12 +39,17 @@ test('background steering and new conversations preserve session-owned drafts', 
   const providerGate = new Promise((resolve) => { releaseProvider = resolve; });
   const providerStarted = new Promise((resolve) => { reportProviderStarted = resolve; });
   let providerRequestCount = 0;
+  let releaseFileSave = () => {};
+  let reportFileSaveStarted = () => {};
+  const fileSaveGate = new Promise((resolve) => { releaseFileSave = resolve; });
+  const fileSaveStarted = new Promise((resolve) => { reportFileSaveStarted = resolve; });
+  let holdFileSave = false;
   const preferenceWrites = [];
   await withTuiHost(async ({ client, sessionId, projectDirectory, providerRequests, requests }) => {
     await mkdir(join(projectDirectory, 'src'), { recursive: true });
     const requireCore = createRequire(join(repositoryRoot, 'core', 'package.json'));
     const sharp = requireCore('sharp');
-    await writeFile(join(projectDirectory, 'src', 'app.ts'), 'export const answer = 42;\r\n');
+    await writeFile(join(projectDirectory, 'src', 'app.ts'), '\uFEFFexport const answer = 42;\r\n');
     await writeFile(join(projectDirectory, 'README.md'), '# Safe heading\n\n<script>window.__filePreviewExecuted = true</script>\n');
     await writeFile(join(projectDirectory, 'unsafe.html'), '<script>window.__htmlPreviewExecuted = true</script>');
     await writeFile(join(projectDirectory, 'pixel.png'), await sharp({
@@ -79,6 +84,11 @@ test('background steering and new conversations preserve session-owned drafts', 
     let sawBackgroundDraft = false;
     let sawClearedDraft = false;
     const hostCall = async (method, params) => {
+      if (method === 'project.file.save' && holdFileSave) {
+        holdFileSave = false;
+        reportFileSaveStarted();
+        await fileSaveGate;
+      }
       const result = await client.request(method, params);
       if (method === 'run.steer' && params.sessionId === sessionId) {
         reportSteeringAccepted();
@@ -196,10 +206,81 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
       await page.getByRole('button', { name: /pixel\.png/u }).click();
       await page.getByRole('img', { name: 'pixel.png' }).waitFor();
       await page.getByRole('button', { name: 'Close pixel.png' }).click();
+
+      await fileSearch.fill('app.ts');
+      await page.getByRole('button', { name: /app\.ts/u }).click();
+      await page.locator('.project-file-source').getByText('export const answer = 42;').waitFor();
+      await page.getByRole('button', { name: 'Edit file' }).click();
+      const editor = page.locator('.project-code-editor .cm-content');
+      await editor.waitFor();
+      await editor.focus();
+      await page.keyboard.press('Control+End');
+      await page.keyboard.press('Enter');
+      await page.keyboard.type('// first edit');
+      await page.getByRole('button', { name: 'Undo edit' }).click();
+      assert.doesNotMatch(await editor.innerText(), /first edit/u);
+      await page.getByRole('button', { name: 'Redo edit' }).click();
+      assert.match(await editor.innerText(), /first edit/u);
+      await page.getByRole('button', { name: 'Find in file' }).click();
+      const searchPanel = page.locator('.cm-search');
+      await searchPanel.waitFor();
+      await searchPanel.locator('input').first().fill('answer');
+      await page.keyboard.press('Escape');
+      holdFileSave = true;
+      await page.getByRole('button', { name: 'Save file' }).click();
+      await within(fileSaveStarted, 'project file save request');
+      await editor.focus();
+      await page.keyboard.press('Control+End');
+      await page.keyboard.press('Enter');
+      await page.keyboard.type('// second edit');
+      releaseFileSave();
+      await page.getByText('Saved; newer edits remain unsaved').waitFor();
+      const savedFirstRevision = await readFile(join(projectDirectory, 'src', 'app.ts'), 'utf8');
+      assert.ok(savedFirstRevision.startsWith('\uFEFF'), 'the UTF-8 BOM is preserved');
+      assert.ok(savedFirstRevision.includes('\r\n\r\n// first edit'), 'the inserted line uses the file CRLF separator');
+      assert.equal(savedFirstRevision.replaceAll('\r\n', '').includes('\n'), false, 'the save contains no bare LF');
+      assert.equal(savedFirstRevision.replaceAll('\r\n', '').includes('\r'), false, 'the save contains no bare CR');
+      assert.doesNotMatch(savedFirstRevision, /second edit/u, 'the earlier save does not overwrite newer editor input');
+      await waitFor(async () => {
+        const stored = await client.request('prefs.read', {});
+        const fileTab = stored.settings.workbench?.tabs?.find(tab => tab.resource?.kind === 'file' && tab.resource.path === 'src/app.ts');
+        return fileTab?.fileDraft?.text.includes('// second edit') === true;
+      }, { within: 5_000 });
+
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.locator('.project-code-editor .cm-content').waitFor();
+      assert.match(await page.locator('.project-code-editor .cm-content').innerText(), /second edit/u,
+        'the unsaved file draft is restored after the App reloads');
+      await page.getByRole('button', { name: 'Save file' }).click();
+      await page.getByText('Saved to disk').waitFor();
+      const savedLatestRevision = await readFile(join(projectDirectory, 'src', 'app.ts'), 'utf8');
+      assert.ok(savedLatestRevision.includes('\r\n\r\n// first edit\r\n// second edit'));
+      assert.equal(savedLatestRevision.replaceAll('\r\n', '').includes('\n'), false);
+      assert.equal(savedLatestRevision.replaceAll('\r\n', '').includes('\r'), false);
+      const savedHistory = await client.request('session.read', { sessionId });
+      assert.equal(savedHistory.events.filter(event => event.kind === 'workspaceFileChange').length, 2);
+
+      await writeFile(join(projectDirectory, 'src', 'app.ts'), '\uFEFFexport const answer = 7;\r\n');
+      await editor.focus();
+      await page.keyboard.press('Control+End');
+      await page.keyboard.press('Enter');
+      await page.keyboard.type('// keep this conflicting draft');
+      await page.getByRole('button', { name: 'Save file' }).click();
+      await page.getByRole('alert').filter({ hasText: 'Save failed; the draft was preserved.' }).waitFor();
+      await page.getByRole('button', { name: 'Discard stale draft' }).waitFor();
+      assert.equal(await page.getByRole('button', { name: 'Save file' }).isDisabled(), true);
+      assert.match(await editor.innerText(), /keep this conflicting draft/u);
+      await page.getByRole('button', { name: 'Discard stale draft' }).click();
+      const refreshedEditor = page.locator('.project-code-editor .cm-content');
+      await waitFor(async () => (await refreshedEditor.innerText()).includes('answer = 7'));
+      const afterConflict = await client.request('session.read', { sessionId });
+      assert.equal(afterConflict.events.filter(event => event.kind === 'workspaceFileChange').length, 2,
+        'a conflicted save neither overwrites the external edit nor records a successful change');
+      await page.getByRole('button', { name: 'Close app.ts' }).click();
       await page.getByRole('button', { name: 'Close Files' }).click();
       await page.getByRole('button', { name: 'Workbench' }).click();
       const afterFileBrowse = await client.request('session.read', { sessionId });
-      assert.equal(afterFileBrowse.events.length, beforeFileBrowse.events.length,
+      assert.equal(afterFileBrowse.events.length, afterConflict.events.length,
         'opening and reading project files does not add Session events');
       assert.equal(providerRequests.length, providerRequestsBeforeFileBrowse,
         'project file browsing does not call the model');
@@ -367,6 +448,7 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
     } finally {
       releaseProvider();
       releaseSteeringReply?.();
+      releaseFileSave();
       if (runningRunId !== undefined) await client.request('run.wait', { sessionId, runId: runningRunId }).catch(() => undefined);
       await context?.close();
       await vite.close();
