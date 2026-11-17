@@ -4503,9 +4503,11 @@ export function createHost({
           await requireSubrunParent(state, parentRunId);
           if (state.activeRunId !== parentRunId || state.running === undefined) throw new KernelError('subagent_parent_not_active');
           const source = runOriginOf(undefined, 'human', mayRecordHumanRun(controlTrust, bridge));
-          return await state.subagents.start({
-            task: requiredString(message.params.task, 'task'),
-            ...(message.params.presetId === undefined ? {} : { presetId: requiredString(message.params.presetId, 'presetId') }),
+          const task = requiredString(message.params.task, 'task');
+          const presetId = message.params.presetId === undefined ? undefined : requiredString(message.params.presetId, 'presetId');
+          const child = await state.subagents.start({
+            task,
+            ...(presetId === undefined ? {} : { presetId }),
             ...(message.params.mode === undefined ? {} : { mode: message.params.mode as Parameters<SubagentRuntime['start']>[0]['mode'] }),
             ...(message.params.outputTokens === undefined ? {} : { outputTokens: message.params.outputTokens }),
             ...(message.params.thinkingEffort === undefined ? {} : { thinkingEffort: message.params.thinkingEffort as Parameters<SubagentRuntime['start']>[0]['thinkingEffort'] }),
@@ -4517,6 +4519,34 @@ export function createHost({
             permission: state.permission,
             runId: parentRunId,
           }, source);
+          const taskLabel = Array.from(task.trim()).slice(0, 256).join('');
+          try {
+            await state.session.append({ kind: 'subrunStarted', ignorable: true, source, parentRunId,
+              subrunId: child.subrunId, childSessionId: child.sessionId, childRunId: child.runId,
+              ...(presetId === undefined ? {} : { presetId }), taskLabel, startedAt: new Date().toISOString() });
+          } catch (cause) {
+            let cleanup = 'not_confirmed';
+            try {
+              const cancellation = await state.subagents.cancel({
+                subrunId: child.subrunId, runId: child.runId, parentRunId,
+              });
+              cleanup = cancellation.cancelRequested ? 'requested' : cancellation.state;
+              if (cancellation.cancelRequested) {
+                const settled = await state.subagents.wait([child.subrunId], parentRunId, 30_000);
+                cleanup = settled.timedOut ? 'pending' : settled.subruns[0]?.state ?? 'unknown';
+              }
+            } catch {
+              cleanup = 'failed';
+            }
+            logger?.log?.('subrun relationship could not be recorded', {
+              code: 'subrun_activity_record_failed', sessionId, parentRunId,
+              subrunId: child.subrunId, childRunId: child.runId, cleanup,
+            });
+            throw new KernelError('subrun_activity_record_failed', {
+              cause, detail: `child=${child.subrunId}; cleanup=${cleanup}`,
+            });
+          }
+          return child;
         }
         case 'subrun.list': {
           const state = open(sessionId);

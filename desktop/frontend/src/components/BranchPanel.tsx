@@ -5,6 +5,7 @@ import { projectRecord, shownIn, type Record_, type Row } from '../rows';
 import { subrunBranchOf, type SubrunBranch } from '../subrun-branches';
 import type { Verbosity } from './types';
 import { RowView } from './RowView';
+import { SubrunPresetPanel } from './SubrunPresetPanel';
 
 type Branch = SubrunBranch & { readonly state?: string; readonly errorCode?: string };
 
@@ -40,7 +41,9 @@ function noteText(note: { kind: 'parent' | 'branch' | 'control'; code: string },
     : t(`无法读取子任务：${note.code}`, `Could not load subtask: ${note.code}`);
 }
 
-export function BranchPanel({ client, sessionId, verbosity }: { client: Client; sessionId: string | null; verbosity: Verbosity }) {
+export function BranchPanel({ client, sessionId, activeRunId = null, runStatusKnown = true, verbosity }: {
+  client: Client; sessionId: string | null; activeRunId?: string | null; runStatusKnown?: boolean; verbosity: Verbosity;
+}) {
   const t = useText();
   const requestGeneration = useRef(0);
   const sessionGeneration = useRef(0);
@@ -118,6 +121,33 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
   }, [client]);
 
   const selected = branches.find((branch) => branch.id === selectedId) ?? null;
+
+  const onPresetStarted = useCallback((branch: SubrunBranch) => {
+    const sessionGenerationAtStart = sessionGeneration.current;
+    setBranches((current) => current.some((item) => item.id === branch.id)
+      ? current.map(item => item.id === branch.id ? { ...item, ...branch, state: 'starting', errorCode: undefined } : item)
+      : [...current, { ...branch, state: 'starting' }]);
+    setSelectedId(branch.id);
+    setShown(null);
+    setNote(null);
+    if (sessionId === null || branch.reference === undefined) return;
+    const statusGeneration = nextStatusGeneration(statusGenerations.current, branch.id);
+    void client.call('subrun.status', {
+      sessionId, parentRunId: branch.reference.parentRunId, subrunId: branch.reference.subrunId,
+    }).then((status) => {
+      const result = status as { state?: unknown; errorCode?: unknown };
+      if (sessionGeneration.current !== sessionGenerationAtStart
+        || !isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) return;
+      setBranches((current) => current.map((item) => item.id === branch.id
+        ? withStatus(item, typeof result.state === 'string' ? result.state : 'unknown', result.errorCode) : item));
+    }).catch((error) => {
+      if (sessionGeneration.current !== sessionGenerationAtStart
+        || !isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) return;
+      const errorCode = code(error);
+      setBranches((current) => current.map(item => item.id === branch.id
+        ? withStatus(item, 'unknown', errorCode) : item));
+    });
+  }, [client, sessionId]);
 
   const refresh = useCallback(async (branch: Branch) => {
     if (sessionId === null || branch.reference === undefined) return;
@@ -254,18 +284,22 @@ export function BranchPanel({ client, sessionId, verbosity }: { client: Client; 
     }
   }, [client, sessionId]);
 
-  if (branches.length === 0) {
-    return <p className="stub">{note === null ? t('当前会话没有子任务。', 'This conversation has no subtasks.') : noteText(note, t)}</p>;
-  }
-
   return <>
-    <h3>{t(`${branches.length} 个子任务`, `${branches.length} subtasks`)}</h3>
-    <ul>{branches.map((branch) => <li key={branch.id}>
-      <button type="button" onClick={() => void open(branch)}>{t(`记录 ${branch.seq}`, `Event ${branch.seq}`)}</button>
-      <span className="muted"> {branch.task === '' ? t('（无任务说明）', '(no task description)') : branch.task.slice(0, 60)}</span>
-      {branch.reference !== undefined && <span className="muted"> · {branch.state ?? t('读取状态中', 'loading status')}
-        {branch.errorCode === undefined ? '' : ` (${branch.errorCode})`}</span>}
-    </li>)}</ul>
+    {branches.length === 0
+      ? <p className="stub">{note?.kind === 'parent' ? noteText(note, t) : t('当前会话没有子任务。', 'This conversation has no subtasks.')}</p>
+      : <>
+        <h3>{t(`${branches.length} 个子任务`, `${branches.length} subtasks`)}</h3>
+        <ul>{branches.map((branch) => <li key={branch.id}>
+          <button type="button" onClick={() => void open(branch)}>{t(`记录 ${branch.seq}`, `Event ${branch.seq}`)}</button>
+          <span className="muted"> {branch.task === '' ? t('（无任务说明）', '(no task description)') : branch.task.slice(0, 60)}</span>
+          {branch.source !== undefined && <span className="muted"> · {branch.source === 'human'
+            ? t('界面启动', 'started from UI') : t('控制器启动', 'started by controller')}</span>}
+          {branch.reference !== undefined && <span className="muted"> · {branch.state ?? t('读取状态中', 'loading status')}
+            {branch.errorCode === undefined ? '' : ` (${branch.errorCode})`}</span>}
+        </li>)}</ul>
+      </>}
+    <SubrunPresetPanel client={client} sessionId={sessionId} activeRunId={activeRunId}
+      runStatusKnown={runStatusKnown} onStarted={onPresetStarted} />
     {selected?.reference !== undefined && <section aria-label={t('异步子任务控制', 'Async subtask controls')}>
       <h3>{t(`子任务状态：${selected.state ?? 'unknown'}`, `Subtask state: ${selected.state ?? 'unknown'}`)}</h3>
       <div>

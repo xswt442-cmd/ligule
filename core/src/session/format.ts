@@ -99,7 +99,7 @@ const WRITTEN_KINDS = [
   'session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection',
   'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule',
   'compaction', 'todoWrite', 'image', 'screenCapture', 'policyReview', 'runInput', 'execution', 'workspaceFileChange',
-  'toolActivity', 'check',
+  'toolActivity', 'check', 'subrunStarted',
 ];
 
 // 会话里保存的审批档位。返回 `unknown` 表示值无法解释，调用方必须拒绝该记录。
@@ -298,6 +298,32 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
           return checked === undefined || checked.operation !== 'write';
         })) {
         throw new KernelRuntimeError('session_workspace_file_change_invalid');
+      }
+    }
+    if (kind === 'subrunStarted') {
+      // Host-started child Runs need a durable navigation link; this fact is display-only and remains outside model projection.
+      const safeId = (value: unknown) => typeof value === 'string'
+        && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(value);
+      const childSessionId = event.childSessionId;
+      const childSuffix = typeof childSessionId === 'string' && header?.sessionId !== undefined
+        ? childSessionId.slice(`${header.sessionId}.sub-`.length) : '';
+      const taskLabel = event.taskLabel;
+      const presetId = event.presetId;
+      if (event.ignorable !== true
+        || Object.keys(event).some(key => !['seq', 'kind', 'ignorable', 'source', 'parentRunId', 'subrunId',
+          'childSessionId', 'childRunId', 'presetId', 'taskLabel', 'startedAt'].includes(key))
+        || (event.source !== 'human' && event.source !== 'controller')
+        || !safeId(event.parentRunId) || !runIds.has(String(event.parentRunId))
+        || header?.sessionId === undefined || typeof childSessionId !== 'string'
+        || childSessionId.length > 160
+        || !childSessionId.startsWith(`${header.sessionId}.sub-`) || !/^\d{1,12}$/u.test(childSuffix)
+        || event.subrunId !== childSessionId
+        || typeof event.childRunId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(event.childRunId)
+        || typeof taskLabel !== 'string' || taskLabel.trim() === '' || taskLabel.length > 512
+        || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(taskLabel)
+        || (presetId !== undefined && (typeof presetId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(presetId)))
+        || typeof event.startedAt !== 'string' || !Number.isFinite(Date.parse(event.startedAt))) {
+        throw new KernelRuntimeError('session_subrun_started_event_invalid');
       }
     }
     if (kind === 'toolActivity') {

@@ -18,6 +18,13 @@ assert.deepEqual(child, {
 assert.deepEqual(subrunBranchOf({
   seq: 8, kind: 'tool', tool: 'subagent', args: { task: 'legacy' }, result: { content: { sessionId: 'parent.sub-2' } },
 }), { seq: 8, id: 'parent.sub-2', task: 'legacy' }, 'legacy waiting subtasks remain viewable');
+assert.deepEqual(subrunBranchOf({
+  seq: 9, kind: 'subrunStarted', ignorable: true, source: 'human', parentRunId: 'parent-run',
+  subrunId: 'parent.sub-3', childSessionId: 'parent.sub-3', childRunId: 'child-run', taskLabel: 'from the Workbench',
+}), {
+  seq: 9, id: 'parent.sub-3', task: 'from the Workbench', source: 'human',
+  reference: { parentRunId: 'parent-run', subrunId: 'parent.sub-3', runId: 'child-run' },
+});
 assert.equal(subrunBranchOf({ seq: 9, kind: 'tool', tool: 'read', result: { content: { sessionId: 'unrelated' } } }), null);
 assert.equal(subrunBranchOf({ seq: 10, kind: 'tool', tool: 'subagent_start', result: { content: 'spilled' } }), null);
 

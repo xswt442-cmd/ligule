@@ -141,7 +141,8 @@ const menuPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.branch',
     title: '派生支线',
-    view: ({ client, sessionId, settings }) => <BranchPanel client={client} sessionId={sessionId} verbosity={settings.verbosity} />,
+    view: ({ client, sessionId, status, settings }) => <BranchPanel client={client} sessionId={sessionId}
+      activeRunId={status?.activeRunId ?? null} runStatusKnown={status !== null} verbosity={settings.verbosity} />,
   },
   {
     id: 'panel.export',

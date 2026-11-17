@@ -126,6 +126,32 @@ test('session MCP trust events are ignorable and validate the server identity', 
   assert.throws(() => parseSessionEvents([header, { ...trust, identityDigest: 'invalid' }] as unknown as SessionEvent[]), { code: 'session_mcp_trust_event_invalid' });
 });
 
+test('a desktop-started child is a validated Session fact and stays out of model context', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'parent-session', meta: { projectRoot: '/repo' } });
+    const acceptance = createRunAcceptance('parent-session', 'start the parent task', null, 'human');
+    await session.append({ kind: 'user', text: 'start the parent task', run: acceptance });
+    const started = await session.append({
+      kind: 'subrunStarted', ignorable: true, source: 'human', parentRunId: acceptance.runId,
+      subrunId: 'parent-session.sub-1', childSessionId: 'parent-session.sub-1',
+      childRunId: '123e4567-e89b-42d3-a456-426614174000', presetId: 'research', taskLabel: 'inspect the project',
+      startedAt: '2026-11-18T00:00:00.000Z',
+    });
+
+    const events = await session.read();
+    assert.equal(events.at(-1)?.kind, 'subrunStarted');
+    assert.equal(events.at(-1)?.seq, started.seq);
+    assert.equal(JSON.stringify(await session.modelView()).includes('subrunStarted'), false);
+    assert.equal(JSON.stringify(await session.modelView()).includes('inspect the project'), false);
+
+    assert.throws(() => parseSessionEvents([
+      { kind: 'session', formatVersion: 5, sessionId: 'parent-session', projectRoot: '/repo' },
+      { seq: 0, kind: 'user', text: 'start the parent task', run: acceptance },
+      { ...started, seq: 1, childSessionId: 'another-session.sub-1' },
+    ] as unknown as SessionEvent[]), { code: 'session_subrun_started_event_invalid' });
+  });
+});
+
 test('compaction events are ignorable and carry the block identity, range and reason', () => {
   const header = { kind: 'session', formatVersion: 2, sessionId: 'compaction', projectRoot: '' };
   const written = { seq: 0, kind: 'compaction', ignorable: true, reason: 'auto', blockId: 1, fromSeq: 0, toSeq: 8, tokensBefore: 3000, tokensAfter: 900 };

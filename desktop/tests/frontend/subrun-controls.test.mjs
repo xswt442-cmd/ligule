@@ -19,21 +19,31 @@ const fullAccess = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
 });
 
-function gatedChildProvider(childCount = 1) {
+function gatedChildProvider(childCount = 1, holdParent = false) {
   let release;
+  let releaseParent;
   let markStarted;
   let parentStartSent = false;
+  let parentGateUsed = false;
   const gate = new Promise((resolveGate) => { release = resolveGate; });
+  const parentGate = new Promise((resolveGate) => { releaseParent = resolveGate; });
   const started = new Promise((resolveStarted) => { markStarted = resolveStarted; });
   return {
     release,
+    releaseParent,
     started,
+    parentGateUsed: () => parentGateUsed,
     options: {
       beforeResponse: async (body) => {
         const lastUser = [...body.messages].reverse().find((message) => message.role === 'user')?.content;
         if (lastUser === 'panel-child-pending') {
           markStarted();
           await gate;
+        }
+        if (holdParent && !parentGateUsed && lastUser === 'panel-parent-start-child'
+          && body.messages.some((message) => message.role === 'tool')) {
+          parentGateUsed = true;
+          await parentGate;
         }
       },
       providerReply: (body) => {
@@ -64,8 +74,8 @@ function branchesFrom(events, parentRunId) {
   });
 }
 
-async function withChildRun(run, { childCount = 1 } = {}) {
-  const childProvider = gatedChildProvider(childCount);
+async function withChildRun(run, { childCount = 1, holdParent = false } = {}) {
+  const childProvider = gatedChildProvider(childCount, holdParent);
   await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
     await client.request('workspace.trust', {
       projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
@@ -79,9 +89,11 @@ async function withChildRun(run, { childCount = 1 } = {}) {
       return branches.length === childCount;
     }, { within: 5_000 });
     try {
+      if (holdParent) await waitFor(() => childProvider.parentGateUsed(), { within: 5_000 });
       await run({ client, sessionId, parentRunId: submitted.runId, branch: branches[0], branches });
     } finally {
       childProvider.release();
+      childProvider.releaseParent();
       await client.request('run.wait', { sessionId, runId: submitted.runId });
     }
   }, {
@@ -94,7 +106,7 @@ async function withChildRun(run, { childCount = 1 } = {}) {
   });
 }
 
-async function withBranchPanel(sessionId, branch, hostCall, run) {
+async function withBranchPanel(sessionId, branch, hostCall, run, activeRunId = null, runStatusKnown = true) {
   const requireFrontend = createRequire(join(frontend, 'package.json'));
   const { createServer } = await import(pathToFileURL(requireFrontend.resolve('vite')).href);
   const { chromium } = await import(pathToFileURL(playwrightModule).href);
@@ -122,7 +134,8 @@ const transport = {
 client = createClient(transport);
 deliver = raw => client.receive(raw);
 createRoot(document.getElementById('root')).render(
-  <LocaleProvider language="zh"><BranchPanel client={client} sessionId={fixture.sessionId} verbosity="standard" /></LocaleProvider>,
+  <LocaleProvider language="zh"><BranchPanel client={client} sessionId={fixture.sessionId} activeRunId={fixture.activeRunId}
+    runStatusKnown={fixture.runStatusKnown} verbosity="standard" /></LocaleProvider>,
 );
 `;
   const html = '<!doctype html><html lang="zh"><head><meta charset="utf-8"></head><body><div id="root"></div><script type="module" src="/__subrun-controls-entry.tsx"></script></body></html>';
@@ -155,7 +168,7 @@ createRoot(document.getElementById('root')).render(
     page.setDefaultNavigationTimeout(10_000);
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
-    await page.exposeBinding('fixtureData', () => ({ sessionId }));
+    await page.exposeBinding('fixtureData', () => ({ sessionId, activeRunId, runStatusKnown }));
     await page.exposeBinding('hostCall', (_source, method, params) => hostCall(method, params));
     await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/__subrun-controls`, { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: `记录 ${branch.seq}` }).click();
@@ -284,6 +297,107 @@ test('refreshing one child preserves its newer status and another child first st
       releaseOtherStatus();
     }
   }, { childCount: 2 });
+});
+
+test('the Workbench previews and starts a preset under the exact active parent Run, then reloads the child record', { skip: skipReason, timeout: 35_000 }, async () => {
+  await withChildRun(async ({ client, sessionId, parentRunId, branch }) => {
+    const calls = [];
+    const hostCall = async (method, params) => {
+      calls.push({ method, params });
+      return await client.request(method, params);
+    };
+    const task = 'Inspect the project boundaries.';
+    let startedBranch;
+
+    await withBranchPanel(sessionId, branch, hostCall, async (page) => {
+      await page.getByRole('heading', { name: '任务预设' }).waitFor();
+      const preset = page.getByRole('combobox', { name: '任务预设' });
+      await preset.selectOption('research');
+      await page.getByRole('button', { name: '预览配置' }).click();
+      await page.getByRole('region', { name: '预设配置预览' }).waitFor();
+      assert.deepEqual(calls.findLast(call => call.method === 'preset.preview')?.params,
+        { sessionId, parentRunId, presetId: 'research' });
+      const previewText = await page.getByRole('region', { name: '预设配置预览' }).innerText();
+      assert.match(previewText, /只读/);
+      assert.match(previewText, /可启动\s*是/, previewText);
+
+      await page.getByRole('textbox', { name: '任务内容' }).fill(task);
+      const startButton = page.getByRole('button', { name: '启动子任务' });
+      assert.equal(await startButton.isEnabled(), true, await page.locator('body').innerText());
+      await startButton.click();
+      await page.getByText('子任务已启动。').waitFor();
+      const start = calls.findLast(call => call.method === 'subrun.start');
+      assert.deepEqual(start?.params, { sessionId, parentRunId, task, presetId: 'research' });
+      assert.equal(calls.some(call => call.method === 'run.submit'), false,
+        'starting a preset child must not submit a new parent model request');
+
+      const record = await client.request('session.read', { sessionId, fullResults: true });
+      const event = record.events.find(item => item.kind === 'subrunStarted' && item.taskLabel === task);
+      assert.ok(event, 'the parent Session must contain the child navigation fact');
+      startedBranch = { seq: event.seq, id: event.childSessionId, task: event.taskLabel,
+        reference: { parentRunId: event.parentRunId, subrunId: event.subrunId, runId: event.childRunId } };
+    }, parentRunId);
+
+    assert.ok(startedBranch);
+    await withBranchPanel(sessionId, startedBranch, hostCall, async (page) => {
+      assert.match(await page.locator('li').filter({ has: page.getByRole('button', { name: `记录 ${startedBranch.seq}` }) }).innerText(),
+        /Inspect the project boundaries\./);
+      assert.equal(await page.getByRole('heading', { name: `子任务状态：${(await client.request('subrun.status', {
+        sessionId, parentRunId, subrunId: startedBranch.reference.subrunId,
+      })).state}` }).count(), 1);
+    }, parentRunId);
+  }, { holdParent: true });
+});
+
+test('a started child whose follow-up read fails stays visible as accepted and cannot be duplicated accidentally', { skip: skipReason, timeout: 35_000 }, async () => {
+  await withChildRun(async ({ client, sessionId, parentRunId, branch }) => {
+    let readAfterStart = false;
+    let startCount = 0;
+    const hostCall = async (method, params) => {
+      if (method === 'subrun.start') {
+        startCount += 1;
+        const result = await client.request(method, params);
+        readAfterStart = true;
+        return result;
+      }
+      if (method === 'session.read' && readAfterStart) {
+        readAfterStart = false;
+        throw Object.assign(new Error('follow_up_read_failed'), { code: 'follow_up_read_failed' });
+      }
+      return await client.request(method, params);
+    };
+
+    await withBranchPanel(sessionId, branch, hostCall, async (page) => {
+      const task = 'Start once, then preserve the accepted result.';
+      await page.getByRole('combobox', { name: '任务预设' }).selectOption('research');
+      await page.getByRole('button', { name: '预览配置' }).click();
+      await page.getByRole('region', { name: '预设配置预览' }).waitFor();
+      await page.getByRole('textbox', { name: '任务内容' }).fill(task);
+      await page.getByRole('button', { name: '启动子任务' }).click();
+      await page.getByText(/子任务已经启动，但面板没能读取/u).waitFor();
+      assert.equal(await page.getByRole('textbox', { name: '任务内容' }).inputValue(), task);
+      assert.equal(await page.getByRole('button', { name: '启动子任务' }).isEnabled(), false);
+      assert.equal(startCount, 1);
+
+      const record = await client.request('session.read', { sessionId, fullResults: true });
+      assert.equal(record.events.filter(event => event.kind === 'subrunStarted' && event.taskLabel === task).length, 1);
+    }, parentRunId);
+  }, { holdParent: true });
+});
+
+test('preset preview waits until the current parent Run status is known', { skip: skipReason, timeout: 30_000 }, async () => {
+  await withChildRun(async ({ client, sessionId, branch }) => {
+    const calls = [];
+    await withBranchPanel(sessionId, branch, async (method, params) => {
+      calls.push({ method, params });
+      return await client.request(method, params);
+    }, async (page) => {
+      await page.getByRole('heading', { name: '任务预设' }).waitFor();
+      await page.getByText('正在确认父任务状态…').waitFor();
+      assert.equal(await page.getByRole('button', { name: '预览配置' }).isEnabled(), false);
+      assert.equal(calls.some(call => call.method === 'preset.preview'), false);
+    }, null, false);
+  });
 });
 
 test('a failed refresh leaves an explicit status and a successful retry clears its error', { skip: skipReason, timeout: 30_000 }, async () => {

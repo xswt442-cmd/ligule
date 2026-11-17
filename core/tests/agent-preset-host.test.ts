@@ -132,6 +132,24 @@ test('Host preview and preset start share one config, persist its snapshot befor
         sessionId, parentRunId: parent.runId, task: 'Implement the requested change.', presetId: 'implement',
       }) as { subrunId: string; sessionId: string; runId: string };
       await childReached;
+      const parentRecord = await client.request('session.read', { sessionId, fullResults: true }) as {
+        events: { kind?: string; tool?: string; text?: string; source?: string; parentRunId?: string;
+          subrunId?: string; childSessionId?: string; childRunId?: string; presetId?: string; taskLabel?: string }[];
+      };
+      const started = parentRecord.events.find(event => event.kind === 'subrunStarted');
+      assert.deepEqual(started && {
+        source: started.source, parentRunId: started.parentRunId, subrunId: started.subrunId,
+        childSessionId: started.childSessionId, childRunId: started.childRunId,
+        presetId: started.presetId, taskLabel: started.taskLabel,
+      }, {
+        source: 'human', parentRunId: parent.runId, subrunId: child.subrunId,
+        childSessionId: child.sessionId, childRunId: child.runId,
+        presetId: 'implement', taskLabel: 'Implement the requested change.',
+      });
+      assert.equal(parentRecord.events.some(event => event.kind === 'tool'), false,
+        'starting a child from the UI must not create a fake parent tool call');
+      assert.equal(parentRecord.events.some(event => event.kind === 'user' && event.text === 'Implement the requested change.'), false,
+        'the child task must not be recorded as a new parent user turn');
       const childPath = join(sessionDirectory, `${child.sessionId}.jsonl`);
       const eventsBeforeEdit = (await readFile(childPath, 'utf8')).trim().split(/\r?\n/u).map(line => JSON.parse(line) as Record<string, unknown>);
       const snapshot = eventsBeforeEdit.find(event => event.kind === 'turnContext')?.agentPreset as Record<string, unknown> | undefined;
@@ -160,6 +178,11 @@ test('Host preview and preset start share one config, persist its snapshot befor
 
       const restarted = await restart();
       await restarted.request('session.open', { sessionId });
+      const restoredParent = await restarted.request('session.read', { sessionId, fullResults: true }) as {
+        events: { kind?: string; childSessionId?: string }[];
+      };
+      assert.equal(restoredParent.events.filter(event => event.kind === 'subrunStarted' && event.childSessionId === child.sessionId).length, 1,
+        'the parent Session restores one navigable record for the UI-started child');
       const persisted = await restarted.request('subrun.list', { sessionId, parentRunId: parent.runId, limit: 32 }) as {
         subruns: { subrunId: string; runId: string }[];
       };
