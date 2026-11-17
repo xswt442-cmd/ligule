@@ -25,10 +25,8 @@ export function WorkbenchDock({
   const t = useText();
   const focusTab = (index: number, key: string) => {
     onSelect(key);
-    requestAnimationFrame(() => {
-      const tabs = document.querySelectorAll<HTMLButtonElement>('.workbench-tablist [role="tab"]');
-      tabs[index]?.focus();
-    });
+    const tabs = document.querySelectorAll<HTMLButtonElement>('.workbench-tablist [role="tab"]');
+    tabs[index]?.focus();
   };
   return <aside className="dock workbench-dock" style={{ flexBasis: `min(${state.rightWidth}px, 100vw)`, inlineSize: `min(${state.rightWidth}px, 100vw)` }}>
     <div className="dock-resize" role="separator" aria-orientation="vertical"

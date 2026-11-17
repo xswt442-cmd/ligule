@@ -74,6 +74,12 @@ export type Record_ = {
   policy?: string;
   policySource?: string;
   mode?: string;
+  declaration?: { name?: string; purpose?: string };
+  executionState?: string;
+  exitCode?: number | null;
+  commandStatus?: string;
+  reportStatus?: string;
+  scopeStatus?: string;
   // 标记由恢复流程补写的结果。
   recovery?: { assistantSeq?: number; safeToRedo?: boolean };
 };
@@ -340,6 +346,17 @@ function projected(record: Record_, options: { startedAt?: number; now?: number 
     if (facts.length === 0) return [];
     const values = facts.join(' · ');
     return [{ id: nextId(), kind: 'context', text: `本轮参数：${values}`, english: { text: `Turn settings: ${values}` } }];
+  }
+  if (record.kind === 'check') {
+    const name = typeof record.declaration?.name === 'string' ? record.declaration.name : 'unknown';
+    const command = record.commandStatus ?? 'unknown';
+    const report = record.reportStatus ?? 'unknown';
+    const scope = record.scopeStatus ?? 'unknown';
+    return [{
+      id: nextId(), kind: 'context',
+      text: `检查结果：${name} · 命令 ${command} · 报告 ${report} · 范围 ${scope}`,
+      english: { text: `Check result: ${name} · command ${command} · report ${report} · scope ${scope}` },
+    }];
   }
   if (record.kind === 'reasoning') return [{ id: nextId(), kind: 'reasoning', text: record.text ?? '' }];
   // 完整结束的轮次作为分支点显示，并提供创建分支的入口。

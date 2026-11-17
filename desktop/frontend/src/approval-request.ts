@@ -5,6 +5,7 @@ import { capabilityOf, changeBody, changeOf } from './rows.ts';
 
 export type ApprovalRequestParams = {
   sessionId?: string;
+  sourceSessionId?: string;
   projectRoot?: string;
   tool?: string;
   command?: string;
@@ -40,6 +41,14 @@ export function approvalSession(params: ApprovalRequestParams | undefined): stri
   return typeof owner === 'string' && owner !== '' ? owner : null;
 }
 
+/** Resolve the conversation over which an approval is shown without changing who owns or answers it. */
+export function approvalDisplaySession(params: ApprovalRequestParams | undefined): string | null {
+  const owner = approvalSession(params);
+  if (owner === null) return null;
+  return typeof params?.sourceSessionId === 'string' && params.sourceSessionId !== ''
+    ? params.sourceSessionId : owner;
+}
+
 /** 组装摘要、变更说明与脚本绑定说明；返回值与 `Ask` 的界面字段一一对应。 */
 export function toApprovalAsk(id: string, params: ApprovalRequestParams): Ask {
   const tool = params.tool ?? '';
@@ -67,6 +76,7 @@ export function toApprovalAsk(id: string, params: ApprovalRequestParams): Ask {
   return {
     id,
     sessionId: params.sessionId ?? '',
+    displaySessionId: approvalDisplaySession(params) ?? params.sessionId ?? '',
     project: params.projectRoot ?? '',
     tool,
     detail,

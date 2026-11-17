@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { appendProjectedRecords, projectRecord } from '../../frontend/src/rows.ts';
+import { appendProjectedRecords, projectRecord, shownIn } from '../../frontend/src/rows.ts';
 
 test('controller messages stay distinct from human messages in the transcript', () => {
   assert.deepEqual(projectRecord({ kind: 'user', origin: 'controller', text: 'Inspect the workspace.' }).map(({ kind, text, source }) => ({ kind, text, source })), [
@@ -27,4 +27,24 @@ test('observed records keep existing row identities and local rows', () => {
   assert.equal(updated[2]?.kind, 'answer');
   assert.equal(updated[2]?.seq, 5);
   assert.equal(appendProjectedRecords(updated, observed), updated);
+});
+
+test('check facts project to a detailed transcript row that can be navigated to', () => {
+  const [row] = projectRecord({
+    seq: 32,
+    kind: 'check',
+    declaration: { name: 'Delivery tests' },
+    commandStatus: 'met',
+    reportStatus: 'reported_fail',
+    scopeStatus: 'sampled',
+  });
+
+  assert.equal(row.kind, 'context');
+  assert.equal(row.seq, 32);
+  assert.match(row.text, /Delivery tests/u);
+  assert.match(row.text, /met/u);
+  assert.match(row.text, /reported_fail/u);
+  assert.match(row.text, /sampled/u);
+  assert.equal(shownIn('standard', row), false);
+  assert.equal(shownIn('detailed', row), true);
 });

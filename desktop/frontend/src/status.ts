@@ -3,19 +3,22 @@
 export type Usage = {
   window: number;
   threshold: number;
+  soft?: number;
   retained: number;
+  reserved?: number;
   estimated: number;
   // Host 根据服务端用量计算的 Token 估算校准系数；无校准数据时为 1。
   factor: number;
   // 本地 Token 估算方法的标识。
   measurement: string;
-  reported: { seq: number; input: number; output: number | null } | null;
+  reported: { seq: number; input: number | null; output: number | null } | null;
 };
 
 export type Status = {
   sessionId: string;
   running: boolean;
   activeRunId?: string | null;
+  operation?: { operationId: string; sourceSessionId: string; finished: boolean } | null;
   permission?: SessionPermission;
   screenCapture?: { enabled: boolean; source: 'none' | 'startup' | 'trusted-ui' | 'grant'; changeAllowed?: boolean };
   browser?: BrowserStatus;

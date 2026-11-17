@@ -5,6 +5,7 @@ import type { Status } from '../status';
 import { Group, Row } from './ui';
 
 type RequestDiagnostics = { enabled: boolean; entries: Record<string, unknown>[] };
+type CompactionFact = { seq: number; reason: string; blockId?: number; fromSeq?: number; toSeq?: number; tokensBefore?: number; tokensAfter?: number };
 
 function object(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -26,9 +27,12 @@ export function DiagnosticsPanel({ client, sessionId, status, counts, waiting, l
 }) {
   const t = useText();
   const requestGeneration = useRef(0);
+  const compactionGeneration = useRef(0);
   const [requestDiagnostics, setRequestDiagnostics] = useState<RequestDiagnostics | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState('');
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
+  const [compactionFacts, setCompactionFacts] = useState<CompactionFact[]>([]);
+  const [compactionError, setCompactionError] = useState('');
 
   useEffect(() => {
     const generation = ++requestGeneration.current;
@@ -50,6 +54,31 @@ export function DiagnosticsPanel({ client, sessionId, status, counts, waiting, l
         if (requestGeneration.current === generation) setDiagnosticsBusy(false);
       });
     return () => { requestGeneration.current += 1; };
+  }, [client, sessionId]);
+
+  useEffect(() => {
+    const generation = ++compactionGeneration.current;
+    setCompactionFacts([]);
+    setCompactionError('');
+    if (sessionId === null) return () => { compactionGeneration.current += 1; };
+    void client.call('session.read', { sessionId, limit: 1000 }, 15_000).then(value => {
+      const events = object(value).events;
+      if (!Array.isArray(events)) throw Object.assign(new Error('session_read_response_invalid'), { code: 'session_read_response_invalid' });
+      const facts = events.flatMap((item): CompactionFact[] => {
+        if (!object(item) || item.kind !== 'compaction' || item.ignorable !== true || !Number.isSafeInteger(item.seq)) return [];
+        return [{ seq: Number(item.seq), reason: typeof item.reason === 'string' ? item.reason : 'unknown',
+          ...(Number.isSafeInteger(item.blockId) ? { blockId: Number(item.blockId) } : {}),
+          ...(Number.isSafeInteger(item.fromSeq) ? { fromSeq: Number(item.fromSeq) } : {}),
+          ...(Number.isSafeInteger(item.toSeq) ? { toSeq: Number(item.toSeq) } : {}),
+          ...(Number.isSafeInteger(item.tokensBefore) ? { tokensBefore: Number(item.tokensBefore) } : {}),
+          ...(Number.isSafeInteger(item.tokensAfter) ? { tokensAfter: Number(item.tokensAfter) } : {}),
+        }];
+      });
+      if (compactionGeneration.current === generation) setCompactionFacts(facts.slice(-20).reverse());
+    }).catch(error => {
+      if (compactionGeneration.current === generation) setCompactionError(code(error));
+    });
+    return () => { compactionGeneration.current += 1; };
   }, [client, sessionId]);
 
   const requestDiagnosticAction = async (action: 'enable' | 'disable' | 'read') => {
@@ -83,6 +112,22 @@ export function DiagnosticsPanel({ client, sessionId, status, counts, waiting, l
       <Row label={t('拒绝调用', 'Denied calls')}><span>{status.denials.total} · {status.denials.consecutive} {t('次连续拒绝', 'consecutive')}</span></Row>
       <details><summary>{t(`可用工具（${status.tools.length}）`, `Available tools (${status.tools.length})`)}</summary><ul>{status.tools.map((tool) => <li key={tool}><code>{tool}</code></li>)}</ul></details>
     </Group>}
+    <Group title={t('上下文与压缩', 'Context and compaction')}>
+      {status?.usage === null || status?.usage === undefined
+        ? <p className="stub">{t('上下文窗口或用量暂不可知。', 'Context window or usage is unavailable.')}</p>
+        : <>
+          <Row label={t('窗口', 'Window')}><span>{status.usage.window}</span></Row>
+          <Row label={t('本地估算', 'Local estimate')}><span>{status.usage.estimated} · {status.usage.measurement} · ×{status.usage.factor}</span></Row>
+          <Row label={t('压缩阈值', 'Compaction threshold')}><span>{status.usage.threshold} · {t('保留', 'retained')} {status.usage.retained} · {t('预留', 'reserved')} {status.usage.reserved ?? t('未知', 'unknown')}</span></Row>
+          <Row label={t('最近端点用量', 'Latest reported usage')}><span>{status.usage.reported === null
+            ? t('未知', 'unknown') : `${t('输入', 'input')} ${status.usage.reported.input ?? t('未知', 'unknown')} · ${t('输出', 'output')} ${status.usage.reported.output ?? t('未知', 'unknown')}`}</span></Row>
+        </>}
+      {compactionError !== '' && <p role="alert">{t('无法读取压缩记录', 'Could not read compaction records')} · {compactionError}</p>}
+      {compactionFacts.length === 0 && compactionError === '' && <p className="stub">{t('当前记录页没有压缩块。', 'No compaction blocks appear in this Session page.')}</p>}
+      {compactionFacts.map(fact => <Row key={`${fact.seq}:${fact.blockId ?? 0}`} label={t('压缩块', 'Compaction block')}>
+        <span>{fact.reason} · {fact.fromSeq ?? '—'}–{fact.toSeq ?? '—'} · {fact.tokensBefore ?? t('未知', 'unknown')} → {fact.tokensAfter ?? t('未知', 'unknown')} tokens</span>
+      </Row>)}
+    </Group>
     <Group title={t('请求构成诊断', 'Request composition diagnostics')}>
       <p className="stub">{t('按需启用；只暂存在 Host 内存，不含提示正文或工具参数。', 'Opt in when needed; held in Host memory and excludes prompt text and tool arguments.')}</p>
       <div>

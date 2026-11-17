@@ -106,7 +106,7 @@ window.showArtifact = index => { const item = fixture.items[index]; root.render(
 window.showArtifact(0);`;
   const entryId = join(frontend, '__p4-artifact-entry.tsx').replaceAll('\\', '/');
   vite = await createServer({ root: frontend, configFile: join(frontend, 'vite.config.ts'),
-    html: { cspNonce: `${'a'.repeat(43)}=` }, server: { port: 0, strictPort: false, host: '127.0.0.1' },
+    html: { cspNonce: `${'a'.repeat(43)}=` }, server: { port: 5189, strictPort: false, host: '127.0.0.1' },
     plugins: [{ name: 'p4-artifact-fixture', enforce: 'pre',
       resolveId(id) { if (id === '/__p4-artifact-entry.tsx') return entryId; },
       load(id) { if (id === entryId) return entry; },

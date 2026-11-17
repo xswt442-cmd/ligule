@@ -37,10 +37,11 @@ function statusText(state: ProjectGitStatus['state'], t: (chinese: string, engli
   }
 }
 
-export function ProjectGitPanel({ client, sessionId, onOpenFile }: {
+export function ProjectGitPanel({ client, sessionId, onOpenFile, onOpenCheck }: {
   client: Client;
   sessionId: string;
   onOpenFile: (path: string, version?: string) => void;
+  onOpenCheck?: (runId: string, eventSeq: number) => void;
 }) {
   const t = useText();
   const [status, setStatus] = useState<ProjectGitStatus | null>(null);
@@ -176,6 +177,8 @@ export function ProjectGitPanel({ client, sessionId, onOpenFile }: {
         <span>{check.name} · {check.commandStatus} · {check.reportStatus} · {check.scopeStatus}</span>
         <small>{check.scope.length === 0 ? t('未限定文件范围', 'No file scope') : check.scope.map(path => <button type="button" key={path}
           onClick={() => onOpenFile(path)}>{path}</button>)}</small>
+        {onOpenCheck !== undefined && check.runId !== undefined && <button type="button"
+          onClick={() => onOpenCheck(check.runId!, check.seq)}>{t('查看检查输出', 'View check output')}</button>}
       </article>)}
       {history.hasMore && <button type="button" disabled={historyBusy} onClick={() => void loadOlderHistory()}>
         {historyBusy ? t('正在读取…', 'Loading…') : t('读取更早的记录', 'Load older records')}

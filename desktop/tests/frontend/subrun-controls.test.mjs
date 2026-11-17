@@ -142,7 +142,7 @@ createRoot(document.getElementById('root')).render(
   const vite = await createServer({
     root: frontend,
     configFile: join(frontend, 'vite.config.ts'),
-    server: { port: 0, strictPort: false, host: '127.0.0.1' },
+    server: { port: 5191, strictPort: false, host: '127.0.0.1' },
     plugins: [{
       name: 'subrun-controls-entry',
       enforce: 'pre',

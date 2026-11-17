@@ -6,6 +6,7 @@ import { useText } from '../locale';
 export type Ask = {
   id: string;
   sessionId: string;
+  displaySessionId?: string;
   project: string;
   tool: string;
   detail: string;
@@ -80,7 +81,7 @@ export function ApprovalCard({ ask, queued, verbosity, active, onAnswer, onOpen,
         {ask.project !== '' && <span className="row-note">{t('项目', 'Project')} {ask.project}</span>}
         {ask.backend !== '' && <span className="row-note">{t('服务', 'Service')} {ask.backend}</span>}
         {queued > 0 && <span className="row-note">{t(`后面还有 ${queued} 条`, `${queued} more queued`)}</span>}
-        {background && <button type="button" onClick={() => onOpen(ask.sessionId)}>{t('打开会话', 'Open session')} {ask.sessionId.slice(0, 8)}</button>}
+        {background && <button type="button" onClick={() => onOpen(ask.displaySessionId ?? ask.sessionId)}>{t('打开会话', 'Open session')} {(ask.displaySessionId ?? ask.sessionId).slice(0, 8)}</button>}
       </div>
       {ask.detail !== '' && <div className="row-target">{ask.detail}</div>}
       {ask.change !== '' && <div className="row-target">{t(ask.change, ask.english?.change ?? ask.change)}</div>}

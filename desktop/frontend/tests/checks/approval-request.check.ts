@@ -1,10 +1,19 @@
 // 审批请求适配：会话归属、摘要选择、脚本绑定与记忆范围都要原样到达审批卡。
 import assert from 'node:assert/strict';
-import { approvalSession, toApprovalAsk } from '../../src/approval-request.ts';
+import { approvalDisplaySession, approvalSession, toApprovalAsk } from '../../src/approval-request.ts';
 
 assert.equal(approvalSession({ sessionId: 'abc' }), 'abc');
 assert.equal(approvalSession({ sessionId: '' }), null);
 assert.equal(approvalSession(undefined), null);
+assert.equal(approvalDisplaySession({ sessionId: 'operation-session', sourceSessionId: 'source-session' }), 'source-session');
+assert.equal(approvalDisplaySession({ sessionId: 'ordinary-session' }), 'ordinary-session');
+
+const operationApproval = toApprovalAsk('request-operation', {
+  sessionId: 'operation-session', sourceSessionId: 'source-session', tool: 'exec',
+  command: 'node task.mjs', args: { command: 'node task.mjs' },
+});
+assert.equal(operationApproval.sessionId, 'operation-session', 'approval answer and detail fetch retain the real owner');
+assert.equal(operationApproval.displaySessionId, 'source-session', 'the source is only where the card is shown');
 
 const command = toApprovalAsk('req-1', {
   sessionId: 'abc',

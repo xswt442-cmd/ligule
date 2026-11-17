@@ -18,7 +18,8 @@ export function UsageMeter({ usage, seconds, running }: { usage: Usage; seconds:
     [t('修正系数', 'Correction factor'), `×${usage.factor.toFixed(2)}`],
     [t('端点报告', 'Endpoint report'), usage.reported === null
       ? t('尚无报告', 'No report yet')
-      : t(`第 ${format(usage.reported.seq)} 条 · 入 ${format(usage.reported.input)} · 出 ${usage.reported.output === null ? '—' : format(usage.reported.output)} tokens`, `Event ${format(usage.reported.seq)} · in ${format(usage.reported.input)} · out ${usage.reported.output === null ? '—' : format(usage.reported.output)} tokens`)],
+      : t(`第 ${format(usage.reported.seq)} 条 · 入 ${usage.reported.input === null ? '未知' : format(usage.reported.input)} · 出 ${usage.reported.output === null ? '未知' : format(usage.reported.output)} tokens`,
+        `Event ${format(usage.reported.seq)} · in ${usage.reported.input === null ? 'unknown' : format(usage.reported.input)} · out ${usage.reported.output === null ? 'unknown' : format(usage.reported.output)} tokens`)],
     [t('本轮时长', 'Turn duration'), running ? t(`${seconds} 秒`, `${seconds} sec`) : t('空闲', 'Idle')],
     [t('估算方式', 'Measurement'), usage.measurement],
   ];

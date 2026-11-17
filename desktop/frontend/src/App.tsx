@@ -11,10 +11,11 @@ import { WorkbenchDock } from './components/WorkbenchDock';
 import { ProjectFilesPanel } from './components/ProjectFilesPanel';
 import { ProjectFileView } from './components/ProjectFileView';
 import { ProjectGitPanel } from './components/ProjectGitPanel';
+import { DeliveryPanel, ArtifactDetailPanel, CheckDetailPanel } from './components/DeliveryPanel';
 import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
 import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
-import { approvalSession, toApprovalAsk, type ApprovalRequestParams } from './approval-request';
+import { approvalDisplaySession, approvalSession, toApprovalAsk, type ApprovalRequestParams } from './approval-request';
 import { reopenSessionWriter } from './session-reopen';
 import { requestIsCurrent, type RequestIdentity } from './request-identity';
 import { blockedSessions, type QuitInput, type QuitRow } from './quit';
@@ -38,8 +39,9 @@ import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { appendProjectedRecords, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import { taskSummaryLabelOf, taskSummaryOf, type Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, saveWorkbenchSettings, updateSettings, type Settings } from './settings';
-import { closeWorkbenchTab, openWorkbenchResource, selectWorkbenchTab, updateWorkbenchFileDraft, workbenchStateFrom,
-  type WorkbenchFileDraft, type WorkbenchResource } from './workbench';
+import { addWorkbenchCommand, closeWorkbenchCommand, closeWorkbenchTab, openWorkbenchResource, selectWorkbenchCommand,
+  selectWorkbenchTab, updateWorkbenchFileDraft, workbenchStateFrom,
+  type WorkbenchCommandReference, type WorkbenchFileDraft, type WorkbenchResource } from './workbench';
 import { LocaleProvider, localeOf } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
 import { SessionStreamBuffer } from './session-stream';
@@ -47,6 +49,7 @@ import { observeExternalSession } from './external-session-observation';
 import { clearExternalSessionDraftIfCurrent, externalSessionDraftFor, externalSessionDraftRevisionFor, updateExternalSessionDrafts, type ExternalSessionDrafts } from './external-session-drafts';
 import { clearSessionDraftIfCurrent, sessionDraftRevisionFor, updateSessionDraftRevision, type SessionDraftRevisions } from './session-draft-revisions';
 import { Composer } from './components/Composer';
+import { CommandWorkspace } from './components/CommandWorkspace';
 import { ExternalSessionComposer, ExternalSessionControlPanel } from './components/ExternalSessionControlPanel';
 import type { MentionState } from './mentions';
 import type { PermissionConfirmations, PermissionTarget } from './permission-control';
@@ -97,6 +100,11 @@ type PanelProps = {
   openSession: (id: string, projectRoot?: string) => void;
   // 搜索结果包含会话和事件序号；先打开会话，再定位到该事件。
   openHit: (hit: SearchHit, projectRoot?: string) => void;
+  openProjectFile: (root: string, path: string, version?: string) => void;
+  openProjectGit: (root: string) => void;
+  openArtifact: (artifactKey: string) => void;
+  openCheck: (runId: string, eventSeq: number) => void;
+  openDiagnostics: () => void;
   // 新建分支后递增此值，触发左侧栏重新加载会话列表。
   sessionsRevision: number;
   settings: Settings;
@@ -133,6 +141,17 @@ async function registerShellWorkspace(getDirectory: () => Promise<string>, clien
 }
 
 const menuPanels: Panel<PanelProps>[] = [
+  {
+    id: 'panel.delivery',
+    title: '交付',
+    view: ({ client, sessionId, projectRoot, status, openProjectFile, openProjectGit, openArtifact, openCheck, openDiagnostics, openHit }) => (
+      <DeliveryPanel client={client} sessionId={sessionId} projectRoot={projectRoot} status={status}
+        onOpenFile={path => openProjectFile(projectRoot, path)}
+        onOpenEvent={(seq, kind) => sessionId !== null && openHit({ sessionId, seq, kind, text: '' }, projectRoot)}
+        onOpenArtifact={openArtifact} onOpenCheck={openCheck} onOpenProjectChanges={() => openProjectGit(projectRoot)}
+        onOpenDiagnostics={openDiagnostics} />
+    ),
+  },
   {
     id: 'panel.diagnostics',
     title: '诊断',
@@ -242,6 +261,7 @@ export function App({ transport }: { transport: Transport }) {
   // 使用 ref 保存该控制标记，不额外触发界面渲染。
   const allowSend = useRef(new Set<string>());
   const [status, setStatus] = useState<Status | null>(null);
+  const [hostRevision, setHostRevision] = useState(0);
   const [taskSnapshotAt, setTaskSnapshotAt] = useState(Date.now());
   const [newSessionSettingsRevision, setNewSessionSettingsRevision] = useState(0);
   const [newSessionMode, setNewSessionMode] = useState<string | null>(null);
@@ -311,6 +331,7 @@ export function App({ transport }: { transport: Transport }) {
   const progressLabel = `${progressPhase || t('运行中', 'Running')} · ${progressIdleSeconds}${t('秒无新进展', 's without progress')}${fallbackCallsLabel} · ${progress?.toolCalls ?? 0} ${t('个工具调用', 'tool calls')}${status?.outputTokens === null || status?.outputTokens === undefined ? '' : ` · ${status.outputTokens} ${t('个输出token', 'output tokens')}`}${taskLabel}`;
   const panelTitle = useCallback((item: Panel<PanelProps>) => {
     const titles: Record<string, [string, string]> = {
+      'panel.delivery': ['交付', 'Deliveries'],
       'panel.diagnostics': ['诊断', 'Diagnostics'],
       'panel.branch': ['派生支线', 'Subtasks'],
       'panel.export': ['导出全文', 'Export transcript'],
@@ -503,7 +524,7 @@ export function App({ transport }: { transport: Transport }) {
     }
   }, [client]);
   const openPanel = useCallback((item: Panel<PanelProps>) => {
-    const panelIds = ['panel.diagnostics', 'panel.branch', 'panel.export', 'panel.help'] as const;
+    const panelIds = ['panel.delivery', 'panel.diagnostics', 'panel.branch', 'panel.export', 'panel.help'] as const;
     const panelId = panelIds.find(id => id === item.id);
     if (panelId === undefined) return;
     leaveDock(() => {
@@ -559,12 +580,51 @@ export function App({ transport }: { transport: Transport }) {
       } catch (error) { setWorkbenchError(code(error)); }
     });
   }, [applyWorkbenchState, leaveDock, projectRoot, sessionId]);
+  const openArtifactResource = useCallback((artifactKey: string) => {
+    if (sessionId === null || projectRoot === '') {
+      setWorkbenchError('project_files_session_required');
+      return;
+    }
+    leaveDock(() => {
+      try {
+        applyWorkbenchState(openWorkbenchResource(workbenchRef.current,
+          { kind: 'artifact', projectRoot, sessionId, artifactKey }, t('交付物', 'Artifact')));
+        setWorkbenchError(null);
+      } catch (error) { setWorkbenchError(code(error)); }
+    });
+  }, [applyWorkbenchState, leaveDock, projectRoot, sessionId, t]);
+  const openCheckResource = useCallback((runId: string, eventSeq: number) => {
+    if (sessionId === null) {
+      setWorkbenchError('session_id_required');
+      return;
+    }
+    leaveDock(() => {
+      try {
+        applyWorkbenchState(openWorkbenchResource(workbenchRef.current,
+          { kind: 'check', ...(projectRoot === '' ? {} : { projectRoot }), sessionId, runId, eventSeq },
+          t(`检查 ${eventSeq}`, `Check ${eventSeq}`)));
+        setWorkbenchError(null);
+      } catch (error) { setWorkbenchError(code(error)); }
+    });
+  }, [applyWorkbenchState, leaveDock, projectRoot, sessionId, t]);
   const selectWorkbench = useCallback((key: string) => {
     leaveDock(() => applyWorkbenchState(selectWorkbenchTab(workbenchRef.current, key)));
   }, [applyWorkbenchState, leaveDock]);
   const closeWorkbench = useCallback((key: string) => {
     leaveDock(() => applyWorkbenchState(closeWorkbenchTab(workbenchRef.current, key)));
   }, [applyWorkbenchState, leaveDock]);
+  const addCommandReference = useCallback((reference: WorkbenchCommandReference) => {
+    try {
+      applyWorkbenchState(addWorkbenchCommand(workbenchRef.current, reference));
+      setWorkbenchError(null);
+    } catch (error) { setWorkbenchError(code(error)); }
+  }, [applyWorkbenchState]);
+  const selectCommandReference = useCallback((key: string) => {
+    applyWorkbenchState(selectWorkbenchCommand(workbenchRef.current, key));
+  }, [applyWorkbenchState]);
+  const closeCommandReference = useCallback((key: string) => {
+    applyWorkbenchState(closeWorkbenchCommand(workbenchRef.current, key));
+  }, [applyWorkbenchState]);
   const hideWorkbench = useCallback(() => {
     leaveDock(() => applyWorkbenchState({ ...workbenchRef.current, rightOpen: false }));
   }, [applyWorkbenchState, leaveDock]);
@@ -916,7 +976,8 @@ export function App({ transport }: { transport: Transport }) {
       // 请求属于发起它的会话；即使会话在后台等待，也必须显示并允许答复。
       const asked = approvalSession(params);
       if (asked === null || params === undefined) return;
-      notify('approval', asked, params.projectRoot ?? '');
+      const displaySessionId = approvalDisplaySession(params) ?? asked;
+      notify('approval', displaySessionId, params.projectRoot ?? '');
       const ask = toApprovalAsk(message.id ?? '', params);
       setAsks((current) => [...current, ask]);
     });
@@ -1252,6 +1313,7 @@ export function App({ transport }: { transport: Transport }) {
         if (isCurrent()) setRows((current) => [...current, metaRow('error', `无法启动后端：${code(error)}`, `Could not start the host: ${code(error)}`)]);
         return;
       }
+      setHostRevision(current => current + 1);
       // Host restart invalidates an in-flight preference write. Reload its version and saved values
       // before restoring the Session so a failed write does not leave the composer read-only.
       setSettingsReady(false);
@@ -1722,7 +1784,7 @@ export function App({ transport }: { transport: Transport }) {
   }, [client]);
 
   const answer = useCallback((decision: 'allow' | 'deny', rememberScope?: 'session' | 'project' | 'user', rememberTarget?: 'file' | 'workspace' | 'tool' | 'command') => {
-    const head = asks.find((ask) => ask.sessionId === sessionId);
+    const head = asks.find((ask) => (ask.displaySessionId ?? ask.sessionId) === sessionId);
     if (head === undefined) return;
     setAsks((current) => current.filter((ask) => ask.id !== head.id));
     // 答复按原请求编号返回，与当前前台会话无关。
@@ -1887,6 +1949,11 @@ export function App({ transport }: { transport: Transport }) {
     onReconnect: () => void reconnect(),
     openSession: (id: string, root?: string) => void openSession(id, undefined, false, root),
     openHit,
+    openProjectFile,
+    openProjectGit,
+    openArtifact: openArtifactResource,
+    openCheck: openCheckResource,
+    openDiagnostics: () => openPanel(menuPanels.find(item => item.id === 'panel.diagnostics')!),
     projects: settings.projects,
     onProjects: (roots: string[]) => patch({ projects: roots }),
     projectRoot,
@@ -1900,6 +1967,8 @@ export function App({ transport }: { transport: Transport }) {
   const activeDirectoryResource = activeWorkbenchTab?.resource.kind === 'directory' ? activeWorkbenchTab.resource : undefined;
   const activeFileResource = activeWorkbenchTab?.resource.kind === 'file' ? activeWorkbenchTab.resource : undefined;
   const activeGitResource = activeWorkbenchTab?.resource.kind === 'git' ? activeWorkbenchTab.resource : undefined;
+  const activeArtifactResource = activeWorkbenchTab?.resource.kind === 'artifact' ? activeWorkbenchTab.resource : undefined;
+  const activeCheckResource = activeWorkbenchTab?.resource.kind === 'check' ? activeWorkbenchTab.resource : undefined;
   const inactivePanelScope = activePanelResource !== undefined && activePanelResource.panelId !== 'panel.help'
     && activePanelResource.sessionId !== sessionId;
   const dockPanelProps: PanelProps = activePanelResource === undefined || activePanelResource.panelId === 'panel.help'
@@ -1924,7 +1993,7 @@ export function App({ transport }: { transport: Transport }) {
     };
 
   const currentQueries = queries.filter((query) => query.sessionId === sessionId);
-  const currentAsks = asks.filter((ask) => ask.sessionId === sessionId);
+  const currentAsks = asks.filter((ask) => (ask.displaySessionId ?? ask.sessionId) === sessionId);
   const handleDraftKeyDown = useCallback((event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (isComposing(event.nativeEvent)) return;
     if (mention !== null) {
@@ -2189,8 +2258,10 @@ export function App({ transport }: { transport: Transport }) {
         onSend={() => void send()}
         onSteer={() => void steer()}
       />}
-      {settings.workbench.bottomOpen && <section className="bottom-workbench" aria-label={t('命令工作区', 'Command workspace')}
-        style={{ height: `${settings.workbench.bottomHeight}px`, flexBasis: `${settings.workbench.bottomHeight}px` }}>
+      <section className="bottom-workbench" aria-label={t('命令工作区', 'Command workspace')}
+        hidden={!settings.workbench.bottomOpen}
+        style={{ height: `${settings.workbench.bottomHeight}px`, flexBasis: `${settings.workbench.bottomHeight}px`,
+          display: settings.workbench.bottomOpen ? 'flex' : 'none' }}>
         <div className="bottom-workbench-resize" role="separator" aria-orientation="horizontal"
           aria-label={t('命令工作区高度', 'Command workspace height')} onPointerDown={startBottomResize} />
         <header className="bottom-workbench-head">
@@ -2199,10 +2270,14 @@ export function App({ transport }: { transport: Transport }) {
           <button type="button" className="icon-button" aria-label={t('隐藏命令工作区', 'Hide command workspace')}
             onClick={hideCommandArea}><Icon name="close" size={14} /></button>
         </header>
-        <div className="bottom-workbench-body">
-          <p>{t('选择一条命令后，这里会显示它的输出与清理状态。', 'Select a command to view its output and cleanup state here.')}</p>
+        <div className="bottom-workbench-body bottom-workbench-command-body">
+          <CommandWorkspace client={client} sessionId={sessionId} projectRoot={projectRoot} status={status}
+            readOnly={observingExternalSession} open={settings.workbench.bottomOpen} hostRevision={hostRevision}
+            references={settings.workbench.commandTabs} activeKey={settings.workbench.activeCommandKey}
+            onAdd={addCommandReference} onSelect={selectCommandReference} onClose={closeCommandReference}
+            onOpenSession={(id, root) => { void openSession(id, undefined, false, root); }} />
         </div>
-      </section>}
+      </section>
     </main>
 
     {settings.workbench.rightOpen && <WorkbenchDock state={settings.workbench}
@@ -2246,7 +2321,18 @@ export function App({ transport }: { transport: Transport }) {
                 ? sessionId === null || projectRoot === '' || !sameProjectRoot(activeGitResource.projectRoot, projectRoot)
                   ? <p className="stub" role="status">{t('请切换到这个工作区的会话后再查看改动。', 'Select a session in this project to view its changes.')}</p>
                   : <ProjectGitPanel key={`${sessionId}:${activeGitResource.projectRoot}`} client={client} sessionId={sessionId}
-                    onOpenFile={(path, version) => openProjectFile(activeGitResource.projectRoot, path, version)} />
+                    onOpenFile={(path, version) => openProjectFile(activeGitResource.projectRoot, path, version)}
+                    onOpenCheck={openCheckResource} />
+                : activeArtifactResource !== undefined
+                  ? <ArtifactDetailPanel key={`${activeArtifactResource.sessionId}:${activeArtifactResource.artifactKey}`}
+                    client={client} sessionId={activeArtifactResource.sessionId} projectRoot={activeArtifactResource.projectRoot}
+                    artifactKey={activeArtifactResource.artifactKey} onOpenFile={path => openProjectFile(activeArtifactResource.projectRoot, path)} />
+                  : activeCheckResource !== undefined
+                    ? <CheckDetailPanel key={`${activeCheckResource.sessionId}:${activeCheckResource.runId}:${activeCheckResource.eventSeq}`}
+                      client={client} sessionId={activeCheckResource.sessionId} projectRoot={activeCheckResource.projectRoot ?? projectRoot}
+                      runId={activeCheckResource.runId} eventSeq={activeCheckResource.eventSeq}
+                      onOpenEvent={(seq, kind) => void openSession(activeCheckResource.sessionId,
+                        { sessionId: activeCheckResource.sessionId, seq, kind, text: '' }, false, activeCheckResource.projectRoot ?? projectRoot)} />
           : <p className="stub" role="status">{t('这个资源暂时无法显示。', 'This resource is not available to display.')}</p>}
     </WorkbenchDock>}
 

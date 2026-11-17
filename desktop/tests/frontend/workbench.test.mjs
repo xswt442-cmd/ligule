@@ -2,9 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   DEFAULT_WORKBENCH_STATE,
+  MAX_WORKBENCH_COMMANDS,
+  addWorkbenchCommand,
   closeWorkbenchTab,
+  closeWorkbenchCommand,
   openWorkbenchResource,
   selectWorkbenchTab,
+  selectWorkbenchCommand,
   updateWorkbenchFileDraft,
   workbenchStateFrom,
 } from '../../frontend/src/workbench.ts';
@@ -42,6 +46,14 @@ test('resource identity separates projects, immutable diffs, executions, and chi
 
   assert.equal(childB.tabs.length, 7);
   assert.equal(new Set(childB.tabs.map(tab => tab.key)).size, childB.tabs.length);
+});
+
+test('the Workbench can persist a dedicated delivery panel resource', () => {
+  const delivery = openWorkbenchResource(DEFAULT_WORKBENCH_STATE,
+    { kind: 'panel', panelId: 'panel.delivery' }, '交付');
+  const restored = workbenchStateFrom(JSON.parse(JSON.stringify(delivery)));
+  assert.equal(restored.tabs.at(-1).resource.panelId, 'panel.delivery');
+  assert.equal(restored.activeKey, delivery.activeKey);
 });
 
 test('file and diff resources accept Session file versions while artifact IDs remain full digests', () => {
@@ -146,6 +158,43 @@ test('the tab limit reports an explicit error instead of dropping a possibly edi
   assert.throws(() => openWorkbenchResource(state,
     { kind: 'file', projectRoot: 'C:/repo', path: 'src/25.ts' }, '25.ts'), { code: 'workbench_tab_limit' });
   assert.equal(state.tabs.length, 24);
+});
+
+test('command references persist in bounded Workbench preferences without storing command text or output', () => {
+  const first = { sourceSessionId: 'source-a', operationSessionId: 'operation-a', operationId: 'operation-id-a', executionId: 'execution-a' };
+  const second = { sourceSessionId: 'source-a', operationSessionId: 'operation-b', operationId: 'operation-id-b', executionId: 'execution-b' };
+  const one = addWorkbenchCommand(DEFAULT_WORKBENCH_STATE, first);
+  const two = addWorkbenchCommand(one, second);
+  const restored = workbenchStateFrom(JSON.parse(JSON.stringify(two)));
+
+  assert.equal(MAX_WORKBENCH_COMMANDS, 24);
+  assert.deepEqual(restored.commandTabs, [first, second]);
+  assert.equal(restored.activeCommandKey, JSON.stringify(['command', 'source-a', 'operation-b', 'operation-id-b', 'execution-b']));
+  assert.equal(JSON.stringify(restored).includes('command text'), false);
+  assert.equal(JSON.stringify(restored).includes('stdout'), false);
+  const unsafeReference = workbenchStateFrom({ version: 1, commandTabs: [{ ...first, command: 'node secret.mjs', stdout: 'private output' }] });
+  assert.deepEqual(unsafeReference.commandTabs, [], 'command text and output are not accepted as preference fields');
+
+  const selected = selectWorkbenchCommand(restored,
+    JSON.stringify(['command', 'source-a', 'operation-a', 'operation-id-a', 'execution-a']));
+  const closed = closeWorkbenchCommand(selected, selected.activeCommandKey);
+  assert.deepEqual(closed.commandTabs, [second]);
+  assert.equal(closed.activeCommandKey, JSON.stringify(['command', 'source-a', 'operation-b', 'operation-id-b', 'execution-b']));
+});
+
+test('command reference cap rejects another start reference without deleting existing ones', () => {
+  let state = DEFAULT_WORKBENCH_STATE;
+  for (let index = 0; index < MAX_WORKBENCH_COMMANDS; index += 1) {
+    state = addWorkbenchCommand(state, {
+      sourceSessionId: 'source-a', operationSessionId: `operation-${index}`,
+      operationId: `operation-id-${index}`, executionId: `execution-${index}`,
+    });
+  }
+  assert.throws(() => addWorkbenchCommand(state, {
+    sourceSessionId: 'source-a', operationSessionId: 'operation-overflow',
+    operationId: 'operation-id-overflow', executionId: 'execution-overflow',
+  }), { code: 'workbench_command_limit' });
+  assert.equal(state.commandTabs.length, MAX_WORKBENCH_COMMANDS);
 });
 
 test('saving workbench state merges into the latest Host preferences and keeps conversation drafts', async () => {

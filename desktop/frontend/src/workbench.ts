@@ -6,10 +6,10 @@ export type WorkbenchResource =
   | { readonly kind: 'execution'; readonly sessionId: string; readonly runId: string; readonly executionId: string }
   | { readonly kind: 'subrun'; readonly sessionId: string; readonly parentRunId: string; readonly subrunId: string; readonly childSessionId: string; readonly childRunId: string }
   | { readonly kind: 'artifact'; readonly projectRoot: string; readonly sessionId: string; readonly artifactKey: string }
-  | { readonly kind: 'check'; readonly sessionId: string; readonly runId: string; readonly eventSeq: number }
+  | { readonly kind: 'check'; readonly projectRoot?: string; readonly sessionId: string; readonly runId: string; readonly eventSeq: number }
   | { readonly kind: 'diagnostics'; readonly sessionId: string }
   | { readonly kind: 'side-session'; readonly sessionId: string; readonly originSessionId: string }
-  | { readonly kind: 'panel'; readonly panelId: 'panel.branch' | 'panel.diagnostics' | 'panel.export' | 'panel.help'; readonly projectRoot?: string; readonly sessionId?: string };
+  | { readonly kind: 'panel'; readonly panelId: 'panel.delivery' | 'panel.branch' | 'panel.diagnostics' | 'panel.export' | 'panel.help'; readonly projectRoot?: string; readonly sessionId?: string };
 
 export type WorkbenchTab = {
   readonly key: string;
@@ -17,6 +17,13 @@ export type WorkbenchTab = {
   readonly resource: WorkbenchResource;
   readonly pinned: boolean;
   readonly fileDraft?: WorkbenchFileDraft;
+};
+
+export type WorkbenchCommandReference = {
+  readonly sourceSessionId: string;
+  readonly operationSessionId: string;
+  readonly operationId: string;
+  readonly executionId: string;
 };
 
 export type WorkbenchFileDraft = { readonly version: string; readonly text: string };
@@ -29,9 +36,12 @@ export type WorkbenchState = {
   readonly bottomHeight: number;
   readonly tabs: readonly WorkbenchTab[];
   readonly activeKey: string | null;
+  readonly commandTabs: readonly WorkbenchCommandReference[];
+  readonly activeCommandKey: string | null;
 };
 
 export const MAX_WORKBENCH_TABS = 24;
+export const MAX_WORKBENCH_COMMANDS = 24;
 export const MAX_WORKBENCH_FILE_DRAFT_BYTES = 256 * 1024;
 export const MAX_WORKBENCH_DRAFT_BYTES = 768 * 1024;
 const MAX_TITLE_LENGTH = 160;
@@ -46,6 +56,8 @@ export const DEFAULT_WORKBENCH_STATE: WorkbenchState = {
   bottomHeight: 220,
   tabs: [],
   activeKey: null,
+  commandTabs: [],
+  activeCommandKey: null,
 };
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -78,6 +90,23 @@ function relativePath(value: unknown): string | undefined {
 
 function identifier(value: unknown): string | undefined {
   return safeString(value, MAX_ID_LENGTH);
+}
+
+export function commandReferenceKey(reference: WorkbenchCommandReference): string {
+  return JSON.stringify(['command', reference.sourceSessionId, reference.operationSessionId,
+    reference.operationId, reference.executionId]);
+}
+
+function commandReferenceFrom(value: unknown): WorkbenchCommandReference | undefined {
+  if (!object(value) || Object.keys(value).some(key => !['sourceSessionId', 'operationSessionId', 'operationId', 'executionId'].includes(key))) {
+    return undefined;
+  }
+  const sourceSessionId = identifier(value.sourceSessionId);
+  const operationSessionId = identifier(value.operationSessionId);
+  const operationId = identifier(value.operationId);
+  const executionId = identifier(value.executionId);
+  return sourceSessionId === undefined || operationSessionId === undefined || operationId === undefined || executionId === undefined
+    ? undefined : { sourceSessionId, operationSessionId, operationId, executionId };
 }
 
 function hash(value: unknown): string | undefined {
@@ -156,11 +185,13 @@ function resourceFrom(value: unknown): WorkbenchResource | undefined {
         ? undefined : { kind: 'artifact', projectRoot, sessionId, artifactKey };
     }
     case 'check': {
+      const projectRoot = value.projectRoot === undefined ? undefined : absoluteRoot(value.projectRoot);
       const sessionId = identifier(value.sessionId);
       const runId = identifier(value.runId);
-      return sessionId === undefined || runId === undefined || !Number.isSafeInteger(value.eventSeq)
+      return sessionId === undefined || runId === undefined || value.projectRoot !== undefined && projectRoot === undefined
+        || !Number.isSafeInteger(value.eventSeq)
         || (value.eventSeq as number) < 0
-        ? undefined : { kind: 'check', sessionId, runId, eventSeq: value.eventSeq as number };
+        ? undefined : { kind: 'check', ...(projectRoot === undefined ? {} : { projectRoot }), sessionId, runId, eventSeq: value.eventSeq as number };
     }
     case 'diagnostics': {
       const sessionId = identifier(value.sessionId);
@@ -173,7 +204,7 @@ function resourceFrom(value: unknown): WorkbenchResource | undefined {
         ? undefined : { kind: 'side-session', sessionId, originSessionId };
     }
     case 'panel': {
-      const panelIds = ['panel.branch', 'panel.diagnostics', 'panel.export', 'panel.help'] as const;
+      const panelIds = ['panel.delivery', 'panel.branch', 'panel.diagnostics', 'panel.export', 'panel.help'] as const;
       const panelId = panelIds.find(candidate => candidate === value.panelId);
       const projectRoot = value.projectRoot === undefined ? undefined : absoluteRoot(value.projectRoot);
       const sessionId = value.sessionId === undefined ? undefined : identifier(value.sessionId);
@@ -207,7 +238,8 @@ function resourceKey(resource: WorkbenchResource): string {
     case 'subrun': return JSON.stringify(['subrun', resource.sessionId, resource.parentRunId,
       resource.subrunId, resource.childSessionId, resource.childRunId]);
     case 'artifact': return JSON.stringify(['artifact', rootIdentity(resource.projectRoot), resource.sessionId, resource.artifactKey]);
-    case 'check': return JSON.stringify(['check', resource.sessionId, resource.runId, resource.eventSeq]);
+    case 'check': return JSON.stringify(['check', resource.projectRoot === undefined ? '' : rootIdentity(resource.projectRoot),
+      resource.sessionId, resource.runId, resource.eventSeq]);
     case 'diagnostics': return JSON.stringify(['diagnostics', resource.sessionId]);
     case 'side-session': return JSON.stringify(['side-session', resource.sessionId, resource.originSessionId]);
     case 'panel': return JSON.stringify(['panel', resource.panelId,
@@ -248,6 +280,20 @@ export function workbenchStateFrom(value: unknown): WorkbenchState {
   }
   const requestedActive = typeof value.activeKey === 'string' ? value.activeKey : null;
   const activeKey = requestedActive !== null && seen.has(requestedActive) ? requestedActive : tabs.at(-1)?.key ?? null;
+  const commandCandidates = Array.isArray(value.commandTabs) ? value.commandTabs.slice(-MAX_WORKBENCH_COMMANDS) : [];
+  const commandTabs: WorkbenchCommandReference[] = [];
+  const commandKeys = new Set<string>();
+  for (const candidate of commandCandidates) {
+    const reference = commandReferenceFrom(candidate);
+    if (reference === undefined) continue;
+    const key = commandReferenceKey(reference);
+    if (commandKeys.has(key)) continue;
+    commandKeys.add(key);
+    commandTabs.push(reference);
+  }
+  const requestedCommand = typeof value.activeCommandKey === 'string' ? value.activeCommandKey : null;
+  const activeCommandKey = requestedCommand !== null && commandKeys.has(requestedCommand)
+    ? requestedCommand : commandTabs.at(-1) === undefined ? null : commandReferenceKey(commandTabs.at(-1)!);
   return {
     version: 1,
     rightOpen: value.rightOpen === true,
@@ -256,11 +302,14 @@ export function workbenchStateFrom(value: unknown): WorkbenchState {
     bottomHeight: size(value.bottomHeight, 160, 680, DEFAULT_WORKBENCH_STATE.bottomHeight),
     tabs,
     activeKey,
+    commandTabs,
+    activeCommandKey,
   };
 }
 
 function checkedState(value: WorkbenchState): WorkbenchState {
-  if (value.version !== 1 || !Array.isArray(value.tabs) || value.tabs.length > MAX_WORKBENCH_TABS) {
+  if (value.version !== 1 || !Array.isArray(value.tabs) || value.tabs.length > MAX_WORKBENCH_TABS
+    || !Array.isArray(value.commandTabs) || value.commandTabs.length > MAX_WORKBENCH_COMMANDS) {
     throw Object.assign(new Error('workbench_state_invalid'), { code: 'workbench_state_invalid' });
   }
   const current = workbenchStateFrom(value);
@@ -269,6 +318,36 @@ function checkedState(value: WorkbenchState): WorkbenchState {
     throw Object.assign(new Error('workbench_file_draft_limit'), { code: 'workbench_file_draft_limit' });
   }
   return current;
+}
+
+export function addWorkbenchCommand(state: WorkbenchState, input: WorkbenchCommandReference): WorkbenchState {
+  const current = checkedState(state);
+  const reference = commandReferenceFrom(input);
+  if (reference === undefined) throw Object.assign(new Error('workbench_command_reference_invalid'), { code: 'workbench_command_reference_invalid' });
+  const key = commandReferenceKey(reference);
+  if (current.commandTabs.some(candidate => commandReferenceKey(candidate) === key)) {
+    return { ...current, bottomOpen: true, activeCommandKey: key };
+  }
+  if (current.commandTabs.length >= MAX_WORKBENCH_COMMANDS) {
+    throw Object.assign(new Error('workbench_command_limit'), { code: 'workbench_command_limit' });
+  }
+  return { ...current, bottomOpen: true, commandTabs: [...current.commandTabs, reference], activeCommandKey: key };
+}
+
+export function selectWorkbenchCommand(state: WorkbenchState, key: string): WorkbenchState {
+  const current = checkedState(state);
+  return current.commandTabs.some(reference => commandReferenceKey(reference) === key)
+    ? { ...current, bottomOpen: true, activeCommandKey: key } : current;
+}
+
+export function closeWorkbenchCommand(state: WorkbenchState, key: string): WorkbenchState {
+  const current = checkedState(state);
+  if (!current.commandTabs.some(reference => commandReferenceKey(reference) === key)) return current;
+  const commandTabs = current.commandTabs.filter(reference => commandReferenceKey(reference) !== key);
+  const activeCommandKey = current.activeCommandKey === key
+    ? commandTabs.at(-1) === undefined ? null : commandReferenceKey(commandTabs.at(-1)!)
+    : current.activeCommandKey;
+  return { ...current, commandTabs, activeCommandKey, bottomOpen: commandTabs.length > 0 && current.bottomOpen };
 }
 
 export function updateWorkbenchFileDraft(state: WorkbenchState, key: string, value: WorkbenchFileDraft | undefined): WorkbenchState {
