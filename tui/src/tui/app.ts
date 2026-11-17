@@ -4,7 +4,7 @@
 import { resolve } from 'node:path';
 import { createElement as h, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, parseExecCommand, parseSubrunCommand, resolveSessionId, routeInput } from './commands.js';
+import { answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, parseExecCommand, parseSubrunCommand, parseToolCommand, resolveSessionId, routeInput } from './commands.js';
 import { pushHistory } from '@ligule/core/tui.js';
 import { searchHistory } from './history.js';
 import { editDraft, isTypingRun, moveDraftCaret, type DraftState } from './draft.js';
@@ -405,6 +405,45 @@ interface TuiExecutionLogPage {
   readonly events: readonly { readonly stream: 'stdout' | 'stderr'; readonly text: string; readonly decodeLossPossible: boolean }[];
 }
 
+interface TuiToolResult {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly callId: string;
+  readonly tool?: string;
+  readonly state: string;
+  readonly code?: string;
+  readonly eventSeq?: number;
+  readonly output?: {
+    readonly returnedValueBytes: number | null;
+    readonly modelVisibleBytes: number;
+    readonly storageStatus: string;
+    readonly storedBytes: number | null;
+    readonly storedComplete: boolean;
+    readonly page: { readonly bytes: number; readonly dataBase64: string; readonly done: boolean; readonly nextCursor: string | null } | null;
+  };
+  readonly fileChanges?: readonly {
+    readonly path: string;
+    readonly operation: string;
+    readonly outcome: string;
+    readonly baselineStatus: string;
+    readonly observedStatus: string;
+    readonly beforeVersion: string | null;
+    readonly expectedAfterVersion: string | null;
+    readonly observedAfterVersion: string | null;
+    readonly changedFromBaseline: boolean | null;
+  }[];
+  readonly check?: {
+    readonly status: string;
+    readonly declaration: { readonly name: string };
+    readonly commandStatus?: string;
+    readonly errorCode?: string;
+    readonly reportStatus?: string;
+    readonly logStatus?: string;
+    readonly scopeStatus?: string;
+    readonly report?: { readonly passed: number; readonly failed: number; readonly skipped: number; readonly todo: number };
+  };
+}
+
 interface TuiRequestResults {
   readonly 'screen-capture.set': { readonly sessionId: string; readonly enabled: boolean; readonly source: string };
   readonly 'browser.stop': { readonly sessionId: string; readonly browser: NonNullable<TuiStatus['browser']> };
@@ -432,6 +471,7 @@ interface TuiRequestResults {
   readonly 'execution.wait': TuiExecutionWait;
   readonly 'execution.logs': TuiExecutionLogPage;
   readonly 'execution.cancel': TuiExecutionStatus;
+  readonly 'tool.result': TuiToolResult;
   readonly 'run.steer': {
     readonly inputId: string;
     readonly runId: string;
@@ -494,7 +534,7 @@ export function clearCancelledLocalQuestion<T extends { readonly id: string; rea
 }
 
 // 将命令表和纯函数导出，供测试及其他界面逻辑使用。
-export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, insertMention, mentionToken, parseExecCommand, parseSubrunCommand, resolveSessionId, routeInput, sessionLines } from './commands.js';
+export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, insertMention, mentionToken, parseExecCommand, parseSubrunCommand, parseToolCommand, resolveSessionId, routeInput, sessionLines } from './commands.js';
 export { activeRunBudgetSegment, buildStatusLine, contextSegment } from './status-line.js';
 export { KEYMAP, CURRENT, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec, specOf } from './keymap.js';
 export { markdownLines } from './markdown.js';
@@ -2998,6 +3038,75 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           : { kind: 'meta', text: result.cancelRequested
             ? t('已发出取消请求，等待子任务收束。', 'Cancellation requested; waiting for the child to settle.')
             : t(`当前子任务状态：${result.state}。`, `Child state: ${result.state}.`) });
+      })();
+      return;
+    }
+    if (name === 'tool') {
+      const command = parseToolCommand(argument);
+      if ('code' in command) {
+        push({ kind: 'error', text: t(
+          `命令格式不正确：${command.code}。用法：/tool <callId> [游标]`,
+          `Invalid command: ${command.code}. Use /tool <callId> [cursor].`,
+        ) });
+        return;
+      }
+      const own = sessionId;
+      void (async () => {
+        const history = await client.request('session.read', { sessionId: own })
+          .catch((error: unknown) => requestFailure(error, 'session_read_failed'));
+        if ('code' in history) {
+          if (activeSession.current === own) push({ kind: 'error', text: t(`无法读取记录：${history.code}`, `Could not read conversation: ${history.code}`) });
+          return;
+        }
+        let currentRunId: string | undefined;
+        let runId: string | undefined;
+        for (const event of history.events) {
+          if (event.kind === 'user') {
+            const acceptance = isRecord(event.run) ? event.run : undefined;
+            currentRunId = typeof acceptance?.runId === 'string' ? acceptance.runId : undefined;
+          }
+          if (event.kind !== 'assistant' || !Array.isArray(event.toolCalls)) continue;
+          if (event.toolCalls.some((call) => isRecord(call) && call.id === command.callId)) {
+            runId = currentRunId;
+            break;
+          }
+        }
+        if (runId === undefined) {
+          if (activeSession.current === own) push({ kind: 'error', text: t(
+            `当前会话找不到工具调用 ${command.callId}。`, `Tool call ${command.callId} was not found in this Session.`,
+          ) });
+          return;
+        }
+        const resolvedRunId = runId;
+        const result = await client.request('tool.result', { sessionId: own, runId: resolvedRunId, callId: command.callId,
+          ...(command.cursor === undefined ? {} : { cursor: command.cursor }), limitBytes: 4_096 })
+          .catch((error: unknown) => requestFailure(error, 'tool_result_failed'));
+        if (activeSession.current !== own) return;
+        if (!('state' in result)) {
+          push({ kind: 'error', text: result.code });
+          return;
+        }
+        const summary = `${command.callId}: ${result.state}${result.tool === undefined ? '' : ` · ${result.tool}`}`
+          + (result.eventSeq === undefined ? '' : ` · event ${result.eventSeq}`)
+          + (result.code === undefined ? '' : ` · ${result.code}`);
+        const output = result.output;
+        const page = output?.page;
+        const pageText = page === null || page === undefined ? '' : Buffer.from(page.dataBase64, 'base64').toString('utf8');
+        const notes = output === undefined ? [] : [
+          t(`返回 ${output.returnedValueBytes ?? '未知'} 字节；模型可见 ${output.modelVisibleBytes} 字节；保存 ${output.storageStatus}${output.storedComplete ? '（完整）' : '（未确认完整）'}。`,
+            `Returned ${output.returnedValueBytes ?? 'unknown'} bytes; ${output.modelVisibleBytes} visible to the model; storage ${output.storageStatus}${output.storedComplete ? ' (complete)' : ' (not verified complete)'}.`),
+          ...(page?.nextCursor === null || page?.nextCursor === undefined ? [] : [t(`下一页游标：${page.nextCursor}`, `Next page cursor: ${page.nextCursor}`)]),
+          ...(page === null ? [t('没有可验证的完整输出页。', 'No complete, verifiable output page is available.')] : []),
+        ];
+        const fileChanges = (result.fileChanges ?? []).map((change) => t(
+          `文件变化：${change.operation} ${change.path}（${change.outcome}；基线 ${change.baselineStatus}；写后采样 ${change.observedStatus}；与基线不同 ${change.changedFromBaseline === null ? '未知' : change.changedFromBaseline ? '是' : '否'}）`,
+          `File change: ${change.operation} ${change.path} (${change.outcome}; baseline ${change.baselineStatus}; after sample ${change.observedStatus}; differs from baseline ${change.changedFromBaseline === null ? 'unknown' : change.changedFromBaseline ? 'yes' : 'no'}).`,
+        ));
+        const checkLine = result.check === undefined ? [] : [t(
+          `检查 ${result.check.declaration.name}：命令 ${result.check.commandStatus ?? result.check.status}${result.check.errorCode === undefined ? '' : `（${result.check.errorCode}）`}；报告 ${result.check.reportStatus ?? '未核实'}；范围 ${result.check.scopeStatus ?? '未核实'}；日志 ${result.check.logStatus ?? '未知'}${result.check.report === undefined ? '' : `；通过 ${result.check.report.passed}、失败 ${result.check.report.failed}、跳过 ${result.check.report.skipped}、待办 ${result.check.report.todo}`}`,
+          `Check ${result.check.declaration.name}: command ${result.check.commandStatus ?? result.check.status}${result.check.errorCode === undefined ? '' : ` (${result.check.errorCode})`}; report ${result.check.reportStatus ?? 'unverified'}; scope ${result.check.scopeStatus ?? 'unverified'}; logs ${result.check.logStatus ?? 'unknown'}${result.check.report === undefined ? '' : `; passed ${result.check.report.passed}, failed ${result.check.report.failed}, skipped ${result.check.report.skipped}, todo ${result.check.report.todo}`}`,
+        )];
+        push({ kind: 'meta', text: [summary, ...notes, ...fileChanges, ...checkLine, ...(pageText === '' ? [] : [pageText])].join('\n') });
       })();
       return;
     }

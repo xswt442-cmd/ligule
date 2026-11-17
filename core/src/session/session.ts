@@ -32,6 +32,7 @@ export interface CreateSessionLogOptions {
 }
 
 export interface SessionLog {
+  readonly id: string;
   readonly directory: string;
   readonly path: string;
   append(event: PendingSessionEvent): Promise<SessionEvent>;
@@ -230,6 +231,7 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
   }
 
   const session: SessionLog = {
+    id,
     directory,
     path,
     append,

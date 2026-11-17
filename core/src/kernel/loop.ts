@@ -461,6 +461,7 @@ export function createLoop({
         for (const call of skipped) {
           await session.append({
             kind: 'tool', tool: call.name, callId: call.id, args: call.args,
+            ...(sessionId === undefined ? {} : { sessionId }), ...(runOptions.runId === undefined ? {} : { runId: runOptions.runId }),
             result: failureOf('tool_skipped', { content }),
           });
         }
@@ -893,6 +894,7 @@ export function createLoop({
                 const outcome = validation[index];
                 await session.append({
                   kind: 'tool', tool: call.name, callId: call.id, args: call.args,
+                  ...(sessionId === undefined ? {} : { sessionId }), ...(runOptions.runId === undefined ? {} : { runId: runOptions.runId }),
                   result: failureOf(outcome.code ?? 'tool_skipped', {
                     content: outcome.detail ?? 'another call in this response was invalid',
                   }),

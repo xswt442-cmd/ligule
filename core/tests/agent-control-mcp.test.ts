@@ -576,15 +576,30 @@ test('stdio MCP child controls use the Host manager and preserve wait, steering,
   });
 });
 
-test('stdio MCP exposes bounded finite-command status and log controls for the owning Run', { timeout: 40_000 }, async () => {
+test('stdio MCP exposes bounded finite-command controls and direct file change facts', { timeout: 40_000 }, async () => {
   await fixture(async ({ projectRoot, home }) => {
     const scriptPath = join(projectRoot, 'mcp-finite-command.mjs');
+    const checkScriptPath = join(projectRoot, 'mcp-check.mjs');
+    const checkReport = { schema: 'ligule-test-report', version: 1, passed: 1, failed: 0, skipped: 0, todo: 0 };
     await writeFile(scriptPath, "console.log('mcp-finite-output');\n");
+    await writeFile(join(projectRoot, 'mcp-file-change.txt'), 'before\n');
+    await writeFile(join(projectRoot, 'mcp-check-scope.txt'), 'stable\n');
+    await writeFile(checkScriptPath, `process.stdout.write('LIGULE_TEST_REPORT_V1\\t${JSON.stringify(checkReport)}\\n');\n`);
     const model = await startModelServer({
       questionFirst: false,
-      toolCalls: [{ inputTag: 'mcp-finite-command', name: 'exec', args: {
-        command: `node "${scriptPath.replaceAll('\\', '/')}"`, waitMs: 0,
-      } }],
+      toolCalls: [
+        { inputTag: 'mcp-finite-command', name: 'exec', args: {
+          command: `node "${scriptPath.replaceAll('\\', '/')}"`, waitMs: 0,
+        } },
+        { inputTag: 'mcp-file-change', name: 'edit', args: {
+          path: 'mcp-file-change.txt', changes: [{ oldText: 'before', newText: 'after' }],
+        } },
+        { inputTag: 'mcp-check', name: 'exec', args: {
+          command: `node "${checkScriptPath.replaceAll('\\', '/')}"`, waitMs: 30_000,
+          check: { name: 'mcp verify', purpose: 'exercise the MCP check response', expectedExitCodes: [0],
+            scope: ['mcp-check-scope.txt'], report: { format: 'ligule-test-report-v1' } },
+        } },
+      ],
     });
     const previousHome = process.env.LIGULE_HOME;
     process.env.LIGULE_HOME = home;
@@ -615,7 +630,7 @@ test('stdio MCP exposes bounded finite-command status and log controls for the o
       client = connected.client;
       stderr = connected.stderr;
       const names = (await client.listTools()).tools.map((tool) => tool.name);
-      for (const name of ['ligule_execution_status', 'ligule_execution_wait', 'ligule_execution_logs', 'ligule_execution_cancel']) {
+      for (const name of ['ligule_execution_status', 'ligule_execution_wait', 'ligule_execution_logs', 'ligule_execution_cancel', 'ligule_tool_result']) {
         assert.ok(names.includes(name), `missing MCP command control ${name}`);
       }
 
@@ -654,6 +669,7 @@ test('stdio MCP exposes bounded finite-command status and log controls for the o
       assert.equal(records.isError, undefined, `${JSON.stringify(records)}\n${stderr()}`);
       const events = records.structuredContent.records.map((entry) => JSON.parse(entry.json) as Record<string, unknown>);
       const tool = events.find((event) => event.kind === 'tool' && event.tool === 'exec');
+      assert.equal(typeof tool?.callId, 'string', JSON.stringify(tool));
       const content = typeof tool?.result === 'object' && tool.result !== null
         ? (tool.result as Record<string, unknown>).content as Record<string, unknown>
         : undefined;
@@ -671,6 +687,94 @@ test('stdio MCP exposes bounded finite-command status and log controls for the o
       };
       assert.equal(logs.isError, undefined, `${JSON.stringify(logs)}\n${stderr()}`);
       assert.match(logs.structuredContent.events.map((event) => event.text).join(''), /mcp-finite-output/);
+      const toolResult = await callTool(client, 'ligule_tool_result', {
+        sessionId, runId, callId: tool!.callId, limitBytes: 1_024,
+      }) as unknown as { isError?: boolean; structuredContent: { state: string; output: { storedComplete: boolean }; execution: {
+        state: string; pipeBytes: number; retainedPipeBytes: number; logFirstAvailableOffset: number; logAvailable: boolean;
+      } | null } };
+      assert.equal(toolResult.isError, undefined, `${JSON.stringify(toolResult)}\n${stderr()}`);
+      assert.equal(toolResult.structuredContent.state, 'completed');
+      assert.equal(toolResult.structuredContent.output.storedComplete, true);
+      assert.equal(toolResult.structuredContent.execution?.state, 'exited');
+      assert.ok(toolResult.structuredContent.execution!.pipeBytes > 0);
+      assert.equal(toolResult.structuredContent.execution!.retainedPipeBytes, toolResult.structuredContent.execution!.pipeBytes);
+      assert.equal(toolResult.structuredContent.execution!.logFirstAvailableOffset, 0);
+      assert.equal(toolResult.structuredContent.execution!.logAvailable, true);
+
+      const changeStart = await callTool(client, 'ligule_run_start', { sessionId, input: 'mcp-file-change' });
+      assert.equal(changeStart.isError, undefined, `${JSON.stringify(changeStart)}\n${stderr()}`);
+      const changeOperationId = changeStart.structuredContent.operationId;
+      const changeRunId = changeStart.structuredContent.receipt?.runId;
+      assert.equal(typeof changeRunId, 'string');
+      await withTimeout((async () => {
+        for (;;) {
+          const state = await callTool(client!, 'ligule_run_status', { operationId: changeOperationId });
+          assert.equal(state.isError, undefined, `${JSON.stringify(state)}\n${stderr()}`);
+          const pendingApproval = state.structuredContent.pendingInteractions?.find((item) => item.type === 'approval');
+          if (pendingApproval !== undefined) {
+            const reply = await callTool(client!, 'ligule_interaction_reply', {
+              sessionId, requestId: pendingApproval.requestId, type: 'approval', decision: 'allow',
+            });
+            assert.equal(reply.isError, undefined, `${JSON.stringify(reply)}\n${stderr()}`);
+          }
+          if (state.structuredContent.state !== 'running') return;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      })(), 'mcp_file_change_run_settle', 15_000);
+      const changeDone = await callTool(client, 'ligule_run_await', { operationId: changeOperationId, timeoutMs: 0 });
+      assert.equal(changeDone.isError, undefined, `${JSON.stringify(changeDone)}\n${stderr()}`);
+      const changeRecords = await callTool(client, 'ligule_session_read', { sessionId, limit: 50 });
+      assert.equal(changeRecords.isError, undefined, `${JSON.stringify(changeRecords)}\n${stderr()}`);
+      const changeEvents = changeRecords.structuredContent.records.map((entry) => JSON.parse(entry.json) as Record<string, unknown>);
+      const edit = changeEvents.find((event) => event.kind === 'tool' && event.tool === 'edit');
+      assert.ok(edit, JSON.stringify(changeEvents));
+      const editResult = await callTool(client, 'ligule_tool_result', {
+        sessionId, runId: changeRunId, callId: edit.callId, limitBytes: 1_024,
+      }) as unknown as { isError?: boolean; structuredContent: { fileChanges?: {
+        path: string; operation: string; changedFromBaseline: boolean | null; baselineRef?: { name: string };
+      }[] } };
+      assert.equal(editResult.isError, undefined, `${JSON.stringify(editResult)}\n${stderr()}`);
+      assert.equal(editResult.structuredContent.fileChanges?.[0]?.path, 'mcp-file-change.txt');
+      assert.equal(editResult.structuredContent.fileChanges?.[0]?.operation, 'edit');
+      assert.equal(editResult.structuredContent.fileChanges?.[0]?.changedFromBaseline, true);
+      assert.equal(editResult.structuredContent.fileChanges?.[0]?.baselineRef?.name.length, 69);
+
+      const checkStart = await callTool(client, 'ligule_run_start', { sessionId, input: 'mcp-check' });
+      assert.equal(checkStart.isError, undefined, `${JSON.stringify(checkStart)}\n${stderr()}`);
+      const checkOperationId = checkStart.structuredContent.operationId;
+      const checkRunId = checkStart.structuredContent.receipt?.runId;
+      assert.equal(typeof checkRunId, 'string');
+      await withTimeout((async () => {
+        for (;;) {
+          const state = await callTool(client!, 'ligule_run_status', { operationId: checkOperationId });
+          assert.equal(state.isError, undefined, `${JSON.stringify(state)}\n${stderr()}`);
+          const pendingApproval = state.structuredContent.pendingInteractions?.find((item) => item.type === 'approval');
+          if (pendingApproval !== undefined) {
+            const reply = await callTool(client!, 'ligule_interaction_reply', {
+              sessionId, requestId: pendingApproval.requestId, type: 'approval', decision: 'allow',
+            });
+            assert.equal(reply.isError, undefined, `${JSON.stringify(reply)}\n${stderr()}`);
+          }
+          if (state.structuredContent.state !== 'running') return;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      })(), 'mcp_check_run_settle', 15_000);
+      const checkDone = await callTool(client, 'ligule_run_await', { operationId: checkOperationId, timeoutMs: 0 });
+      assert.equal(checkDone.isError, undefined, `${JSON.stringify(checkDone)}\n${stderr()}`);
+      const checkRecords = await callTool(client, 'ligule_session_read', { sessionId, limit: 50 });
+      assert.equal(checkRecords.isError, undefined, `${JSON.stringify(checkRecords)}\n${stderr()}`);
+      const checkEvents = checkRecords.structuredContent.records.map((entry) => JSON.parse(entry.json) as Record<string, unknown>);
+      const checkedExec = checkEvents.find((event) => event.kind === 'tool' && event.tool === 'exec'
+        && typeof event.args === 'object' && event.args !== null
+        && (event.args as { check?: { name?: string } }).check?.name === 'mcp verify');
+      assert.ok(checkedExec, JSON.stringify(checkEvents));
+      const checked = await callTool(client, 'ligule_tool_result', {
+        sessionId, runId: checkRunId, callId: checkedExec.callId, limitBytes: 1_024,
+      }) as unknown as { isError?: boolean; structuredContent: { check: { commandStatus: string; reportStatus: string; scopeStatus: string } } };
+      assert.equal(checked.isError, undefined, `${JSON.stringify(checked)}\n${stderr()}`);
+      assert.equal(checked.structuredContent.check.commandStatus, 'met');
+      assert.equal(checked.structuredContent.check.reportStatus, 'reported_pass');
+      assert.equal(checked.structuredContent.check.scopeStatus, 'sampled');
     } finally {
       await client?.close();
       if (previousHome === undefined) delete process.env.LIGULE_HOME;

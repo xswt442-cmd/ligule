@@ -18,8 +18,9 @@ import type { WindowsCommandLaunch } from './windows-command.js';
 import { permissionDenial, type PermissionContext } from '../kernel/permission.js';
 import type { ShellSelection } from './shell.js';
 import { assertInterpreterIdentity, assertScriptBinding, bindScript, commandUsesNodeRuntime, readBoundScript, resolveNodeRuntime, type ScriptBinding } from './script-binding.js';
+import { CHECK_DECLARATION_SCHEMA, checkedCheckDeclaration, type CheckDeclaration } from '../session/checks.js';
 
-type ExecArguments = { command?: unknown; cwd?: string; waitMs?: unknown };
+type ExecArguments = { command?: unknown; cwd?: string; waitMs?: unknown; check?: CheckDeclaration };
 
 export interface ExecLogChunk {
   readonly sequence: number;
@@ -45,6 +46,7 @@ export interface ManagedExecLease {
 export interface ExecRunContext {
   config: CapabilityConfig;
   permission: PermissionContext;
+  readonly preflightResult?: unknown;
   signal?: AbortSignal;
   shell?: ShellSelection;
   scriptBinding?: ScriptBinding;
@@ -57,7 +59,7 @@ export interface ExecRunContext {
 }
 
 export interface ExecController {
-  start(args: { command?: unknown; cwd?: string }, context: ExecRunContext, waitMs: number): Promise<unknown>;
+  start(args: { command?: unknown; cwd?: string; check?: CheckDeclaration }, context: ExecRunContext, waitMs: number): Promise<unknown>;
   control(args: ExecControlArguments, context: ExecRunContext): Promise<unknown>;
 }
 
@@ -358,16 +360,27 @@ export const execTool = {
       cwd: { type: 'string', description: 'Optional working directory relative to the workspace root, within the workspace boundary.' },
       waitMs: { type: 'integer', minimum: 0, maximum: MAX_EXEC_WAIT_MS,
         description: 'Optional bounded initial wait. When omitted, preserve the synchronous result. When supplied, return a handle if the command is still running.' },
+      check: { ...CHECK_DECLARATION_SCHEMA,
+        description: 'Optional finite check contract. It does not grant command permission; a bounded execution wait is required.' },
     },
     required: ['command'],
   },
+  preflight(args: ExecArguments) {
+    if (args.check === undefined) return;
+    const check = checkedCheckDeclaration(args.check);
+    if (check === undefined) throw new KernelError('exec_check_declaration_invalid');
+    if (args.waitMs === undefined) throw new KernelError('exec_check_requires_finite_execution');
+    return check;
+  },
   run(args: ExecArguments, context: ExecRunContext): Promise<ExecResult> {
+    const check = context.preflightResult as CheckDeclaration | undefined;
     if (args.waitMs !== undefined) {
       if (!Number.isSafeInteger(args.waitMs) || Number(args.waitMs) < 0 || Number(args.waitMs) > MAX_EXEC_WAIT_MS) {
         throw new KernelError('execution_wait_invalid');
       }
       if (context.execController === undefined) throw new KernelError('exec_control_unavailable');
-      return context.execController.start({ command: args.command, ...(args.cwd === undefined ? {} : { cwd: args.cwd }) },
+      return context.execController.start({ command: args.command, ...(args.cwd === undefined ? {} : { cwd: args.cwd }),
+        ...(check === undefined ? {} : { check }) },
         context, Number(args.waitMs)) as Promise<ExecResult>;
     }
     return runExec(args, context);

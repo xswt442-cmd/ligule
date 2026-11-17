@@ -5,8 +5,10 @@ import { POLICY_SEMANTICS, isPolicyMode, readPersistedPolicyMode, type PolicyMod
 import { isCanonicalTodoItems } from './todo.js';
 import { checkedImageReferences } from './media.js';
 import { isRunAcceptance, isRunResultRef } from './run.js';
+import { checkedFileChangeFact } from './file-changes.js';
+import { checkedCheckDeclaration, checkedCheckEvent, checkedCheckScopeSamples } from './checks.js';
 
-export const SESSION_FORMAT_VERSION = 4;
+export const SESSION_FORMAT_VERSION = 5;
 
 export interface SessionModeIdentity {
   name: string;
@@ -97,6 +99,7 @@ const WRITTEN_KINDS = [
   'session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection',
   'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule',
   'compaction', 'todoWrite', 'image', 'screenCapture', 'policyReview', 'runInput', 'execution',
+  'toolActivity', 'check',
 ];
 
 // 会话里保存的审批档位。返回 `unknown` 表示值无法解释，调用方必须拒绝该记录。
@@ -147,6 +150,9 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
   const imageCalls = new Set<string>();
   const runInputIds = new Set<string>();
   const pendingRunInputs = new Map<string, { readonly runId: string }>();
+  const executionOwners = new Map<string, { readonly sessionId: string; readonly runId: string; readonly callId: string; state: string;
+    exitCode: number | null; check?: string }>();
+  const checkExecutions = new Set<string>();
   const events: SessionEvent[] = [];
   for (const [index, event] of objects.entries()) {
     const kind = typeof event.kind === 'string' ? event.kind : '';
@@ -249,6 +255,53 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         || typeof event.terminationPending !== 'boolean' || typeof event.cleanupPending !== 'boolean') {
         throw new KernelRuntimeError('session_execution_event_invalid');
       }
+      if (event.check !== undefined) {
+        if (formatVersion < 5) throw new KernelRuntimeError('session_event_version_unsupported', { detail: 'execution checks require format version 5' });
+        const check = checkedCheckDeclaration(event.check);
+        const scopeStart = check === undefined ? undefined : checkedCheckScopeSamples(event.checkScopeStart, check);
+        if (check === undefined || scopeStart === undefined) throw new KernelRuntimeError('session_execution_event_invalid');
+      } else if (event.checkScopeStart !== undefined) {
+        throw new KernelRuntimeError('session_execution_event_invalid');
+      }
+      const previous = executionOwners.get(String(event.executionId));
+      const checkedDeclaration = event.check === undefined ? undefined : checkedCheckDeclaration(event.check);
+      const checkIdentity = checkedDeclaration === undefined ? undefined : JSON.stringify(checkedDeclaration);
+      if (previous !== undefined && (previous.sessionId !== event.sessionId || previous.runId !== event.runId || previous.callId !== event.callId)) {
+        throw new KernelRuntimeError('session_execution_event_invalid');
+      }
+      if (previous !== undefined && previous.check !== checkIdentity) throw new KernelRuntimeError('session_execution_event_invalid');
+      executionOwners.set(String(event.executionId), {
+        sessionId: event.sessionId as string, runId: event.runId as string, callId: event.callId as string, state: event.state as string,
+        exitCode: Number.isSafeInteger(event.exitCode) ? Number(event.exitCode) : null,
+        ...(checkIdentity === undefined ? {} : { check: checkIdentity }),
+      });
+    }
+    if (kind === 'check') {
+      if (formatVersion < 5) throw new KernelRuntimeError('session_event_version_unsupported', { detail: 'check requires format version 5' });
+      const checked = checkedCheckEvent(event);
+      const execution = checked === undefined ? undefined : executionOwners.get(checked.executionId);
+      if (checked === undefined || header?.sessionId !== checked.sessionId || execution === undefined
+        || execution.sessionId !== checked.sessionId || execution.runId !== checked.runId || execution.callId !== checked.callId
+        || execution.check !== JSON.stringify(checked.declaration)
+        || !['exited', 'cancelled', 'failed'].includes(execution.state) || execution.state !== checked.executionState
+        || execution.exitCode !== checked.exitCode || checkExecutions.has(checked.executionId)) {
+        throw new KernelRuntimeError('session_check_event_invalid');
+      }
+      checkExecutions.add(checked.executionId);
+    }
+    if (kind === 'toolActivity') {
+      const safeText = (value: unknown, max: number): value is string => typeof value === 'string'
+        && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
+      if (event.ignorable !== true
+        || header?.sessionId === undefined || event.sessionId !== header.sessionId
+        || !safeText(event.runId, 256) || !safeText(event.callId, 256) || !safeText(event.tool, 128)
+        || !['started', 'awaiting_approval', 'awaiting_user'].includes(String(event.phase))
+        || typeof event.at !== 'string' || !Number.isFinite(Date.parse(event.at))
+        || ((event.phase === 'awaiting_approval' || event.phase === 'awaiting_user')
+          ? !safeText(event.requestId, 256)
+          : event.requestId !== undefined && !safeText(event.requestId, 256))) {
+        throw new KernelRuntimeError('session_tool_activity_invalid');
+      }
     }
     if (kind === 'sessionPolicy') {
       if (event.ignorable !== true) throw new KernelRuntimeError('session_policy_ignorable_required');
@@ -325,6 +378,40 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
       if (typeof event.callId !== 'string' || !imageCalls.has(event.callId)) throw new KernelRuntimeError('session_image_reference_invalid');
       try { checkedImageReferences(event.result.images); }
       catch (cause) { throw new KernelRuntimeError('session_image_reference_invalid', { cause }); }
+    }
+    if (kind === 'tool' && event.fileChanges !== undefined) {
+      if (!Array.isArray(event.fileChanges) || event.fileChanges.length === 0 || event.fileChanges.length > 8
+        || typeof event.callId !== 'string' || event.callId === '' || typeof event.runId !== 'string' || event.runId === '') {
+        throw new KernelRuntimeError('session_file_change_invalid');
+      }
+      for (const change of event.fileChanges) {
+        const checked = checkedFileChangeFact(change);
+        if (checked === undefined || checked.operation !== event.tool) throw new KernelRuntimeError('session_file_change_invalid');
+      }
+    }
+    if (kind === 'tool' && ['returnedValueBytes', 'modelVisibleBytes', 'storageStatus', 'storedBytes', 'storedComplete']
+      .some(field => Object.hasOwn(event, field))) {
+      const result = typeof event.result === 'object' && event.result !== null && !Array.isArray(event.result)
+        ? event.result as Record<string, unknown> : undefined;
+      const reference = typeof result?.spillRef === 'object' && result.spillRef !== null && !Array.isArray(result.spillRef)
+        ? result.spillRef as Record<string, unknown> : undefined;
+      if (!Number.isSafeInteger(event.returnedValueBytes) || Number(event.returnedValueBytes) < 0
+        || !Number.isSafeInteger(event.modelVisibleBytes) || Number(event.modelVisibleBytes) < 0
+        || !Number.isSafeInteger(event.storedBytes) || Number(event.storedBytes) < 0
+        || typeof event.storedComplete !== 'boolean'
+        || (event.storageStatus !== 'inline' && event.storageStatus !== 'spill' && event.storageStatus !== 'legacy_unverified')
+        || result === undefined
+        || (reference !== undefined && (typeof reference.name !== 'string' || !/^result-\d+-[a-f0-9]{8}\.json$/u.test(reference.name)
+          || !Number.isSafeInteger(reference.bytes) || Number(reference.bytes) < 0
+          || typeof reference.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(reference.sha256)
+          || result.spilled !== reference.name))
+        || (event.storageStatus === 'spill' && (reference === undefined || Number(reference.bytes) !== event.storedBytes
+          || Number(reference.bytes) !== event.returnedValueBytes || event.storedComplete !== true))
+        || (event.storageStatus === 'inline' && (result.spilled !== undefined || reference !== undefined
+          || Number(event.storedBytes) !== event.returnedValueBytes || event.storedComplete !== true))
+        || (event.storageStatus === 'legacy_unverified' && event.storedComplete !== false)) {
+        throw new KernelRuntimeError('session_tool_result_metadata_invalid');
+      }
     }
     if (kind === 'compaction') {
       if (event.ignorable !== true

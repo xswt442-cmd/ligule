@@ -34,7 +34,7 @@ test('a new record starts with a line that names the format, the project and the
     const lines = (await readFile(session.path, 'utf8')).split('\n').filter((line) => line !== '').map((line) => JSON.parse(line) as Record<string, unknown>);
     assert.deepEqual(lines[0], {
       kind: 'session',
-      formatVersion: 4,
+      formatVersion: 5,
       sessionId: 'run-1',
       projectRoot: '/repo',
       createdAt: lines[0].createdAt,
@@ -192,11 +192,11 @@ test('a record written before the first line existed still reads and continues',
 test('a record from a newer format is refused instead of half read', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'future.jsonl');
-    await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 5, sessionId: 'future', projectRoot: '/repo', createdAt: 'x' })}\n${tool(0, 'one')}\n`);
+    await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 6, sessionId: 'future', projectRoot: '/repo', createdAt: 'x' })}\n${tool(0, 'one')}\n`);
     await assert.rejects(() => createSessionLog({ directory, id: 'future' }).read(), (error) => {
       const failure = error as { code?: string; detail: string };
       assert.equal(failure.code, 'session_version_unsupported');
-      assert.match(failure.detail, /record is version 5/);
+      assert.match(failure.detail, /record is version 6/);
       return true;
     });
   });
@@ -298,6 +298,101 @@ test('finite execution events are ignorable Session facts but stay scoped to the
     .map((event) => event.state), ['accepted', 'started', 'exited']);
   assert.throws(() => parseSessionEvents([header, { ...accepted, sessionId: 'other-session' }] as unknown as SessionEvent[]), {
     code: 'session_execution_event_invalid',
+  });
+});
+
+test('tool activity events validate their Session, Run, call, and live interaction phase', () => {
+  const header = { kind: 'session', formatVersion: 4, sessionId: 'tool-activity-session', projectRoot: '/repo' };
+  const identity = {
+    ignorable: true,
+    sessionId: 'tool-activity-session',
+    runId: '00000000-0000-4000-8000-000000000001',
+    callId: 'call-1',
+    tool: 'exec',
+    at: '2026-11-17T00:00:00.000Z',
+  };
+  const events = [
+    { seq: 0, kind: 'toolActivity', phase: 'started', ...identity },
+    { seq: 1, kind: 'toolActivity', phase: 'awaiting_approval', requestId: 'request-1', ...identity },
+    { seq: 2, kind: 'toolActivity', phase: 'awaiting_user', requestId: 'request-2', ...identity },
+  ];
+  assert.deepEqual(parseSessionEvents([header, ...events] as unknown as SessionEvent[]).events.map((event) => event.kind),
+    ['toolActivity', 'toolActivity', 'toolActivity']);
+  assert.throws(() => parseSessionEvents([header, { ...events[0], phase: 'completed' }] as unknown as SessionEvent[]), {
+    code: 'session_tool_activity_invalid',
+  });
+  assert.throws(() => parseSessionEvents([header, { ...events[0], sessionId: 'other-session' }] as unknown as SessionEvent[]), {
+    code: 'session_tool_activity_invalid',
+  });
+  assert.throws(() => parseSessionEvents([header, { ...events[1], requestId: undefined }] as unknown as SessionEvent[]), {
+    code: 'session_tool_activity_invalid',
+  });
+});
+
+test('direct file change facts are bounded, portable, and tied to a tool result', () => {
+  const header = { kind: 'session', formatVersion: 4, sessionId: 'file-change-session', projectRoot: '/repo' };
+  const change = {
+    path: 'src/example.ts', operation: 'edit', outcome: 'written',
+    beforeVersion: 'a'.repeat(16), expectedAfterVersion: 'b'.repeat(16), observedAfterVersion: 'b'.repeat(16),
+    observedAt: '2026-11-17T00:00:00.000Z', baselineStatus: 'available', baselineExists: true,
+    baselineVersion: 'a'.repeat(16), baselineRef: { name: `change-${'d'.repeat(16)}-${'0'.repeat(8)}-${'0'.repeat(4)}-4000-8000-${'0'.repeat(12)}.snapshot`,
+      bytes: 12, sha256: 'c'.repeat(64) },
+    observedStatus: 'available', observedExists: true, expectedMatchesObserved: true, changedFromBaseline: true,
+  };
+  const tool = { seq: 0, kind: 'tool', tool: 'edit', callId: 'call-1', runId: 'run-1',
+    result: { kind: 'result', failed: false, content: '' }, fileChanges: [change] };
+  assert.equal(parseSessionEvents([header, tool] as unknown as SessionEvent[]).events[0]?.fileChanges instanceof Array, true);
+  for (const invalid of [
+    { ...change, path: 'C:/outside.txt' },
+    { ...change, path: '../outside.txt' },
+    { ...change, baselineRef: { ...change.baselineRef, name: '../outside.snapshot' } },
+    { ...change, observedAfterVersion: 'not-a-version' },
+    { ...change, baselineStatus: 'maybe' },
+  ]) {
+    assert.throws(() => parseSessionEvents([header, { ...tool, fileChanges: [invalid] }] as unknown as SessionEvent[]), {
+      code: 'session_file_change_invalid',
+    });
+  }
+  assert.throws(() => parseSessionEvents([header, { ...tool, fileChanges: [{ ...change, operation: 'write' }] }] as unknown as SessionEvent[]), {
+    code: 'session_file_change_invalid',
+  }, 'the recorded operation must match the tool name');
+});
+
+test('check results require Session format 5 and a matching terminal finite execution', () => {
+  const sessionId = 'check-session';
+  const runId = '00000000-0000-4000-8000-000000000001';
+  const callId = 'provider-call-1';
+  const executionId = '00000000-0000-4000-8000-000000000002';
+  const header = { kind: 'session', formatVersion: 5, sessionId, projectRoot: '/repo' };
+  const declaration = { name: 'focused test', purpose: 'verify the requested behavior', expectedExitCodes: [0], scope: ['src/example.ts'] };
+  const sample = { path: 'src/example.ts', status: 'available', exists: true, version: 'a'.repeat(16), sampledAt: '2026-11-17T00:00:00.000Z' };
+  const identity = {
+    ignorable: true, executionId, cursorGeneration: '00000000-0000-4000-8000-000000000003',
+    projectIdentity: '/repo', sessionId, runId, callId, timeoutMs: 120_000,
+    logTotalBytes: 0, logFirstAvailableOffset: 0, cancelRequested: false, deadlineExceeded: false,
+    terminationPending: false, cleanupPending: false,
+    check: declaration, checkScopeStart: [sample],
+  };
+  const accepted = { seq: 0, kind: 'execution', state: 'accepted', acceptedAt: '2026-11-17T00:00:00.000Z', ...identity };
+  const started = { seq: 1, kind: 'execution', state: 'started', startedAt: '2026-11-17T00:00:01.000Z', ...identity };
+  const exited = { seq: 2, kind: 'execution', state: 'exited', startedAt: started.startedAt,
+    finishedAt: '2026-11-17T00:00:02.000Z', exitCode: 0, ...identity };
+  const check = {
+    seq: 3, kind: 'check', sessionId, runId, callId, executionId, at: '2026-11-17T00:00:02.100Z',
+    declaration, executionState: 'exited', exitCode: 0, commandStatus: 'met', reportStatus: 'not_requested',
+    logStatus: 'complete', logTotalBytes: 0, logFirstAvailableOffset: 0,
+    scopeStart: [sample], scopeEnd: [sample], scopeStatus: 'sampled', coverage: 'session_scope_samples_only',
+  };
+  const parsed = parseSessionEvents([header, accepted, started, exited, check] as unknown as SessionEvent[]);
+  assert.equal(parsed.events.at(-1)?.kind, 'check');
+  assert.throws(() => parseSessionEvents([
+    { ...header, formatVersion: 4 }, check,
+  ] as unknown as SessionEvent[]), { code: 'session_event_version_unsupported' });
+  assert.throws(() => parseSessionEvents([header, accepted, started, exited, { ...check, callId: 'other-call' }] as unknown as SessionEvent[]), {
+    code: 'session_check_event_invalid',
+  });
+  assert.throws(() => parseSessionEvents([header, accepted, started, exited, { ...check, ignorable: true }] as unknown as SessionEvent[]), {
+    code: 'session_check_event_invalid',
   });
 });
 

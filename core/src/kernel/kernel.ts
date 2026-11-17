@@ -1,6 +1,6 @@
 // 新建 Kernel 时工具表为空；只有通过 `register()` 登记的工具才能被调用。
 // Kernel 不依赖传输层、界面框架或客户端适配器，CLI 和 Desktop 共用同一套工具与策略逻辑。
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { KernelError } from './error.js';
 import { createConfig, type ConfigSnapshot } from './config.js';
 import { createLogger, type Logger, type LoggerBackend } from './log.js';
@@ -19,6 +19,7 @@ import { createFileWriteQueue, fileWriteTargetKey, type FileWriteQueue } from '.
 import { runExtensionHook } from './extensions.js';
 import type { ExtensionAfterToolContext, ExtensionHookRegistry } from './extensions.js';
 import { currentKernelExecutionContext } from './execution-context.js';
+import { createFileChangeStore, type FileChangeFact, type ToolFileChangeRecorder } from '../session/file-changes.js';
 import type { TaskBudget } from './task-budget.js';
 import type { ExecController } from '../capability/exec.js';
 
@@ -43,6 +44,8 @@ export interface ToolContext {
   readonly parentExecutionId?: string;
   /** Host-owned finite-command control, injected only into the built-in exec tools. */
   readonly execController?: ExecController;
+  /** Session-scoped, bounded snapshots and direct mutation facts for built-in file tools. */
+  readonly fileChanges?: ToolFileChangeRecorder;
 }
 
 type BivariantToolCallback<TArgs, TResult> = {
@@ -104,8 +107,10 @@ export interface ToolCatalogEntry {
 }
 
 export interface KernelSession {
+  readonly id?: string;
   readonly directory: string;
   append(event: Record<string, unknown>): Promise<unknown>;
+  read?(): Promise<readonly Record<string, unknown>[]>;
   header?(): Promise<{ readonly formatVersion?: number } | undefined>;
 }
 
@@ -200,6 +205,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
   const policy = options.policy;
   const permission = options.permission ?? DEFAULT_PERMISSION_CONTEXT;
   const session = options.session;
+  const fileChangeStore = session === undefined ? undefined : createFileChangeStore(session);
   const extensionHooks = options.extensionHooks;
   const taskBudget = options.taskBudget;
   const fileWriteQueue = options.fileWriteQueue ?? createFileWriteQueue();
@@ -237,7 +243,10 @@ export function createKernel(options: KernelOptions = {}): Kernel {
     const compact = tools.get('compact');
     const readWithCompact = compact !== undefined && !isDenied('compact')
       && permissionDenial(currentPermission(), compact.access) === undefined;
-    return { ...result, content: await spillContent(text, { limit, directory, name, readWithCompact }), spilled: name,
+    const content = await spillContent(text, { limit, directory, name, readWithCompact });
+    const bytes = Buffer.from(text, 'utf8');
+    return { ...result, content, spilled: name,
+      spillRef: { name, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') },
       spillFormat: typeof result.content === 'string' ? 'text' : 'json',
     };
   }
@@ -251,12 +260,26 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       entry.callId ??= randomUUID();
       await session.append({ kind: 'image', callId: entry.callId });
     }
+    const valueText = typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
+    const returnedValueBytes = valueText === undefined ? 0 : Buffer.byteLength(valueText, 'utf8');
     const limited = session === undefined ? result : await withinLimit(result, session.directory);
     const serialized = JSON.stringify(limited);
     if (serialized === undefined) throw new KernelError('tool_result_not_serializable');
     const persisted = JSON.parse(serialized) as typeof limited;
     if (session === undefined) return { result: persisted };
-    const event = await session.append({ ...entry, result: persisted });
+    const { fileChanges: rawFileChanges, ...persistedEntry } = entry;
+    const fileChanges = Array.isArray(rawFileChanges) ? rawFileChanges as FileChangeFact[] : [];
+    const modelContentText = typeof limited.content === 'string' ? limited.content : JSON.stringify(limited.content);
+    const stored = limited as typeof limited & { readonly spilled?: unknown; readonly spillRef?: unknown };
+    const spillRef = isPlainObject(stored.spillRef) ? stored.spillRef : undefined;
+    const event = await session.append({ ...persistedEntry, ...(fileChanges.length === 0 ? {} : { fileChanges }),
+      returnedValueBytes,
+      modelVisibleBytes: modelContentText === undefined ? 0 : Buffer.byteLength(modelContentText, 'utf8'),
+      storageStatus: stored.spilled === undefined ? 'inline' : spillRef === undefined ? 'legacy_unverified' : 'spill',
+      storedBytes: spillRef?.bytes ?? returnedValueBytes,
+      storedComplete: stored.spilled === undefined || spillRef !== undefined,
+      result: persisted,
+    });
     return { result: persisted, ...(isPlainObject(event) && typeof event.seq === 'number' ? { eventSeq: event.seq } : {}) };
   }
 
@@ -410,8 +433,21 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       readonly parentRunId?: string; readonly parentExecutionId?: string;
     } = {}) {
       // `options.callId` 用于将工具结果关联到模型发起的调用。
+      const executionContext = currentKernelExecutionContext();
       const entry: ToolEvent = { kind: 'tool', tool: name, callId: options.callId, parentCallId: options.parentCallId,
-        sessionId: options.sessionId, runId: options.runId, executionId: options.executionId, args };
+        sessionId: options.sessionId ?? executionContext?.sessionId, runId: options.runId ?? executionContext?.runId,
+        executionId: options.executionId ?? executionContext?.executionId, args };
+      const activeFileChanges: FileChangeFact[] = [];
+      entry.fileChanges = activeFileChanges;
+      const fileChanges: ToolFileChangeRecorder | undefined = session !== undefined && typeof entry.sessionId === 'string'
+        && typeof entry.runId === 'string' && typeof entry.callId === 'string'
+        ? fileChangeStore?.forCall(activeFileChanges) : undefined;
+      const activitySessionId = options.sessionId ?? executionContext?.sessionId;
+      const activityRunId = options.runId ?? executionContext?.runId;
+      if (session !== undefined && activitySessionId !== undefined && activityRunId !== undefined && options.callId !== undefined) {
+        await session.append({ kind: 'toolActivity', ignorable: true, sessionId: activitySessionId, runId: activityRunId,
+          callId: options.callId, tool: name, phase: 'started', at: new Date().toISOString() });
+      }
       const tool = tools.get(name);
       if (!tool) {
         // 即使工具未登记也要记录失败结果，确保本轮中的每个模型调用都有对应结果。
@@ -719,6 +755,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       const execController = name === 'exec' || name === 'exec_control' ? execControllerProvider?.() : undefined;
       const runTool = (runPermission: PermissionContext, runArgs: unknown = args) => tool.run(runArgs, { ...context,
             permission: runPermission, signal: options.signal, target: network, shell,
+            ...(fileChanges === undefined ? {} : { fileChanges }),
             ...(execController === undefined ? {} : { execController }),
             ...(preflightResult === undefined ? {} : { preflightResult }),
             ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),

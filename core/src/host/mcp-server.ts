@@ -15,6 +15,7 @@ import { delegationPathOf, recordDelegationEvent, requireDelegationGrant } from 
 import { loadHostEnvironment } from './environment.js';
 import { createControl, controlErrorCode, type McpInitialSettings, type McpSessionChanges } from './control.js';
 import { createInteractivePermissionContext } from '../capability/permission-capabilities.js';
+import { CHECK_DECLARATION_SCHEMA } from '../session/checks.js';
 
 const id = { type: 'string', minLength: 1, maxLength: 160 };
 const root = { type: 'string', minLength: 1, maxLength: 4096, description: 'Absolute project root authorized when this server started.' };
@@ -60,6 +61,28 @@ const runResultOutput = object({
   userSeq: { type: 'integer', minimum: 0 },
   artifactsTruncated: { type: 'boolean', const: true },
   task: taskOutput,
+  fileChanges: { type: 'array', maxItems: 256, items: object({
+    eventSeq: { type: 'integer', minimum: 0 }, callId, path: { type: 'string', minLength: 1, maxLength: 2048 },
+    operation: { type: 'string', enum: ['create', 'write', 'edit', 'delete'] },
+    outcome: { type: 'string', enum: ['written', 'unchanged', 'unknown'] },
+    baselineStatus: { type: 'string', enum: ['available', 'unavailable', 'unknown'] },
+    observedStatus: { type: 'string', enum: ['available', 'unavailable', 'unknown'] },
+    changedFromBaseline: { type: ['boolean', 'null'] },
+  }, ['eventSeq', 'callId', 'path', 'operation', 'outcome', 'baselineStatus', 'observedStatus', 'changedFromBaseline']) },
+  fileChangesTruncated: { type: 'boolean', const: true },
+  checks: { type: 'array', maxItems: 64, items: object({
+    eventSeq: { type: 'integer', minimum: 0 }, executionId: id, callId, name: { type: 'string', maxLength: 80 },
+    status: { type: 'string', enum: ['completed', 'not_run', 'unknown'] },
+    commandStatus: { type: 'string', enum: ['met', 'not_met', 'unknown'] },
+    reportStatus: { type: 'string', enum: ['not_requested', 'reported_pass', 'reported_fail', 'zero_tests', 'unverified'] },
+    errorCode: { type: 'string', maxLength: 80 },
+    scopeStatus: { type: 'string', enum: ['sampled', 'stale', 'unverified'] },
+    logStatus: { type: 'string', enum: ['complete', 'partial', 'unavailable', 'unknown'] },
+    report: object({ passed: { type: 'integer', minimum: 0 }, failed: { type: 'integer', minimum: 0 },
+      skipped: { type: 'integer', minimum: 0 }, todo: { type: 'integer', minimum: 0 },
+    }, ['passed', 'failed', 'skipped', 'todo']),
+  }, ['callId', 'name', 'status', 'commandStatus', 'reportStatus', 'scopeStatus']) },
+  checksTruncated: { type: 'boolean', const: true },
   usage: object({
     iterations: { type: ['integer', 'null'], minimum: 0 },
     modelCalls: { type: ['integer', 'null'], minimum: 0 },
@@ -151,6 +174,74 @@ const finiteExecutionLogPageOutput = object({
   unavailableReason: { type: 'string', maxLength: 80 },
 }, ['executionId', 'cursor', 'events', 'firstAvailableCursor', 'nextCursor', 'hasMore', 'gap', 'terminal', 'truncated',
   'available', 'totalBytes', 'firstAvailableOffset', 'nextOffset']);
+const fileChangeOutput = object({
+  path: { type: 'string', minLength: 1, maxLength: 2048 },
+  operation: { type: 'string', enum: ['create', 'write', 'edit', 'delete'] },
+  outcome: { type: 'string', enum: ['written', 'unchanged', 'unknown'] },
+  beforeVersion: { type: ['string', 'null'], pattern: '^[a-f0-9]{16}$' },
+  expectedAfterVersion: { type: ['string', 'null'], pattern: '^[a-f0-9]{16}$' },
+  observedAfterVersion: { type: ['string', 'null'], pattern: '^[a-f0-9]{16}$' },
+  observedAt: { type: 'string', maxLength: 64 },
+  baselineStatus: { type: 'string', enum: ['available', 'unavailable', 'unknown'] },
+  baselineReason: { type: 'string', maxLength: 80 },
+  baselineRef: object({ name: { type: 'string', maxLength: 69 }, bytes: { type: 'integer', minimum: 0, maximum: 256 * 1024 },
+    sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, ['name', 'bytes', 'sha256']),
+  baselineExists: { type: ['boolean', 'null'] }, baselineVersion: { type: ['string', 'null'], pattern: '^[a-f0-9]{16}$' },
+  observedStatus: { type: 'string', enum: ['available', 'unavailable', 'unknown'] },
+  observedReason: { type: 'string', maxLength: 80 }, observedExists: { type: ['boolean', 'null'] },
+  expectedMatchesObserved: { type: ['boolean', 'null'] }, changedFromBaseline: { type: ['boolean', 'null'] },
+  beforeObject: object({ name: { type: 'string', maxLength: 2048 }, dev: { type: 'number' }, ino: { type: 'number' },
+    mode: { type: 'number' }, nlink: { type: 'number' }, size: { type: 'number' }, mtimeMs: { type: 'number' },
+    ctimeMs: { type: 'number' } }, ['name', 'dev', 'ino', 'mode', 'nlink', 'size', 'mtimeMs', 'ctimeMs']),
+}, ['path', 'operation', 'outcome', 'beforeVersion', 'expectedAfterVersion', 'observedAfterVersion', 'observedAt',
+  'baselineStatus', 'baselineExists', 'baselineVersion', 'observedStatus', 'observedExists', 'expectedMatchesObserved', 'changedFromBaseline']);
+const checkSummaryOutput = object({
+  status: { type: 'string', enum: ['running', 'completed', 'not_run', 'unknown'] },
+  declaration: CHECK_DECLARATION_SCHEMA,
+  eventSeq: { type: 'integer', minimum: 0 },
+  commandStatus: { type: 'string', enum: ['met', 'not_met', 'unknown'] },
+  reportStatus: { type: 'string', enum: ['not_requested', 'reported_pass', 'reported_fail', 'zero_tests', 'unverified'] },
+  report: object({ schema: { type: 'string', const: 'ligule-test-report' }, version: { type: 'integer', const: 1 }, passed: { type: 'integer', minimum: 0 },
+    failed: { type: 'integer', minimum: 0 }, skipped: { type: 'integer', minimum: 0 }, todo: { type: 'integer', minimum: 0 },
+  }, ['schema', 'version', 'passed', 'failed', 'skipped', 'todo']),
+  reportReason: { type: 'string', maxLength: 80 },
+  errorCode: { type: 'string', maxLength: 80 },
+  logStatus: { type: 'string', enum: ['complete', 'partial', 'unavailable', 'unknown'] },
+  scopeStatus: { type: 'string', enum: ['sampled', 'stale', 'unverified'] },
+}, ['status', 'declaration']);
+const toolResultOutput = object({
+  sessionId: id, runId: id, callId,
+  tool: { type: 'string', maxLength: 128 },
+  state: { type: 'string', enum: ['completed', 'failed', 'refused', 'skipped', 'running', 'awaiting_approval', 'awaiting_user', 'unknown'] },
+  eventSeq: { type: 'integer', minimum: 0 },
+  code: { type: 'string', maxLength: 80 },
+  lastActivity: { type: 'string', enum: ['started', 'awaiting_approval', 'awaiting_user'] },
+  result: { type: ['object', 'null'], additionalProperties: false, properties: {
+    kind: { type: 'string' }, code: { type: 'string' }, reason: { type: 'string' },
+  }, required: ['kind'] },
+  output: { type: ['object', 'null'], additionalProperties: false, properties: {
+    returnedValueBytes: { type: ['integer', 'null'], minimum: 0 },
+    modelVisibleBytes: { type: 'integer', minimum: 0 },
+    storageStatus: { type: 'string', enum: ['inline', 'spill', 'legacy_unverified'] },
+    storedBytes: { type: ['integer', 'null'], minimum: 0 },
+    storedComplete: { type: 'boolean' },
+    page: { type: ['object', 'null'], additionalProperties: false, properties: {
+      offset: { type: 'integer', minimum: 0 }, bytes: { type: 'integer', minimum: 0 },
+      dataBase64: { type: 'string', maxLength: 5464 }, done: { type: 'boolean' },
+      nextCursor: { type: ['string', 'null'], maxLength: 768 },
+      integrity: { type: 'string', enum: ['verified', 'inline'] },
+    }, required: ['offset', 'bytes', 'dataBase64', 'done', 'nextCursor', 'integrity'] },
+  }, required: ['returnedValueBytes', 'modelVisibleBytes', 'storageStatus', 'storedBytes', 'storedComplete', 'page'] },
+  execution: { type: ['object', 'null'], additionalProperties: false, properties: {
+    executionId: id, state: { type: 'string' }, exitCode: { type: 'integer' }, errorCode: { type: 'string' },
+    cancelRequested: { type: 'boolean' }, deadlineExceeded: { type: 'boolean' }, cleanupPending: { type: 'boolean' },
+    pipeBytes: { type: 'integer', minimum: 0 }, retainedPipeBytes: { type: 'integer', minimum: 0 },
+    logFirstAvailableOffset: { type: 'integer', minimum: 0 }, logAvailable: { type: 'boolean' },
+    logsRefBytes: { type: 'integer', minimum: 0 }, logUnavailableReason: { type: 'string', maxLength: 80 },
+  }, required: ['executionId', 'state'] },
+  fileChanges: { type: 'array', maxItems: 8, items: fileChangeOutput },
+  check: checkSummaryOutput,
+}, ['sessionId', 'runId', 'callId', 'state']);
 const operationProperties = {
   operationId: id, sessionId: id, state: { type: 'string', enum: ['running', 'done', 'failed', 'cancelled'] },
   reused: { type: 'boolean' }, receipt: durableReceiptOutput,
@@ -435,6 +526,10 @@ const tools: Tool[] = [
   { name: 'ligule_execution_cancel', description: 'Request cancellation of one finite command. The result separates the request from confirmed process-tree termination and cleanup.',
     inputSchema: object({ sessionId: id, runId: id, executionId: id }, ['sessionId', 'runId', 'executionId']),
     outputSchema: finiteExecutionStatusOutput },
+  { name: 'ligule_tool_result', description: 'Read one recorded tool call within its accepted Run. The result is derived from Session events; spilled bytes are paged and integrity checked.',
+    inputSchema: object({ sessionId: id, runId: id, callId, cursor: { type: 'string', minLength: 1, maxLength: 768 },
+      limitBytes: { type: 'integer', minimum: 1, maximum: 4_096, default: 4_096 } }, ['sessionId', 'runId', 'callId']),
+    outputSchema: toolResultOutput },
   { name: 'ligule_session_read', description: 'Read real persistent records, newest page first (records inside a page are chronological). Use nextBefore as before for older pages. Each json field is a record JSON fragment, at most 8192 UTF-16 characters. If nextOffset is non-null, call with at=that seq and offset=nextOffset until null, concatenating fragments before JSON.parse. at and before are exclusive. This preserves complete large records without unbounded responses.',
     inputSchema: object({ sessionId: id, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 }, before: { type: 'integer', minimum: 1 }, at: { type: 'integer', minimum: 1 }, offset: { type: 'integer', minimum: 0, default: 0 } }, ['sessionId']),
     outputSchema: object({ sessionId: id, nextBefore: { type: ['integer', 'null'] }, hasMore: { type: 'boolean' }, provisionalOutput, provisionalOutputError: { type: ['string', 'null'] }, records: { type: 'array', maxItems: 50, items: object({ seq: { type: 'integer' }, kind: { type: 'string' }, json: { type: 'string', maxLength: 8192 }, offset: { type: 'integer' }, nextOffset: { type: ['integer', 'null'] }, totalCharacters: { type: 'integer' } }, ['seq', 'kind', 'json', 'offset', 'nextOffset', 'totalCharacters']) } }, ['sessionId', 'records', 'nextBefore', 'hasMore']) },
@@ -454,6 +549,7 @@ interface Arguments {
   requestKey?: string;
   runId?: string;
   executionId?: string;
+  callId?: string;
   waitMs?: number;
   cursor?: string;
   limitBytes?: number;
@@ -602,6 +698,7 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
         case 'ligule_execution_wait': result = await control.executionWait(input.sessionId!, input.runId!, input.executionId!, input.waitMs ?? 30_000); break;
         case 'ligule_execution_logs': result = await control.executionLogs(input.sessionId!, input.runId!, input.executionId!, input.cursor, input.limitBytes ?? 4_096); break;
         case 'ligule_execution_cancel': result = await control.executionCancel(input.sessionId!, input.runId!, input.executionId!); break;
+        case 'ligule_tool_result': result = await control.toolResult(input.sessionId!, input.runId!, input.callId!, input.cursor, input.limitBytes ?? 4_096); break;
         case 'ligule_session_read': result = await control.read(input.sessionId!, input.before, input.limit ?? 20, input.at, input.offset); break;
   case 'ligule_usage_get': result = await control.usage(input.sessionId!); break;
         default: throw new KernelError('tool_unknown');

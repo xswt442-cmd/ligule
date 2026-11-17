@@ -52,6 +52,7 @@ export const UI_COMMANDS = Object.freeze([
   { name: 'sub', usage: '/sub [序号]', text: '查看子任务记录；不带序号收起', hint: '[序号]', whenRunning: true },
   { name: 'subrun', usage: '/subrun [list|status|wait|message|cancel]', text: '查看并控制异步子任务', hint: '[动作]', whenRunning: true },
   { name: 'exec', usage: '/exec <status|wait|logs|cancel> <executionId> [毫秒或游标]', text: '查看或控制当前会话的有限命令', hint: '<动作>', whenRunning: true },
+  { name: 'tool', usage: '/tool <callId> [游标]', text: '查看一次工具调用的结果和有限输出页', hint: '<callId>', whenRunning: true },
   { name: 'new', usage: '/new', text: '创建新会话', hint: '', whenRunning: false },
   { name: 'queue', usage: '/queue [list|pause|continue|drop <序号>|clear]', text: '查看、暂停、继续或收回待发送消息', hint: '[动作]', whenRunning: true },
   { name: 'bind', usage: '/bind [<动作> <键的写法>|reset <动作>|default]', text: '查看或修改快捷键', hint: '[动作 键|reset <动作>|default]', whenRunning: true },
@@ -92,6 +93,7 @@ const ENGLISH_COMMANDS: Record<CommandName, readonly [string, string, string]> =
   sub: ['/sub [seq]', 'View a subtask; omit seq to close', '[seq]'],
   subrun: ['/subrun [list|status|wait|message|cancel]', 'Inspect and control asynchronous subtasks', '[action]'],
   exec: ['/exec <status|wait|logs|cancel> <executionId> [ms or cursor]', 'Inspect or control finite commands in this session', '<action>'],
+  tool: ['/tool <callId> [cursor]', 'Inspect one tool call and a bounded output page', '<callId>'],
   new: ['/new', 'Start a new session', ''],
   queue: ['/queue [list|pause|continue|drop <n>|clear]', 'List, pause, resume, or recover queued messages', '[action]'],
   bind: ['/bind [<action> <key>|reset <action>|default]', 'View or change keyboard shortcuts', '[action key|reset <action>|default]'],
@@ -170,6 +172,19 @@ export function parseExecCommand(argument: string): ExecCommand {
       : { code: 'tui_exec_wait_invalid' };
   }
   return { action: 'logs', executionId, ...(tail === undefined ? {} : { cursor: tail }) };
+}
+
+export type ToolCommand =
+  | { readonly callId: string; readonly cursor?: string }
+  | { readonly code: 'tui_tool_command_invalid' | 'tui_tool_call_id_required' | 'tui_tool_cursor_invalid' };
+
+export function parseToolCommand(argument: string): ToolCommand {
+  const match = /^(\S+)(?:\s+(\S+))?$/u.exec(argument.trim());
+  if (match === null) return { code: 'tui_tool_command_invalid' };
+  if (match[1].length > 256) return { code: 'tui_tool_call_id_required' };
+  const cursor = match[2];
+  if (cursor !== undefined && cursor.length > 768) return { code: 'tui_tool_cursor_invalid' };
+  return { callId: match[1], ...(cursor === undefined ? {} : { cursor }) };
 }
 
 // 写入摘要说明操作对象、删除内容和新增内容。

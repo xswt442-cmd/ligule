@@ -36,7 +36,9 @@ interface DeleteTargetSnapshot {
   readonly ctimeMs: number;
 }
 type WriteToolContext = Pick<ToolContext, 'config' | 'observations' | 'signal' | 'preflightResult'> & {
+  readonly permission?: ToolContext['permission'];
   readonly [TEST_FILE_WRITER]?: FileWriter;
+  readonly fileChanges?: ToolContext['fileChanges'];
 };
 type FileWriter = (target: string, content: string, exclusive: boolean) => Promise<void>;
 
@@ -45,6 +47,11 @@ interface MatchedEdit extends EditChange {
   readonly start: number;
   readonly end: number;
   readonly line: number;
+}
+
+function fileChangeReadbackAllowed(context: { readonly permission?: ToolContext['permission'] }): boolean {
+  const read = context.permission?.capabilities.filesystemRead;
+  return read !== undefined && read !== 'unavailable';
 }
 
 function isUnicodeScalarText(text: string): boolean {
@@ -295,8 +302,16 @@ export const createTool = {
       }
       const expected = Buffer.from(args.content, 'utf8');
       const outcome = await outcomeAfterWriteError(target, undefined, expected);
-      if (outcome !== 'written') throw writeFailure('create', args.path, error, outcome);
+      if (outcome !== 'written') {
+        await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'create', outcome,
+          beforeExists: false, expectedAfterExists: true, expectedAfterBytes: expected,
+          allowReadback: fileChangeReadbackAllowed(context) });
+        throw writeFailure('create', args.path, error, outcome);
+      }
     }
+    await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'create', outcome: 'written',
+      beforeExists: false, expectedAfterExists: true, expectedAfterBytes: Buffer.from(args.content, 'utf8'),
+      allowReadback: fileChangeReadbackAllowed(context) });
     observations?.observe(target, versionOf(Buffer.from(args.content, 'utf8')));
     return { text: `created ${toPosix(relative(boundary, target))} (${Buffer.byteLength(args.content, 'utf8')} bytes)` };
   },
@@ -339,8 +354,16 @@ export const writeTool = {
     try { await persistTextFile(target, args.content, context); }
     catch (error) {
       const outcome = await outcomeAfterWriteError(target, before, expected);
-      if (outcome !== 'written') throw writeFailure('write', args.path, error, outcome);
+      if (outcome !== 'written') {
+        await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'write', outcome,
+          beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
+          allowReadback: fileChangeReadbackAllowed(context) });
+        throw writeFailure('write', args.path, error, outcome);
+      }
     }
+    await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'write', outcome: 'written',
+      beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
+      allowReadback: fileChangeReadbackAllowed(context) });
     observations?.observe(target, versionOf(expected));
     return { text: `wrote ${toPosix(relative(boundary, target))} (${Buffer.byteLength(args.content, 'utf8')} bytes)` };
   },
@@ -451,8 +474,16 @@ export const editTool = {
       try { await persistTextFile(target, updated, context); }
       catch (error) {
         const outcome = await outcomeAfterWriteError(target, before, expected);
-        if (outcome !== 'written') throw writeFailure('edit', args.path, error, outcome);
+        if (outcome !== 'written') {
+          await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'edit', outcome,
+            beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
+            allowReadback: fileChangeReadbackAllowed(context) });
+          throw writeFailure('edit', args.path, error, outcome);
+        }
       }
+      await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'edit', outcome: 'written',
+        beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
+        allowReadback: fileChangeReadbackAllowed(context) });
       observations?.observe(target, versionOf(expected));
       return { text: `edited ${toPosix(relative(boundary, target))}` };
     }
@@ -469,8 +500,16 @@ export const editTool = {
     try { await persistTextFile(target, updated, context); }
     catch (error) {
       const outcome = await outcomeAfterWriteError(target, before, expected);
-      if (outcome !== 'written') throw writeFailure('edit', args.path, error, outcome);
+      if (outcome !== 'written') {
+        await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'edit', outcome,
+          beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
+          allowReadback: fileChangeReadbackAllowed(context) });
+        throw writeFailure('edit', args.path, error, outcome);
+      }
     }
+    await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'edit', outcome: 'written',
+      beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
+      allowReadback: fileChangeReadbackAllowed(context) });
     observations?.observe(target, versionOf(expected));
     return result;
   },
@@ -490,7 +529,7 @@ export const deleteTool = {
   async preflight(args: DeleteArguments, { config }: ToolContext): Promise<DeleteTargetSnapshot> {
     return deleteTargetSnapshot(args, config);
   },
-  async run(args: DeleteArguments, { config, observations, signal, preflightResult }: WriteToolContext) {
+  async run(args: DeleteArguments, { config, observations, signal, preflightResult, fileChanges }: WriteToolContext) {
     const snapshot = isDeleteTargetSnapshot(preflightResult) ? preflightResult : await deleteTargetSnapshot(args, config);
     signal?.throwIfAborted();
     const resolution = await resolveRecycler();
@@ -506,17 +545,28 @@ export const deleteTool = {
       try {
         await recheckDeleteTarget(args, config, snapshot);
       } catch (verificationError) {
+        await fileChanges?.record({ path: snapshot.name, target: snapshot.target, operation: 'delete', outcome: 'unknown',
+          beforeExists: true, expectedAfterExists: false, beforeObject: deleteObjectMetadata(snapshot) });
         throw new KernelError('delete_outcome_unknown', {
           cause: error,
           detail: `${args.path} could not be verified unchanged after the system recycle bin reported an error (${errorCode(verificationError) ?? errorMessage(verificationError)}); check both the workspace and system trash before retrying`,
         });
       }
+      await fileChanges?.record({ path: snapshot.name, target: snapshot.target, operation: 'delete', outcome: 'unchanged',
+        beforeExists: true, expectedAfterExists: false, beforeObject: deleteObjectMetadata(snapshot) });
       throw error;
     }
+    await fileChanges?.record({ path: snapshot.name, target: snapshot.target, operation: 'delete', outcome: 'written',
+      beforeExists: true, expectedAfterExists: false, beforeObject: deleteObjectMetadata(snapshot) });
     observations?.forget(snapshot.target);
     return { text: `sent ${snapshot.name} to the ${resolution.recycler.name}` };
   },
 } satisfies ToolDefinition<DeleteArguments>;
+
+function deleteObjectMetadata(snapshot: DeleteTargetSnapshot): Record<string, unknown> {
+  return { name: snapshot.name, dev: snapshot.dev, ino: snapshot.ino, mode: snapshot.mode, nlink: snapshot.nlink,
+    size: snapshot.size, mtimeMs: snapshot.mtimeMs, ctimeMs: snapshot.ctimeMs };
+}
 
 function isDeleteTargetSnapshot(value: unknown): value is DeleteTargetSnapshot {
   return typeof value === 'object' && value !== null && DELETE_TARGET_SNAPSHOT in value

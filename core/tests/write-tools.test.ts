@@ -10,6 +10,7 @@ import {
   readOnlyTools, resolveRecycler, writeTool, writeTools,
 } from '../dist/index.js';
 import { createFileWriteQueue } from '../dist/kernel/file-write-queue.js';
+import { createSessionLog } from '../dist/session/session.js';
 import { withTestFileWriter } from '../dist/tools/write.js';
 import { windowsRecycleBin } from '../dist/capability/recycle.js';
 import type { PolicyAskResult, PolicyQuestion } from '../dist/kernel/policy.js';
@@ -450,25 +451,38 @@ test('delete uses the operating system recycle bin and takes the source out of t
     const fileName = `note-${randomUUID()}.txt`;
     const target = join(workspace, fileName);
     await writeFile(target, 'keep me');
+    const sessionDirectory = join(workspace, '.ligule-sessions');
+    await mkdir(sessionDirectory);
+    const sessionId = 'delete-change-session';
+    const session = createSessionLog({ directory: sessionDirectory, id: sessionId, meta: { projectRoot: workspace } });
     const approvals: PolicyQuestion[] = [];
     const kernel = createKernel({
       config: createConfig({ user: { boundary: workspace } }),
       permission: workspaceWrite,
+      session,
       policy: createDecisionChain({ mode: 'ask', ask: async (question) => {
         approvals.push(question);
         return { decision: 'allow', source: 'human' };
       } }),
     });
     kernel.register(deleteTool);
-    const result = await kernel.call('delete', { path: fileName }) as { text: string };
+    const result = await kernel.call('delete', { path: fileName }, { sessionId, runId: 'run-delete', callId: 'call-delete' }) as { text: string };
     const backend = process.platform === 'win32' ? 'system recycle bin' : 'system trash';
     assert.equal(result.text, `sent ${fileName} to the ${backend}`);
     assert.equal(approvals.length, 1);
     assert.equal(approvals[0].tool, 'delete');
+    const deleteEvent = (await session.read()).find((event) => event.kind === 'tool' && event.callId === 'call-delete');
+    const fileChange = (deleteEvent?.fileChanges as Record<string, unknown>[] | undefined)?.[0];
+    assert.equal(fileChange?.operation, 'delete');
+    assert.equal(fileChange?.baselineStatus, 'unavailable');
+    assert.equal(fileChange?.baselineReason, 'body_not_read');
+    assert.equal(fileChange?.baselineRef, undefined, 'delete provenance must not read or save the file body');
+    assert.equal(fileChange?.observedExists, false);
     await assert.rejects(() => readFile(target, 'utf8'), (error) => (error as { code?: string }).code === 'ENOENT');
     if (process.platform === 'linux') {
       await cleanSystemTrashEntry(target, { type: 'file', content: 'keep me' }, { allowSuffix: true, required: true });
     }
+    await session.close();
   }, { realRecycleBin: true });
 });
 

@@ -8,6 +8,7 @@ import {
   writeExecutionLog, type ExecutionLogReference,
 } from '../session/execution-log.js';
 import type { SessionEvent } from '../session/format.js';
+import { checkedCheckDeclaration, checkedCheckScopeSamples, type CheckDeclaration, type CheckScopeSample } from '../session/checks.js';
 
 const MAX_ACTIVE_PER_RUN = 4;
 const MAX_ACTIVE_PER_SESSION = 8;
@@ -33,6 +34,8 @@ export interface FiniteCommandOwner {
   readonly parentRunId?: string;
   readonly grantId?: string;
   readonly workspaceTrusted: boolean;
+  readonly check?: CheckDeclaration;
+  readonly checkScopeStart?: readonly CheckScopeSample[];
 }
 
 export interface FiniteCommandSession {
@@ -142,6 +145,15 @@ export interface FiniteCommandRegistry {
 
 export interface FiniteCommandRegistryOptions {
   readonly validateOwner?: (owner: FiniteCommandOwner) => Promise<void>;
+  readonly onTerminal?: (entry: {
+    readonly executionId: string;
+    readonly owner: FiniteCommandOwner;
+    readonly state: FiniteCommandState;
+    readonly exitCode?: number;
+    readonly errorCode?: string;
+    readonly logs?: ExecLogSnapshot;
+    readonly logUnavailableReason?: string;
+  }) => Promise<void>;
 }
 
 function runKey(sessionId: string, runId: string): string {
@@ -403,6 +415,8 @@ export function createFiniteCommandRegistry(options: FiniteCommandRegistryOption
         runId: entry.owner.runId,
         callId: entry.owner.callId,
         ...(entry.owner.parentRunId === undefined ? {} : { parentRunId: entry.owner.parentRunId }),
+        ...(entry.owner.check === undefined ? {} : { check: entry.owner.check }),
+        ...(entry.owner.checkScopeStart === undefined ? {} : { checkScopeStart: entry.owner.checkScopeStart }),
         ...(entry.startedAt === undefined ? { acceptedAt: entry.acceptedAt } : { startedAt: entry.startedAt }),
         ...(entry.finishedAt === undefined ? {} : { finishedAt: entry.finishedAt }),
         timeoutMs: entry.timeoutMs,
@@ -477,8 +491,10 @@ export function createFiniteCommandRegistry(options: FiniteCommandRegistryOption
     } else {
       entry.state = 'exited';
     }
+    let terminalRecorded = false;
     try {
       await persist(entry, entry.state);
+      terminalRecorded = true;
     } catch (error) {
       entry.recordFailure = true;
       entry.errorCode = codeOf(error) ?? 'execution_record_failed';
@@ -498,6 +514,14 @@ export function createFiniteCommandRegistry(options: FiniteCommandRegistryOption
       }
       throw error;
     } finally {
+      if (terminalRecorded && options.onTerminal !== undefined && entry.owner.check !== undefined) {
+        await options.onTerminal({ executionId: entry.executionId, owner: entry.owner, state: entry.state,
+          ...(entry.exitCode === undefined ? {} : { exitCode: entry.exitCode }),
+          ...(entry.errorCode === undefined ? {} : { errorCode: entry.errorCode }),
+          ...(entry.persistedLogs === undefined ? {} : { logs: entry.persistedLogs }),
+          ...(entry.logUnavailableReason === undefined ? {} : { logUnavailableReason: entry.logUnavailableReason }),
+        }).catch(() => undefined);
+      }
       if (!entry.terminationPending && !entry.cleanupPending) entry.work?.dispose();
       pruneTerminal();
     }
@@ -660,6 +684,11 @@ export function createFiniteCommandRegistry(options: FiniteCommandRegistryOption
           projectIdentity, projectRoot, sessionId, runId: event.runId, callId: event.callId,
           ...(typeof event.parentRunId === 'string' ? { parentRunId: event.parentRunId } : {}),
           workspaceTrusted: false,
+          ...(checkedCheckDeclaration(event.check) === undefined ? {} : { check: checkedCheckDeclaration(event.check)! }),
+          ...(checkedCheckDeclaration(event.check) === undefined
+            || checkedCheckScopeSamples(event.checkScopeStart, checkedCheckDeclaration(event.check)!) === undefined ? {} : {
+              checkScopeStart: checkedCheckScopeSamples(event.checkScopeStart, checkedCheckDeclaration(event.check)!)!,
+            }),
         };
         const cursorGeneration = typeof event.cursorGeneration === 'string' ? event.cursorGeneration : randomUUID();
         const logTotalBytes = Number.isSafeInteger(event.logTotalBytes) && Number(event.logTotalBytes) >= 0
@@ -811,8 +840,17 @@ export function createFiniteCommandRegistry(options: FiniteCommandRegistryOption
         ? 'cancelled' : 'failed';
       entry.finishedAt = new Date().toISOString();
       entry.readyResolve();
-      try { await persist(entry, entry.state); }
+      let terminalRecorded = false;
+      try {
+        await persist(entry, entry.state);
+        terminalRecorded = true;
+      }
       finally {
+        if (terminalRecorded && options.onTerminal !== undefined && entry.owner.check !== undefined) {
+          await options.onTerminal({ executionId: entry.executionId, owner: entry.owner, state: entry.state,
+            ...(entry.errorCode === undefined ? {} : { errorCode: entry.errorCode }),
+          }).catch(() => undefined);
+        }
         entry.work?.dispose();
         pruneTerminal();
       }

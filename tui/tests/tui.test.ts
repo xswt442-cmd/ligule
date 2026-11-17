@@ -40,7 +40,7 @@ try {
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
 const mcpServerFixture = fileURLToPath(new URL('../../tests/fixtures/mcp-minimal.mjs', import.meta.url));
-const { foldText, editDraft, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, subrunReferenceOf, executionReferenceOf, parseExecCommand, parseSubrunCommand, requestDiagnosticLines, detailTitle, routeInput, clearCancelledLocalQuestion, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
+const { foldText, editDraft, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, subrunReferenceOf, executionReferenceOf, parseExecCommand, parseSubrunCommand, parseToolCommand, requestDiagnosticLines, detailTitle, routeInput, clearCancelledLocalQuestion, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
 // 界面记录只带界面关心的字段；测试直接写这种不带 `seq` 的投影输入。
 const projectRecord = rows.projectRecord as (record: Record<string, unknown>, locale?: Locale) => TranscriptItem[];
 const quoted = (value: string) => `"${value.replaceAll('"', '\\"')}"`;
@@ -323,6 +323,31 @@ test('/exec parses bounded finite-command controls by execution ID', options, ()
     { executionId: 'execution-1', runId: 'run-1' });
 });
 
+test('/tool accepts one call ID and an optional bounded output cursor', options, () => {
+  assert.deepEqual(parseToolCommand('call-1'), { callId: 'call-1' });
+  assert.deepEqual(parseToolCommand('call-1 cursor-1'), { callId: 'call-1', cursor: 'cursor-1' });
+  assert.deepEqual(parseToolCommand(''), { code: 'tui_tool_command_invalid' });
+  assert.deepEqual(parseToolCommand('call-1 one extra'), { code: 'tui_tool_command_invalid' });
+  assert.deepEqual(routeInput('/tool call-1 cursor-1', false), { kind: 'command', name: 'tool', argument: 'call-1 cursor-1' });
+  assert.equal(UI_COMMANDS.some((command) => command.name === 'tool'), true);
+});
+
+test('Session transcript rows include bounded file change and check summaries', options, () => {
+  const fileRows = projectRecord({ seq: 1, kind: 'tool', tool: 'write', args: { path: 'src/example.ts' },
+    result: { kind: 'result', failed: false, content: 'wrote file' }, fileChanges: [{
+      path: 'src/example.ts', operation: 'write', outcome: 'written', baselineStatus: 'available',
+      observedStatus: 'available', changedFromBaseline: true,
+    }] });
+  assert.equal(fileRows.some((row) => row.kind === 'meta' && row.text.includes('文件变化：write src/example.ts')), true);
+  const checkRows = projectRecord({ seq: 2, kind: 'check', declaration: { name: 'focused test' },
+    commandStatus: 'not_met', errorCode: 'exec_timeout', reportStatus: 'reported_fail', scopeStatus: 'stale', logStatus: 'complete',
+    report: { passed: 1, failed: 2, skipped: 0, todo: 0 } });
+  assert.equal(checkRows.some((row) => row.kind === 'meta' && row.text.includes('检查 focused test：命令 not_met（exec_timeout）')),
+    true);
+  assert.equal(checkRows.some((row) => row.text.includes('报告 reported_fail') && row.text.includes('范围 stale')),
+    true);
+});
+
 test('TUI /exec status, wait, logs, and cancel use the owning Host execution controls', options, async (t) => {
   const permission = await measuredPermissionContext('full-access', 'unrestricted');
   if (permission.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');
@@ -403,6 +428,106 @@ test('TUI /exec status, wait, logs, and cancel use the owning Host execution con
     permission,
     permissionControl: true,
     modeName: 'full',
+    testDirectory: 'testplace/tmp',
+  });
+});
+
+test('TUI /tool reads a bounded result page from the owning Host without loading the spill into Session history', options, async () => {
+  let providerStep = 0;
+  await withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+    await writeFile(join(projectDirectory, 'tui-tool-output.txt'), 'TUI_TOOL_OUTPUT_MARKER\n' + 'x'.repeat(40_000));
+    client.onRequest((message) => message.method === 'approval.request' ? { decision: 'allow' } : undefined);
+    await client.request('run.start', { sessionId, input: 'read the large output fixture for the TUI result check' });
+    const history = await client.request('session.read', { sessionId }) as { events: TuiRecord[] };
+    const event = history.events.find((item) => item.kind === 'tool' && item.tool === 'read');
+    assert.ok(typeof event?.callId === 'string' && typeof event.runId === 'string');
+
+    const { createElement } = await import('react');
+    const { render } = await import('ink');
+    const { PassThrough } = await import('node:stream');
+    const { setTimeout: delay } = await import('node:timers/promises');
+    const { App } = await import('../dist/tui/app.js');
+    const stdout = new PassThrough() as unknown as FakeOutput;
+    stdout.columns = 120;
+    stdout.isTTY = true;
+    let painted = '';
+    stdout.on('data', (chunk) => { painted += chunk; });
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+    const instance = render(createElement(App, { client: client as TuiClient, sessionId,
+      info: { boundary: projectDirectory }, interactive: true }), {
+      stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true,
+    });
+    try {
+      stdin.write(`/tool ${event.callId}`);
+      await delay(80);
+      stdin.write('\r');
+      await waitFor(() => plainOutput(painted).includes('TUI_TOOL_OUTPUT_MARKER'), {
+        within: 5_000, read: () => plainOutput(painted),
+      });
+      assert.ok(requests.some((request) => request.method === 'tool.result'
+        && (request.params as { callId?: string }).callId === event.callId));
+    } finally {
+      instance.unmount();
+    }
+  }, {
+    providerReply: () => providerStep++ === 0
+      ? { toolCalls: [{ tool: 'read', args: { path: 'tui-tool-output.txt' } }] }
+      : { text: 'TUI result checked' },
+    config: { limits: { resultBytes: 1_024 } },
+    testDirectory: 'testplace/tmp',
+  });
+});
+
+test('TUI /tool displays the direct file change facts attached to the same tool result', options, async () => {
+  let providerStep = 0;
+  const permission = await measuredPermissionContext('full-access', 'unrestricted');
+  await withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+    await writeFile(join(projectDirectory, 'file-change-ui.txt'), 'before\n');
+    client.onRequest((message) => message.method === 'approval.request' ? { decision: 'allow' } : undefined);
+    await client.request('run.start', { sessionId, input: 'read and update the UI file change fixture' });
+    const history = await client.request('session.read', { sessionId }) as { events: TuiRecord[] };
+    const event = history.events.find((item) => item.kind === 'tool' && item.tool === 'write');
+    assert.ok(typeof event?.callId === 'string' && typeof event.runId === 'string');
+
+    const { createElement } = await import('react');
+    const { render } = await import('ink');
+    const { PassThrough } = await import('node:stream');
+    const { setTimeout: delay } = await import('node:timers/promises');
+    const { App } = await import('../dist/tui/app.js');
+    const stdout = new PassThrough() as unknown as FakeOutput;
+    stdout.columns = 120;
+    stdout.isTTY = true;
+    let painted = '';
+    stdout.on('data', (chunk) => { painted += chunk; });
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+    const instance = render(createElement(App, { client: client as TuiClient, sessionId,
+      info: { boundary: projectDirectory }, interactive: true }), {
+      stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true,
+    });
+    try {
+      stdin.write(`/tool ${event.callId}`);
+      await delay(80);
+      stdin.write('\r');
+      await waitFor(() => plainOutput(painted).includes('文件变化：write file-change-ui.txt'), {
+        within: 5_000, read: () => plainOutput(painted),
+      });
+      assert.ok(requests.some((request) => request.method === 'tool.result'
+        && (request.params as { callId?: string; runId?: string }).callId === event.callId
+        && (request.params as { runId?: string }).runId === event.runId));
+    } finally {
+      instance.unmount();
+    }
+  }, {
+    providerReply: () => {
+      providerStep += 1;
+      if (providerStep === 1) return { toolCalls: [{ tool: 'read', args: { path: 'file-change-ui.txt' } }] };
+      if (providerStep === 2) return { toolCalls: [{ tool: 'write', args: { path: 'file-change-ui.txt', content: 'after\n' } }] };
+      return { text: 'file change recorded' };
+    },
+    permission,
+    permissionControl: true,
+    modeName: 'full',
+    config: { loop: { iterations: 4, modelCalls: 4 } },
     testDirectory: 'testplace/tmp',
   });
 });
@@ -573,6 +698,7 @@ test('the approval box names the shell backend and its executable', options, asy
     await run;
   } finally {
     instance.unmount();
+    await instance.waitUntilExit();
   }
 
   assert.match(painted, /允许执行 exec？/);
@@ -582,7 +708,7 @@ test('the approval box names the shell backend and its executable', options, asy
 });
 
 test('the TUI remembers a session-scoped approval and applies it after the next user request', options, async () => {
-  await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+  await withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
     const { createElement } = await import('react');
     const { render } = await import('ink');
     const { PassThrough } = await import('node:stream');
@@ -603,12 +729,28 @@ test('the TUI remembers a session-scoped approval and applies it after the next 
     const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true }), {
       stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true,
     });
+    let first: Promise<unknown> | undefined;
+    let firstSettled = true;
     try {
-      const first = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'read', args: { path: 'note.txt' } }) });
+      await waitFor(() => requests.some((request) => request.method === 'status.get')
+        && (stdin as unknown as PassThrough).listenerCount('readable') > 0, {
+        within: 5_000, read: () => `requests=${JSON.stringify(requests.map((request) => request.method))}; inputListeners=${(stdin as unknown as PassThrough).listenerCount('readable')}`,
+      });
+      firstSettled = false;
+      first = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'read', args: { path: 'note.txt' } }) })
+        .finally(() => { firstSettled = true; });
+      void first.catch(() => undefined);
+      await waitFor(() => approvalCount > 0, {
+        within: 5_000, read: () => `approvalCount=${approvalCount}\n${plainOutput(painted).slice(-800)}`,
+      });
       // 记住规则收在第二层：先看到入口，按 m 展开后才出现规则选项。
-      await waitFor(() => painted.includes('记住规则'), { read: () => painted });
+      await waitFor(() => painted.includes('记住规则'), { within: 5_000, read: () => `approvalCount=${approvalCount}\n${plainOutput(painted).slice(-800)}` });
+      await instance.waitUntilRenderFlush();
+      await new Promise<void>((resolve) => setImmediate(resolve));
       stdin.write('m');
-      await waitFor(() => painted.includes('2 记住本会话'), { read: () => painted });
+      await waitFor(() => painted.includes('2 记住本会话'), {
+        within: 5_000, read: () => `approvalCount=${approvalCount}\n${plainOutput(painted).slice(-800)}`,
+      });
       stdin.write('2');
       await first;
       assert.equal(approvalCount, 1);
@@ -618,7 +760,9 @@ test('the TUI remembers a session-scoped approval and applies it after the next 
       await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'read', args: { path: 'note.txt' } }) });
       assert.equal(approvalCount, 1);
     } finally {
+      if (!firstSettled) void client.request('run.cancel', { sessionId }).catch(() => undefined);
       instance.unmount();
+      await instance.waitUntilExit();
     }
   });
 });
@@ -931,7 +1075,7 @@ test('the candidate list narrows on what is typed and appends host templates', o
   assert.equal(candidatesOf('/', templates, 8).length, 8);
   assert.ok(candidatesOf('/恢复').some(command => command.name === 'resume'));
   assert.ok(candidatesOf('/approval mode', [], undefined, 'en').some(command => command.name === 'policy'));
-  assert.ok(candidatesOf('/tool mode', [], undefined, 'en').some(command => command.name === 'mode'));
+  assert.deepEqual(candidatesOf('/tool mode', [], undefined, 'en'), []);
   assert.ok(candidatesOf('/credentials', [], undefined, 'en').some(command => command.name === 'credentials'));
   assert.deepEqual(candidatesOf('/policy a').map(command => command.name), ['policy always', 'policy ask', 'policy auto']);
   assert.deepEqual(candidatesOf('/permission network d').map(command => command.name), ['permission network disabled']);

@@ -15,6 +15,7 @@ import { createLoop, DEFAULT_LOOP_LIMITS, type LoopLimits, type LoopProgressEven
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
 import { createRunAcceptance, isRunAcceptance, publishRunResult, readRunResult, runReceipts } from '../session/run.js';
+import { runEvidenceReferences } from '../session/run-evidence.js';
 import { readSessionRecord } from '../session/record.js';
 import { createRunSteeringInbox, type RunSteeringInbox } from '../kernel/run-steering.js';
 import { currentKernelExecutionContext } from '../kernel/execution-context.js';
@@ -892,6 +893,13 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                       : outputContract === undefined ? { status: 'not_requested' as const }
                         : { status: 'invalid' as const, schemaDigest: outputContract.digest,
                             errors: ['The child run ended before a valid structured result was submitted.'] };
+                    const evidence = runEvidenceReferences(await session.read(), acceptance.runId);
+                    const evidenceOptions = {
+                      ...(evidence.fileChanges.length === 0 ? {} : { fileChanges: evidence.fileChanges }),
+                      ...(evidence.fileChangesTruncated === undefined ? {} : { fileChangesTruncated: true as const }),
+                      ...(evidence.checks.length === 0 ? {} : { checks: evidence.checks }),
+                      ...(evidence.checksTruncated === undefined ? {} : { checksTruncated: true as const }),
+                    };
                     childRunResult = status === 'completed'
                       ? completedRunResult(acceptance.runId, id, {
                         ...summary,
@@ -899,10 +907,11 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                       }, {
                         ...(structuredSubmitted ? { structured: structuredResult } : {}),
                         validation,
+                        ...evidenceOptions,
                       })
                       : failedRunResult(acceptance.runId, id,
                         typeof fields.code === 'string' ? fields.code : 'subagent_failed',
-                        fields.diagnostics as KernelError['diagnostics'], validation, summary);
+                        fields.diagnostics as KernelError['diagnostics'], validation, summary, evidenceOptions);
                     const projectRoot = typeof deps.config.workspaceRoot === 'string' ? deps.config.workspaceRoot : boundaryOf(deps.config);
                     return await publishRunResult(session.directory, workspaceIdentity(projectRoot), id,
                       acceptance.runId, childRunResult);

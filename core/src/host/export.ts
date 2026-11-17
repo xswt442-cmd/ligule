@@ -6,6 +6,8 @@ import { lstat, mkdir, open, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { checkedImageReferences, IMAGE_LIMITS, IMAGE_ID, isImageReference, type ImageReference } from '../media.js';
 import type { SessionEvent } from '../session/format.js';
+import { checkedFileChangeFact, type FileChangeFact } from '../session/file-changes.js';
+import { checkedCheckEvent, type CheckEvent } from '../session/checks.js';
 
 /** 导出结果中每个文件的状态，包括已写入、目标已存在和写入失败。 */
 export interface Exported {
@@ -28,6 +30,8 @@ export interface ExportRecord {
     readonly spilled?: string;
     readonly images?: readonly ImageReference[];
   };
+  readonly fileChanges?: readonly FileChangeFact[];
+  readonly check?: CheckEvent;
   readonly name?: string;
   readonly layer?: string;
 }
@@ -55,6 +59,8 @@ export function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
     tool?: string;
     toolCalls?: { id: string; name: string; args?: Record<string, unknown> }[];
     result?: { content?: unknown; failed?: boolean; code?: string; spilled?: string; images?: readonly ImageReference[] };
+    fileChanges?: FileChangeFact[];
+    check?: CheckEvent;
     name?: string;
     layer?: string;
   } = { kind: event.kind };
@@ -77,6 +83,14 @@ export function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
       ...(typeof event.result.spilled === 'string' ? { spilled: event.result.spilled } : {}),
       ...(event.result.images === undefined ? {} : { images: checkedImageReferences(event.result.images) }),
     };
+  }
+  if (Array.isArray(event.fileChanges)) {
+    record.fileChanges = event.fileChanges.map(checkedFileChangeFact)
+      .filter((change): change is FileChangeFact => change !== undefined);
+  }
+  if (event.kind === 'check') {
+    const check = checkedCheckEvent(event);
+    if (check !== undefined) record.check = check;
   }
   return record;
 }
@@ -149,7 +163,33 @@ export function exportMarkdown(
       lines.push(`### 第 ${record.seq} 条 · ${record.tool} 的结果`);
       if (record.result?.failed === true) lines.push(`（这一次没做成）${record.result.code === undefined ? '' : ` ${record.result.code}`}`);
       lines.push('', resultBody(record), '');
+      for (const change of record.fileChanges ?? []) {
+        lines.push(`- 文件变化：${change.operation} ${change.path}（${change.outcome}）`);
+        lines.push(`- 前版本：${change.beforeVersion ?? '未知'}；预期后版本：${change.expectedAfterVersion ?? '未知'}；采样后版本：${change.observedAfterVersion ?? '未知'}`);
+        lines.push(`- 基线：${change.baselineStatus}${change.baselineReason === undefined ? '' : `（${change.baselineReason}）`}`
+          + `；写后采样：${change.observedStatus}${change.observedReason === undefined ? '' : `（${change.observedReason}）`}`);
+        lines.push(`- 相对基线变化：${change.changedFromBaseline === null ? '未知' : change.changedFromBaseline ? '有变化' : '未变化'}`);
+        if (change.baselineRef !== undefined) {
+          lines.push(`- Session 私有基线引用：${change.baselineRef.bytes} 字节，SHA-256 ${change.baselineRef.sha256}；内容未嵌入这份导出。`);
+        } else if (change.baselineStatus !== 'available') {
+          lines.push('- 基线正文未保存；本项仅包含可观察的版本和状态。');
+        }
+        lines.push('');
+      }
       for (const image of record.result?.images ?? []) lines.push(...imageMarkdown(image, imageUrls));
+    } else if (record.kind === 'check' && record.check !== undefined) {
+      const check = record.check;
+      lines.push(`### 第 ${record.seq} 条 · 检查 ${check.declaration.name}`, '');
+      lines.push(`- 命令结果：${check.commandStatus}（${check.executionState}${check.exitCode === null ? '' : `，退出码 ${check.exitCode}`}）`);
+      if (check.errorCode !== undefined) lines.push(`- 终止原因：${check.errorCode}`);
+      lines.push(`- 结构化报告：${check.reportStatus}`
+        + (check.report === undefined ? '' : `（通过 ${check.report.passed}、失败 ${check.report.failed}、跳过 ${check.report.skipped}、待办 ${check.report.todo}）`));
+      lines.push(`- 文件范围：${check.scopeStatus}；日志：${check.logStatus}；覆盖范围仅为 Session 中记录的起止采样。`);
+      if (check.reportReason !== undefined) lines.push(`- 报告说明：${check.reportReason}`);
+      for (const sample of check.scopeEnd) {
+        lines.push(`- 范围采样：${sample.path}（${sample.status}${sample.exists === false ? '，不存在' : ''}${sample.version === null ? '' : `，版本 ${sample.version}`}${sample.reason === undefined ? '' : `，${sample.reason}`}）`);
+      }
+      lines.push('');
     } else if (record.kind === 'mode') {
       lines.push(`> 第 ${record.seq} 条：模式 ${record.name}（${record.layer ?? ''}）生效`, '');
     }

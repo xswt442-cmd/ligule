@@ -1013,6 +1013,12 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
       closingCode = code;
       return this.release();
     },
+    async toolResult(sessionId: string, runId: string, callId: string, cursor?: string, limitBytes = 4_096) {
+      owned(sessionId);
+      return record(await tracked(host.handle({ method: 'tool.result', params: {
+        sessionId, runId, callId, ...(cursor === undefined ? {} : { cursor }), limitBytes,
+      } }, connection)));
+    },
     async read(sessionId: string, before: number | undefined, limit: number, at?: number, offset = 0) {
       owned(sessionId);
       if (offset > 0 && at === undefined) throw new KernelError('session_cursor_invalid');

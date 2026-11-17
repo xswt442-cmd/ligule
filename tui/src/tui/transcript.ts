@@ -97,10 +97,28 @@ export function projectRecord(record: TuiRecord, locale: Locale = 'zh'): Transcr
     const deliveries = Array.isArray(raw) ? raw.filter((item): item is Record<string, unknown> =>
       isRecord(item) && item.kind === 'file' && typeof item.path === 'string'
         && typeof item.sha256 === 'string' && typeof item.bytes === 'number') : [];
-    return [row, ...deliveries.map(item => ({
+    const fileChanges = Array.isArray(record.fileChanges) ? record.fileChanges.filter(isRecord) : [];
+    const changeRows = fileChanges.map((change) => ({
+      kind: 'meta',
+      text: t(`文件变化：${String(change.operation)} ${String(change.path)}（${String(change.outcome)}；基线 ${String(change.baselineStatus)}；写后采样 ${String(change.observedStatus)}；与基线不同 ${change.changedFromBaseline === null ? '未知' : change.changedFromBaseline === true ? '是' : '否'}）`,
+        `File change: ${String(change.operation)} ${String(change.path)} (${String(change.outcome)}; baseline ${String(change.baselineStatus)}; after sample ${String(change.observedStatus)}; differs from baseline ${change.changedFromBaseline === null ? 'unknown' : change.changedFromBaseline === true ? 'yes' : 'no'}).`),
+    }));
+    return [row, ...changeRows, ...deliveries.map(item => ({
       kind: 'meta', text: t(`已交付文件：${item.path}（${item.bytes} 字节；SHA-256 ${String(item.sha256).slice(0, 12)}…；会话 ${item.sessionId}）`,
         `Delivered file: ${item.path} (${item.bytes} bytes; SHA-256 ${String(item.sha256).slice(0, 12)}…; Session ${item.sessionId})`),
     }))];
+  }
+  if (record.kind === 'check') {
+    const declaration = isRecord(record.declaration) ? record.declaration : {};
+    const report = isRecord(record.report) ? record.report : undefined;
+    const counts = report === undefined ? '' : t(
+      `；通过 ${String(report.passed)}、失败 ${String(report.failed)}、跳过 ${String(report.skipped)}、待办 ${String(report.todo)}`,
+      `; passed ${String(report.passed)}, failed ${String(report.failed)}, skipped ${String(report.skipped)}, todo ${String(report.todo)}`,
+    );
+    return [{ kind: 'meta', text: t(
+      `检查 ${String(declaration.name ?? '未知')}：命令 ${String(record.commandStatus)}${typeof record.errorCode === 'string' ? `（${record.errorCode}）` : ''}；报告 ${String(record.reportStatus)}；范围 ${String(record.scopeStatus)}；日志 ${String(record.logStatus)}${counts}`,
+      `Check ${String(declaration.name ?? 'unknown')}: command ${String(record.commandStatus)}${typeof record.errorCode === 'string' ? ` (${record.errorCode})` : ''}; report ${String(record.reportStatus)}; scope ${String(record.scopeStatus)}; logs ${String(record.logStatus)}${counts}`,
+    ) }];
   }
   if (record.kind === 'mode') {
     const name = typeof record.name === 'string' ? record.name : '';

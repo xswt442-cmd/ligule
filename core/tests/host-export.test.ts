@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { branchSessionId, exportImageUrl, exportMarkdown, writeExport } from '../dist/host/export.js';
+import { branchSessionId, exportImageUrl, exportMarkdown, exportRecordOf, writeExport } from '../dist/host/export.js';
 import type { Exported, ExportAsset } from '../dist/host/export.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 
@@ -45,6 +45,44 @@ test('the exported markdown gives each call and each result its own section', ()
   assert.doesNotMatch(text, /8351/, '用量那一条不是对话的一段，不写出去');
   assert.equal(text.split('\n## ').length - 1, 2, '问的那一条与答的那一条各成一段');
   assert.equal(text.split('\n### ').length - 1, 3, '那一次调用与两次结果各自一段');
+});
+
+test('the export includes portable file change versions and says when private baseline content is not embedded', () => {
+  const text = exportMarkdown([{
+    seq: 9, kind: 'tool', tool: 'write', result: { content: 'wrote note.txt' },
+    fileChanges: [{
+      path: 'note.txt', operation: 'write', outcome: 'written',
+      beforeVersion: 'a'.repeat(16), expectedAfterVersion: 'b'.repeat(16), observedAfterVersion: 'b'.repeat(16),
+      observedAt: '2026-11-17T00:00:00.000Z', baselineStatus: 'available', baselineExists: true,
+      baselineVersion: 'a'.repeat(16), baselineRef: { name: 'change-private.snapshot', bytes: 12, sha256: 'c'.repeat(64) },
+      observedStatus: 'available', observedExists: true, expectedMatchesObserved: true, changedFromBaseline: true,
+    }],
+  }], { id: 'session-1' });
+  assert.match(text, /文件变化：write note\.txt（written）/);
+  assert.match(text, /前版本：a{16}；预期后版本：b{16}；采样后版本：b{16}/);
+  assert.match(text, /Session 私有基线引用：12 字节，SHA-256 c{64}；内容未嵌入这份导出/);
+  assert.doesNotMatch(text, /change-private\.snapshot/);
+});
+
+test('the export records the three independent check results without exporting command logs', () => {
+  const sample = { path: 'src/example.ts', status: 'available', exists: true, version: 'a'.repeat(16), sampledAt: '2026-11-17T00:00:00.000Z' };
+  const record = exportRecordOf({
+    seq: 10, kind: 'check', sessionId: 'session-1', runId: '00000000-0000-4000-8000-000000000001',
+    callId: 'provider-call-1', executionId: '00000000-0000-4000-8000-000000000002', at: '2026-11-17T00:00:02.000Z',
+    declaration: { name: 'focused test', purpose: 'check output', expectedExitCodes: [0], scope: ['src/example.ts'],
+      report: { format: 'ligule-test-report-v1' } },
+    executionState: 'exited', exitCode: 0, commandStatus: 'met', reportStatus: 'reported_fail',
+    report: { schema: 'ligule-test-report', version: 1, passed: 2, failed: 1, skipped: 0, todo: 0 },
+    logStatus: 'complete', logTotalBytes: 32, logFirstAvailableOffset: 0,
+    scopeStart: [sample], scopeEnd: [sample], scopeStatus: 'sampled', coverage: 'session_scope_samples_only',
+  } as never);
+  assert.ok(record);
+  const text = exportMarkdown([record], { id: 'session-1' });
+  assert.match(text, /检查 focused test/);
+  assert.match(text, /命令结果：met（exited，退出码 0）/);
+  assert.match(text, /结构化报告：reported_fail（通过 2、失败 1、跳过 0、待办 0）/);
+  assert.match(text, /文件范围：sampled；日志：complete/);
+  assert.doesNotMatch(text, /stdout|stderr|command log contents/u);
 });
 
 test('the exported markdown preserves consecutive blank lines in the original body', () => {

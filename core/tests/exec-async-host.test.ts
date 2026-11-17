@@ -7,7 +7,7 @@ import { detectPermissionCapabilities } from '../dist/capability/permission-capa
 import { withTuiHost } from './helpers/tui-host.ts';
 
 type ChatBody = { messages: { role: string; content?: unknown }[] };
-type ToolResult = { tool?: string; runId?: string; result?: { failed?: boolean; code?: string; content?: unknown } };
+type ToolResult = { kind?: string; tool?: string; runId?: string; result?: { failed?: boolean; code?: string; content?: unknown } };
 
 function lastToolContent(body: ChatBody): Record<string, unknown> | undefined {
   const message = [...body.messages].reverse().find((item) => item.role === 'tool');
@@ -68,7 +68,7 @@ test('exec waitMs returns a controllable Run-owned handle and bounded logs', {
 
     await client.request('run.start', { sessionId, input: 'start a finite test command' });
     const { events } = await client.request('session.read', { sessionId }) as { events: ToolResult[] };
-    const results = events.filter((event) => event.tool === 'exec' || event.tool === 'exec_control');
+    const results = events.filter((event) => event.kind === 'tool' && (event.tool === 'exec' || event.tool === 'exec_control'));
 
     assert.equal(results.length, 5,
       `the Run starts once, polls once, reads a first page, waits, then reads the next page; tools=${JSON.stringify(providerRequests.map((request) => request.tools?.map((tool) => tool.function.name)))} events=${JSON.stringify(results)}`);
@@ -181,7 +181,7 @@ test('a log cursor older than the retained window reports the missing output ran
 
     await client.request('run.start', { sessionId, input: 'run the large finite output check' });
     const { events } = await client.request('session.read', { sessionId }) as { events: ToolResult[] };
-    const results = events.filter((event) => event.tool === 'exec' || event.tool === 'exec_control');
+    const results = events.filter((event) => event.kind === 'tool' && (event.tool === 'exec' || event.tool === 'exec_control'));
     assert.equal(results.length, 3, JSON.stringify(results));
     const started = results[0]?.result?.content as Record<string, unknown>;
     executionId = typeof started.executionId === 'string' ? started.executionId : undefined;

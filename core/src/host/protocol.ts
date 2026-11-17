@@ -36,6 +36,7 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly delegation?: DelegationSpec;
   readonly requestKey?: string;
   readonly runId?: string;
+  readonly callId?: string;
   readonly executionId?: string;
   readonly parentRunId?: string;
   readonly subrunId?: string;
@@ -251,6 +252,16 @@ export const METHODS = Object.freeze({
       before: { type: 'integer', minimum: 1, description: 'read events older than this sequence number; it has to name an event in this record' },
       at: { type: 'integer', minimum: 1, description: 'read exactly the event with this sequence number; it has to exist in this record and cannot be combined with before' },
     }, required: ['sessionId'] },
+  },
+  'tool.result': {
+    description: 'Read one recorded tool call within its accepted Run. The result is derived from Session events and spilled output is returned in bounded byte pages.',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID,
+      runId: { type: 'string', minLength: 1, maxLength: 256 },
+      callId: { type: 'string', minLength: 1, maxLength: 256 },
+      cursor: { type: 'string', minLength: 1, maxLength: 768 },
+      limitBytes: { type: 'integer', minimum: 1, maximum: 4_096 },
+    }, required: ['sessionId', 'runId', 'callId'] },
   },
   'session.observe': {
     description: 'Read a workspace session snapshot without acquiring its writer lock. Suitable for a read-only viewer when another Host controls the session; poll for new appended events.',

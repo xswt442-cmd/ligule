@@ -1,6 +1,6 @@
 // Host 管理会话、Agent 循环、工具和策略状态；客户端通过协议与它通信。
 // 模型提供方与策略由外部注入，会话事件通过会话记录接口持久化。
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { mkdirSync } from 'node:fs';
 import { access, lstat, opendir, readFile, realpath, stat } from 'node:fs/promises';
@@ -67,7 +67,7 @@ import type { ReviewEvidence } from '../kernel/reviewer.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel, readPolicyOverride } from '../session/format.js';
 import { SPILL_NAME } from '../session/spill.js';
-import { assertNoLegacyTrashConfig, boundaryOf, limitsOf, workingDirectoryOf } from '../capability/limits.js';
+import { assertNoLegacyTrashConfig, boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
 import { runManagedExec, type ExecControlArguments, type ExecRunContext } from '../capability/exec.js';
 import { createFiniteCommandRegistry, type FiniteCommandOwner } from '../capability/finite-command.js';
@@ -122,6 +122,11 @@ import type { PolicyReviewRecord, PolicyReviewRequest } from '../kernel/policy.j
 import type { ReviewFacts } from '../kernel/reviewer.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
 import { runAcceptanceScope, runReceiptView, withinRunWindows } from './run-records.js';
+import { checkedToolResultSpillReference, decodeToolResultCursor, encodeToolResultCursor, readVerifiedToolResultSpillPage } from '../session/tool-result.js';
+import { checkedFileChangeFact } from '../session/file-changes.js';
+import { checkedCheckDeclaration, type CheckDeclaration } from '../session/checks.js';
+import { runEvidenceReferences } from '../session/run-evidence.js';
+import { checkEventOf, sampleCheckScope } from './checks.js';
 import { parseInitialGenerationSettings } from './session-initial-settings.js';
 import { settingsToolCatalog as buildSettingsToolCatalog } from './tool-catalog.js';
 export { providerFromConfig, hostProviderFromConfig } from './provider.js';
@@ -1114,6 +1119,12 @@ export function createHost({
   }
 
   const sessions = new Map<string, HostSessionState>();
+  const finiteCheckContexts = new Map<string, {
+    readonly session: SessionLog;
+    readonly config: CapabilityConfig;
+    readonly permissionAtStart: PermissionContext;
+    readonly currentPermission: () => PermissionContext;
+  }>();
   const storagePlans = new Map<string, { workspace: string; createdAt: number; ids: string[];
     fingerprints: Readonly<Record<string, string>>; sessionScan: SessionMediaScan; garbage: StorageGcCandidate[] }>();
   const storageScans = new Map<string, { workspace: string; createdAt: number; scan: SessionMediaScan; busy: boolean }>();
@@ -1134,6 +1145,55 @@ export function createHost({
         throw new KernelError('exec_workspace_untrusted', { detail: 'workspace trust was revoked while a finite command was running' });
       }
     },
+    onTerminal: async (terminal) => {
+      const declaration = terminal.owner.check;
+      if (declaration === undefined) return;
+      const context = finiteCheckContexts.get(terminal.executionId);
+      if (context === undefined) return;
+      try {
+        const header = await context.session.header();
+        if ((header?.formatVersion ?? 0) < 5) return;
+        const events = await context.session.read();
+        const accepted = events.find((event) => event.kind === 'execution' && event.executionId === terminal.executionId
+          && event.state === 'accepted');
+        const terminalEvent = events.findLast((event) => event.kind === 'execution' && event.executionId === terminal.executionId
+          && ['exited', 'cancelled', 'failed'].includes(String(event.state)));
+        if (accepted === undefined || terminalEvent === undefined) return;
+        const scoped = new Set(declaration.scope);
+        const knownScopedChange = events.some((event) => event.kind === 'tool' && event.seq > accepted.seq && event.seq < terminalEvent.seq
+          && Array.isArray(event.fileChanges) && event.fileChanges.some((change) => isRecord(change)
+            && typeof change.path === 'string' && scoped.has(change.path) && change.outcome !== 'unchanged'));
+        const current = context.currentPermission();
+        const canReadStart = context.permissionAtStart.capabilities.filesystemRead !== 'unavailable';
+        const canReadNow = current.capabilities.filesystemRead !== 'unavailable';
+        const samplePermission = canReadStart && canReadNow ? context.permissionAtStart : {
+          ...context.permissionAtStart,
+          capabilities: { ...context.permissionAtStart.capabilities, filesystemRead: 'unavailable' as const },
+        };
+        const scopeEnd = await sampleCheckScope(context.config, samplePermission, declaration);
+        await context.session.append(checkEventOf({
+          sessionId: terminal.owner.sessionId,
+          runId: terminal.owner.runId,
+          callId: terminal.owner.callId,
+          executionId: terminal.executionId,
+          declaration,
+          executionState: terminal.state === 'exited' || terminal.state === 'cancelled' || terminal.state === 'failed'
+            ? terminal.state : 'unknown',
+          ...(terminal.exitCode === undefined ? {} : { exitCode: terminal.exitCode }),
+          ...(terminal.errorCode === undefined ? {} : { errorCode: terminal.errorCode }),
+          ...(terminal.logs === undefined ? {} : { logs: terminal.logs }),
+          ...(terminal.logUnavailableReason === undefined ? {} : { logUnavailableReason: terminal.logUnavailableReason }),
+          scopeStart: terminal.owner.checkScopeStart ?? declaration.scope.map((path) => ({
+            path, status: 'unknown' as const, exists: null, version: null, sampledAt: new Date().toISOString(),
+            reason: 'scope_start_unavailable',
+          })),
+          scopeEnd,
+          knownScopedChange,
+        }));
+      } finally {
+        finiteCheckContexts.delete(terminal.executionId);
+      }
+    },
   });
 
   function open(id: string): HostSessionState {
@@ -1141,6 +1201,15 @@ export function createHost({
     if (state === undefined) throw new KernelError('session_not_open', { detail: id });
     if (retiringSessions.has(id)) throw new KernelError('session_closing', { detail: id });
     return state;
+  }
+
+  async function appendToolActivity(state: HostSessionState, phase: 'awaiting_approval' | 'awaiting_user', tool: string,
+    requestId: string, callId?: string): Promise<void> {
+    const context = currentKernelExecutionContext();
+    const activeCallId = callId ?? context?.callId;
+    if (context?.sessionId !== state.id || context.runId === undefined || activeCallId === undefined) return;
+    await state.session.append({ kind: 'toolActivity', ignorable: true, sessionId: state.id, runId: context.runId,
+      callId: activeCallId, tool, phase, requestId, at: new Date().toISOString() });
   }
 
   // 每次写入后都根据已保存的配置层重新计算有效提供方。
@@ -2124,6 +2193,8 @@ export function createHost({
           ...(telemetryContext.parentCallId === undefined ? {} : { parentCallId: telemetryContext.parentCallId }),
           ...(callId === undefined ? {} : { callId }), requestId });
         try {
+          // 仅在等待事件已经落盘后才向客户端发起审批，避免持久化失败时出现未记账的等待状态。
+          await appendToolActivity(state as HostSessionState, 'awaiting_approval', tool, requestId, callId);
           const answer = await Promise.race([
             connection.request(APPROVAL_METHOD, {
               ...summary,
@@ -2221,12 +2292,12 @@ export function createHost({
     let extensionHookRegistry: ExtensionHookRegistry | undefined;
     const createFiniteCommandController = (commandSessionId: string, commandSession: SessionLog, projectRoot: string) => {
       const projectIdentity = workspaceIdentity(projectRoot);
-      const ownerOf = (context: ExecRunContext): FiniteCommandOwner => {
+      const ownerOf = async (context: ExecRunContext, check?: CheckDeclaration): Promise<FiniteCommandOwner> => {
         if (context.sessionId !== commandSessionId || typeof context.runId !== 'string' || context.runId === ''
           || typeof context.callId !== 'string' || context.callId === '') {
           throw new KernelError('execution_context_unavailable');
         }
-        return {
+        const owner: FiniteCommandOwner = {
           projectIdentity,
           projectRoot,
           sessionId: commandSessionId,
@@ -2236,10 +2307,17 @@ export function createHost({
           ...(state.managedGrantId === undefined ? {} : { grantId: state.managedGrantId }),
           workspaceTrusted: context.permission.workspaceTrusted,
         };
+        if (check === undefined) return owner;
+        const declaration = checkedCheckDeclaration(check);
+        if (declaration === undefined) throw new KernelError('exec_check_declaration_invalid');
+        const header = await commandSession.header();
+        if ((header?.formatVersion ?? 0) < 5) throw new KernelError('check_session_format_unsupported');
+        return { ...owner, check: declaration,
+          checkScopeStart: await sampleCheckScope(context.config, context.permission, declaration) };
       };
       return {
-        async start(args: { command?: unknown; cwd?: string }, context: ExecRunContext, waitMs: number) {
-          const owner = ownerOf(context);
+        async start(args: { command?: unknown; cwd?: string; check?: CheckDeclaration }, context: ExecRunContext, waitMs: number) {
+          const owner = await ownerOf(context, args.check);
           const budget = state.taskBudget;
           if (budget === undefined) throw new KernelError('execution_task_budget_unavailable');
           const reservation = await finiteCommands.reserve({
@@ -2249,16 +2327,20 @@ export function createHost({
             signal: context.signal,
             startWork: () => budget.startWork(),
           });
+          if (owner.check !== undefined) finiteCheckContexts.set(reservation.executionId, {
+            session: commandSession, config: context.config, permissionAtStart: context.permission, currentPermission: () => state.permission,
+          });
           try {
             return await runManagedExec(args, context, (lease) => finiteCommands.attach(reservation, lease, context.signal, waitMs),
               { capturePagedLogs: true });
           } catch (error) {
             await finiteCommands.failReservation(reservation, error).catch(() => undefined);
+            finiteCheckContexts.delete(reservation.executionId);
             throw error;
           }
         },
         async control(args: ExecControlArguments, context: ExecRunContext) {
-          const owner = ownerOf(context);
+          const owner = await ownerOf(context);
           switch (args.action) {
             case 'status': return finiteCommands.status(owner, args.executionId);
             case 'wait': return await finiteCommands.wait(owner, args.executionId, args.waitMs ?? 30_000, context.signal);
@@ -2380,6 +2462,7 @@ export function createHost({
         const endInteraction = state.taskBudget?.startInteraction();
         updateWaitingForUser(state as HostSessionState, connection, true, 'input');
         try {
+          await appendToolActivity(state as HostSessionState, 'awaiting_user', 'ask_user', requestId);
           const outcome = await Promise.race([
             // 交互等待受整次任务累计等待预算约束。
             connection.request(QUESTION_METHOD, { requestId, sessionId: id, projectRoot: env.projectRoot, questions }).then((value) => {
@@ -2805,6 +2888,13 @@ export function createHost({
             },
             persistTerminal: async (status, summary, fields) => {
               const runId = options.acceptance!.runId;
+              const evidence = runEvidenceReferences(await session.read(), runId);
+              const evidenceOptions = {
+                ...(evidence.fileChanges.length === 0 ? {} : { fileChanges: evidence.fileChanges }),
+                ...(evidence.fileChangesTruncated === undefined ? {} : { fileChangesTruncated: true as const }),
+                ...(evidence.checks.length === 0 ? {} : { checks: evidence.checks }),
+                ...(evidence.checksTruncated === undefined ? {} : { checksTruncated: true as const }),
+              };
               const result = status === 'completed'
                 ? completedRunResult(runId, state.id, {
                   ...summary,
@@ -2812,12 +2902,13 @@ export function createHost({
                 }, {
                   ...(structuredSubmitted ? { structured } : {}),
                   validation: contract === undefined ? { status: 'not_requested' } : { status: 'valid', schemaDigest: contract.digest },
+                  ...evidenceOptions,
                 })
                 : failedRunResult(runId, state.id, typeof fields.code === 'string' ? fields.code : 'loop_failed',
                   fields.diagnostics as KernelError['diagnostics'], contract === undefined ? { status: 'not_requested' } : {
                     status: 'invalid', schemaDigest: contract.digest,
                     errors: ['The run ended before a valid structured result was submitted.'],
-                  }, summary);
+                  }, summary, evidenceOptions);
               return await publishRunResult(session.directory, workspaceIdentity(state.environment.projectRoot), state.id, runId, result);
             },
           }),
@@ -3506,6 +3597,157 @@ export function createHost({
           // 返回已持久化记录，让客户端重连后可以恢复会话内容。
           // `limit` 和 `before` 用于分页，`at` 指定一条事件；派生会话也走同一读取流程。
           return await readRecord(sessionId, message.params);
+        }
+        case 'tool.result': {
+          const state = open(sessionId);
+          const runId = requiredString(message.params.runId, 'runId');
+          const callId = requiredString(message.params.callId, 'callId');
+          const events = await state.session.read();
+          const scope = runAcceptanceScope(events, sessionId, runId);
+          if (scope === undefined || (runScopes !== undefined && !runScopes.includes(scope))) throw new KernelError('run_not_found');
+          if (grant !== undefined) assertGrantSessionScope(grant, state);
+
+          const runOwners = new Map<number, string | undefined>();
+          let currentRunId: string | undefined;
+          for (const event of events) {
+            if (event.kind === 'user') currentRunId = isRunAcceptance(event.run) ? event.run.runId : undefined;
+            runOwners.set(event.seq, currentRunId);
+          }
+          const assistantCall = events.find((event) => event.kind === 'assistant' && runOwners.get(event.seq) === runId
+            && Array.isArray(event.toolCalls) && event.toolCalls.some((call) => isRecord(call) && call.id === callId));
+          if (assistantCall === undefined) throw new KernelError('tool_call_not_found');
+          const assistantToolCall = Array.isArray(assistantCall.toolCalls)
+            ? assistantCall.toolCalls.find((call) => isRecord(call) && call.id === callId) as Record<string, unknown> | undefined
+            : undefined;
+          const results = events.filter((event) => event.kind === 'tool' && event.callId === callId
+            && event.seq > assistantCall.seq && (event.runId === runId || (event.runId === undefined && runOwners.get(event.seq) === runId)));
+          if (results.length > 1) return { sessionId, runId, callId, state: 'unknown', code: 'tool_result_duplicate' };
+          const resultEvent = results[0];
+          const activity = events.filter((event) => event.kind === 'toolActivity' && event.sessionId === sessionId
+            && event.runId === runId && event.callId === callId && event.seq > assistantCall.seq).at(-1);
+          const executionEvent = events.filter((event) => event.kind === 'execution' && event.sessionId === sessionId
+            && event.runId === runId && event.callId === callId).at(-1);
+          const executionLost = executionEvent !== undefined && ['accepted', 'started'].includes(String(executionEvent.state))
+            && state.activeRunId !== runId;
+          const callArgs = isRecord(assistantToolCall?.args) ? assistantToolCall.args : undefined;
+          const declaredCheck = checkedCheckDeclaration(executionEvent?.check
+            ?? (isRecord(callArgs?.check) ? callArgs.check : undefined));
+          const checkEvent = executionEvent === undefined ? undefined : events.findLast((event) => event.kind === 'check'
+            && event.executionId === executionEvent.executionId && event.sessionId === sessionId && event.runId === runId && event.callId === callId);
+          const check = checkEvent === undefined
+            ? declaredCheck === undefined ? undefined : {
+              status: executionEvent === undefined
+                ? state.activeRunId === runId && activity !== undefined ? 'running' : 'not_run'
+                : ['accepted', 'started'].includes(String(executionEvent.state))
+                  ? state.activeRunId === runId && state.running !== undefined ? 'running' : 'unknown'
+                  : 'unknown',
+              declaration: declaredCheck,
+            }
+            : {
+              status: 'completed',
+              declaration: declaredCheck ?? checkEvent.declaration,
+              eventSeq: checkEvent.seq,
+              commandStatus: checkEvent.commandStatus,
+              reportStatus: checkEvent.reportStatus,
+              logStatus: checkEvent.logStatus,
+              scopeStatus: checkEvent.scopeStatus,
+              ...(typeof checkEvent.errorCode === 'string' ? { errorCode: checkEvent.errorCode } : {}),
+              ...(isRecord(checkEvent.report) ? { report: checkEvent.report } : {}),
+              ...(typeof checkEvent.reportReason === 'string' ? { reportReason: checkEvent.reportReason } : {}),
+            };
+          const logTotalBytes = executionEvent !== undefined && Number.isSafeInteger(executionEvent.logTotalBytes)
+            ? Number(executionEvent.logTotalBytes) : 0;
+          const logFirstAvailableOffset = executionEvent !== undefined && Number.isSafeInteger(executionEvent.logFirstAvailableOffset)
+            ? Number(executionEvent.logFirstAvailableOffset) : 0;
+          const logsReference = executionEvent !== undefined && isRecord(executionEvent.logsRef)
+            && Number.isSafeInteger(executionEvent.logsRef.bytes) ? executionEvent.logsRef : undefined;
+          const logUnavailableReason = executionEvent !== undefined && typeof executionEvent.logUnavailableReason === 'string'
+            ? executionEvent.logUnavailableReason : undefined;
+          const execution = executionEvent === undefined ? null : {
+            executionId: executionEvent.executionId,
+            state: executionLost ? 'unknown' : executionEvent.state,
+            ...(Number.isSafeInteger(executionEvent.exitCode) ? { exitCode: executionEvent.exitCode } : {}),
+            ...(executionLost ? { errorCode: 'execution_result_unknown' }
+              : typeof executionEvent.errorCode === 'string' ? { errorCode: executionEvent.errorCode } : {}),
+            ...(executionEvent.cancelRequested === true ? { cancelRequested: true } : {}),
+            ...(executionEvent.deadlineExceeded === true ? { deadlineExceeded: true } : {}),
+            ...(executionEvent.cleanupPending === true ? { cleanupPending: true } : {}),
+            pipeBytes: logTotalBytes,
+            retainedPipeBytes: Math.max(0, logTotalBytes - logFirstAvailableOffset),
+            logFirstAvailableOffset,
+            logAvailable: logsReference !== undefined || (logTotalBytes === 0 && logUnavailableReason === undefined),
+            ...(logsReference === undefined ? {} : { logsRefBytes: logsReference.bytes }),
+            ...(logUnavailableReason === undefined ? {} : { logUnavailableReason }),
+          };
+          if (resultEvent === undefined) {
+            const live = state.activeRunId === runId && activity !== undefined;
+            const phase = live ? activity.phase : undefined;
+            return { sessionId, runId, callId, tool: assistantToolCall?.name,
+            state: phase === 'awaiting_approval' ? 'awaiting_approval' : phase === 'awaiting_user' ? 'awaiting_user'
+              : live && phase === 'started' ? 'running' : 'unknown',
+            ...(phase === undefined ? {} : { lastActivity: phase }), execution,
+            ...(check === undefined ? {} : { check }),
+            ...(!live ? { code: 'tool_result_unknown' } : {}),
+            };
+          }
+
+          const result = isRecord(resultEvent.result) ? resultEvent.result : undefined;
+          if (result === undefined) return { sessionId, runId, callId, tool: resultEvent.tool, state: 'unknown', code: 'tool_result_invalid', execution };
+          const recoveredUnknown = result.kind === undefined && result.failed === true && result.code === 'tool_outcome_unknown';
+          if (!recoveredUnknown && ((result.kind !== 'result' && result.kind !== 'refusal' && result.kind !== 'failure')
+            || typeof result.failed !== 'boolean' || (result.kind === 'result' && result.failed)
+            || (result.kind !== 'result' && !result.failed))) {
+            return { sessionId, runId, callId, tool: resultEvent.tool, state: 'unknown', eventSeq: resultEvent.seq,
+              code: 'tool_result_invalid', execution };
+          }
+          const content = typeof result.content === 'string' ? result.content : JSON.stringify(result.content ?? '');
+          const contentBytes = Buffer.from(content ?? '', 'utf8');
+          const reference = checkedToolResultSpillReference(result.spillRef);
+          const isSpilled = typeof result.spilled === 'string';
+          const recordedStorageStatus = resultEvent.storageStatus === 'inline' || resultEvent.storageStatus === 'spill'
+            || resultEvent.storageStatus === 'legacy_unverified'
+            ? resultEvent.storageStatus
+            : reference !== undefined ? 'spill' : isSpilled ? 'legacy_unverified' : 'inline';
+          const returnedValueBytes = Number.isSafeInteger(resultEvent.returnedValueBytes) && Number(resultEvent.returnedValueBytes) >= 0
+            ? Number(resultEvent.returnedValueBytes) : reference?.bytes ?? (isSpilled ? null : contentBytes.length);
+          const storedBytes = Number.isSafeInteger(resultEvent.storedBytes) && Number(resultEvent.storedBytes) >= 0
+            ? Number(resultEvent.storedBytes) : reference?.bytes ?? (isSpilled ? null : contentBytes.length);
+          const modelVisibleBytes = Number.isSafeInteger(resultEvent.modelVisibleBytes) && Number(resultEvent.modelVisibleBytes) >= 0
+            ? Number(resultEvent.modelVisibleBytes) : contentBytes.length;
+          const spillReferenceMatches = reference !== undefined && reference.name === result.spilled
+            && reference.bytes === storedBytes;
+          const storageStatus = isSpilled && !spillReferenceMatches ? 'legacy_unverified' : recordedStorageStatus;
+          let page: Record<string, unknown> | null = null;
+          let storedComplete = !isSpilled && resultEvent.storedComplete !== false;
+          if (!isSpilled || spillReferenceMatches) {
+            const digest = spillReferenceMatches
+              ? reference.sha256 : createHash('sha256').update(contentBytes).digest('hex');
+            const cursorIdentity = { sessionId, runId, callId, eventSeq: resultEvent.seq, sha256: digest };
+            const offset = message.params.cursor === undefined ? 0 : decodeToolResultCursor(message.params.cursor, cursorIdentity);
+            const limitBytes = typeof message.params.limitBytes === 'number' ? message.params.limitBytes : 4_096;
+            const bytes = spillReferenceMatches
+              ? await readVerifiedToolResultSpillPage(state.session.directory, reference, offset, limitBytes)
+              : contentBytes.subarray(offset, Math.min(contentBytes.length, offset + limitBytes));
+            const nextOffset = offset + bytes.length;
+            const completeBytes = spillReferenceMatches ? reference.bytes : contentBytes.length;
+            if (offset > completeBytes) throw new KernelError('tool_result_cursor_invalid');
+            storedComplete = spillReferenceMatches || !isSpilled;
+            const done = nextOffset >= completeBytes;
+            page = { offset, bytes: bytes.length, dataBase64: bytes.toString('base64'), done,
+              nextCursor: done ? null : encodeToolResultCursor(cursorIdentity, nextOffset),
+              integrity: spillReferenceMatches ? 'verified' : 'inline' };
+          }
+          const status = recoveredUnknown ? 'unknown' : result.code === 'tool_skipped' ? 'skipped'
+            : result.kind === 'refusal' ? 'refused' : result.kind === 'failure' ? 'failed' : 'completed';
+          const fileChanges = Array.isArray(resultEvent.fileChanges)
+            ? resultEvent.fileChanges.map(checkedFileChangeFact).filter((change): change is NonNullable<typeof change> => change !== undefined)
+            : [];
+          return { sessionId, runId, callId, tool: resultEvent.tool, state: status, eventSeq: resultEvent.seq,
+            result: { kind: recoveredUnknown ? 'unknown' : result.kind, ...(typeof result.code === 'string' ? { code: result.code } : {}),
+              ...(typeof result.reason === 'string' ? { reason: result.reason } : {}) },
+            output: { returnedValueBytes, modelVisibleBytes, storageStatus, storedBytes, storedComplete, page }, execution,
+            ...(check === undefined ? {} : { check }),
+            ...(fileChanges.length === 0 ? {} : { fileChanges }) };
         }
         case 'session.observe': {
           const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
@@ -4847,6 +5089,7 @@ export function createHost({
         }
         try { await finiteCommands.close(); }
         catch (error) { failures.push(error); }
+        finiteCheckContexts.clear();
         sessions.clear();
         pendingApprovalDetails.clear();
         await telemetry.shutdown().catch(() => {});

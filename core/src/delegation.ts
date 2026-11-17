@@ -157,6 +157,31 @@ export interface RunValidation {
   readonly errors?: readonly string[];
 }
 
+export interface RunFileChangeReference {
+  readonly eventSeq: number;
+  readonly callId: string;
+  readonly path: string;
+  readonly operation: 'create' | 'write' | 'edit' | 'delete';
+  readonly outcome: 'written' | 'unchanged' | 'unknown';
+  readonly baselineStatus: 'available' | 'unavailable' | 'unknown';
+  readonly observedStatus: 'available' | 'unavailable' | 'unknown';
+  readonly changedFromBaseline: boolean | null;
+}
+
+export interface RunCheckReference {
+  readonly eventSeq?: number;
+  readonly executionId?: string;
+  readonly callId: string;
+  readonly name: string;
+  readonly status: 'completed' | 'not_run' | 'unknown';
+  readonly commandStatus: 'met' | 'not_met' | 'unknown';
+  readonly reportStatus: 'not_requested' | 'reported_pass' | 'reported_fail' | 'zero_tests' | 'unverified';
+  readonly scopeStatus: 'sampled' | 'stale' | 'unverified';
+  readonly errorCode?: string;
+  readonly logStatus?: 'complete' | 'partial' | 'unavailable' | 'unknown';
+  readonly report?: { readonly passed: number; readonly failed: number; readonly skipped: number; readonly todo: number };
+}
+
 export interface RunResult {
   readonly runId: string;
   readonly sessionId: string;
@@ -165,6 +190,10 @@ export interface RunResult {
   readonly output: { readonly text: string | null; readonly structured?: unknown; readonly partial?: true };
   readonly validation: RunValidation;
   readonly artifacts: readonly ({ readonly kind: 'session'; readonly sessionId: string } | FileArtifact)[];
+  readonly fileChanges?: readonly RunFileChangeReference[];
+  readonly fileChangesTruncated?: true;
+  readonly checks?: readonly RunCheckReference[];
+  readonly checksTruncated?: true;
   readonly usage: { readonly iterations: number | null; readonly modelCalls: number | null };
   readonly userSeq?: number;
   readonly artifactsTruncated?: true;
@@ -198,7 +227,14 @@ export function completedRunResult(
   runId: string,
   sessionId: string,
   result: LoopResult,
-  options: { readonly structured?: unknown; readonly validation?: RunValidation } = {},
+  options: {
+    readonly structured?: unknown;
+    readonly validation?: RunValidation;
+    readonly fileChanges?: readonly RunFileChangeReference[];
+    readonly fileChangesTruncated?: true;
+    readonly checks?: readonly RunCheckReference[];
+    readonly checksTruncated?: true;
+  } = {},
 ): RunResult {
   if (options.validation?.status === 'invalid') throw new KernelError('delegation_result_invalid', { detail: 'A completed run cannot have invalid output validation.' });
   return {
@@ -212,6 +248,10 @@ export function completedRunResult(
     },
     validation: options.validation ?? { status: 'not_requested' },
     artifacts: [...artifacts(sessionId), ...(result.artifacts ?? [])],
+    ...(options.fileChanges === undefined ? {} : { fileChanges: options.fileChanges }),
+    ...(options.fileChangesTruncated === undefined ? {} : { fileChangesTruncated: true as const }),
+    ...(options.checks === undefined ? {} : { checks: options.checks }),
+    ...(options.checksTruncated === undefined ? {} : { checksTruncated: true as const }),
     usage: { iterations: result.iterations, modelCalls: result.modelCalls },
     ...(result.userSeq === undefined ? {} : { userSeq: result.userSeq }),
     ...(result.artifactsTruncated ? { artifactsTruncated: true as const } : {}),
@@ -226,6 +266,12 @@ export function failedRunResult(
   provider?: ProviderDiagnostic,
   validation: RunValidation = { status: 'not_requested' },
   summary?: RunSummary,
+  evidence: {
+    readonly fileChanges?: readonly RunFileChangeReference[];
+    readonly fileChangesTruncated?: true;
+    readonly checks?: readonly RunCheckReference[];
+    readonly checksTruncated?: true;
+  } = {},
 ): RunResult {
   const stopReason = stopReasonForCode(code);
   return {
@@ -236,6 +282,10 @@ export function failedRunResult(
     output: summary !== undefined && summary.text !== '' ? { text: summary.text, partial: true } : { text: null },
     validation,
     artifacts: [...artifacts(sessionId), ...(summary?.artifacts ?? [])],
+    ...(evidence.fileChanges === undefined ? {} : { fileChanges: evidence.fileChanges }),
+    ...(evidence.fileChangesTruncated === undefined ? {} : { fileChangesTruncated: true as const }),
+    ...(evidence.checks === undefined ? {} : { checks: evidence.checks }),
+    ...(evidence.checksTruncated === undefined ? {} : { checksTruncated: true as const }),
     usage: { iterations: summary?.iterations ?? null, modelCalls: summary?.modelCalls ?? null },
     ...(summary?.userSeq === undefined ? {} : { userSeq: summary.userSeq }),
     ...(summary?.artifactsTruncated ? { artifactsTruncated: true as const } : {}),

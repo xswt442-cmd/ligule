@@ -40,7 +40,7 @@ test('complete results are read through the Host without changing the record or 
     const spilled = objects.find((event) => event.kind === 'tool')!.result.spilled;
     objects.find((event) => event.kind === 'tool')!.result.spilled = '../notes.md';
     await writeFile(recordPath, objects.map((event) => JSON.stringify(event)).join('\n') + '\n');
-    await assert.rejects(client.request('session.read', { sessionId, fullResults: true }), (error) => hasCode(error, 'session_spill_reference_invalid'));
+    await assert.rejects(client.request('session.read', { sessionId, fullResults: true }), (error) => hasCode(error, 'session_tool_result_metadata_invalid'));
 
     objects.find((event) => event.kind === 'tool')!.result.spilled = spilled;
     await writeFile(recordPath, objects.map((event) => JSON.stringify(event)).join('\n') + '\n');
