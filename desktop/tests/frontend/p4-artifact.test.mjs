@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import test from 'node:test';
-import { mkdtemp, mkdir, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
@@ -79,7 +79,7 @@ test('Desktop artifact card uses the real Host for preview and status transition
       result: { content: { artifacts: [stored.artifact] } } });
     await log.close();
   }
-  host = serveHost({ ...pair.host, config, policy: createDecisionChain({ mode: 'auto' }), provider: providerFromConfig(config) });
+  host = serveHost({ ...pair.host, config, policy: createDecisionChain({ mode: 'auto' }), provider: providerFromConfig(config), permissionControl: true });
   const client = createConnection(pair.client);
 
   const entry = `import { createRoot } from 'react-dom/client';
@@ -124,7 +124,8 @@ window.showArtifact(0);`;
   const items = [];
   for (let index = 0; index < files.length; index += 1) {
     const listed = await client.request('artifact.list', { projectRoot, sessionId: sessions[index] });
-    assert.equal(listed.items.length, 1);
+    const record = await readFile(join(sessionDirectory, `${sessions[index]}.jsonl`), 'utf8');
+    assert.equal(listed.items.length, 1, JSON.stringify({ listed, record }));
     items.push({ sessionId: sessions[index], file: listed.items[0].artifact });
   }
   await page.exposeBinding('fixtureData', () => ({ projectRoot, items }));

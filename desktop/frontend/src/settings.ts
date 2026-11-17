@@ -5,6 +5,7 @@ import type { Client } from './protocol';
 import type { Language } from './locale';
 import type { ModelSelection } from './model-catalog';
 import { defaultNotifications, notificationsFrom, type NotificationPreferences } from './notifications.ts';
+import { DEFAULT_WORKBENCH_STATE, workbenchStateFrom, type WorkbenchState } from './workbench.ts';
 
 const SETTINGS_RPC_TIMEOUT_MS = 60_000;
 // The first Host-backed settings read can include filesystem-cold startup; keep writes on the shorter request budget.
@@ -38,6 +39,8 @@ export type Settings = {
   // 保存当前窗口额外关注的项目目录；会话配置和权限仍由 Host 根据所属项目决定。
   projects: string[];
   hiddenProjects: string[];
+  // Workspace resource tabs and dimensions are preferences, not Session facts.
+  workbench: WorkbenchState;
 };
 
 const KEY = 'ligule.ui';
@@ -63,6 +66,7 @@ export const defaultSettings: Settings = {
   keys: {},
   projects: [],
   hiddenProjects: [],
+  workbench: DEFAULT_WORKBENCH_STATE,
 };
 
 const oneOf = <T extends string>(value: unknown, allowed: T[], fallback: T): T =>
@@ -139,6 +143,7 @@ export function settingsFrom(raw: unknown): Settings {
     keys: stringMap(value.keys),
     projects: rootList(value.projects),
     hiddenProjects: rootList(value.hiddenProjects),
+    workbench: workbenchStateFrom(value.workbench),
   };
 }
 
@@ -174,6 +179,7 @@ type ClientSettingsState = {
   version: string;
   writable: boolean;
   tail: Promise<void>;
+  settings?: Settings;
   loading?: Promise<Settings>;
 };
 
@@ -206,9 +212,15 @@ function cachedLegacySettings(): Settings | undefined {
   }
 }
 
-function writeSettings(client: Client, state: ClientSettingsState, settings: Settings, version?: string): Promise<void> {
+type SettingsUpdate = (current: Settings) => Settings;
+
+function writeSettings(client: Client, state: ClientSettingsState, update: Settings | SettingsUpdate, version?: string): Promise<void> {
   const pending = state.tail.then(async () => {
     if (!state.writable) throw Object.assign(new Error('prefs_reload_required'), { code: 'prefs_reload_required' });
+    const current = state.settings ?? readSettings();
+    const settings = settingsFrom(typeof update === 'function' ? update(current) : update);
+    state.settings = settings;
+    cacheSettings(settings);
     const result = await client.call('prefs.write', {
       json: JSON.stringify(settings),
       version: version ?? state.version,
@@ -249,6 +261,7 @@ export function loadSettings(client: Client): Promise<Settings> {
       state.version = result.version;
       state.writable = true;
       const settings = settingsFrom(result.settings);
+      state.settings = settings;
       if (state.version !== '') {
         cacheSettings(settings);
         return settings;
@@ -256,6 +269,7 @@ export function loadSettings(client: Client): Promise<Settings> {
 
       const legacy = cachedLegacySettings();
       if (legacy !== undefined) {
+        state.settings = legacy;
         await writeSettings(client, state, legacy, '');
         cacheSettings(legacy);
         return legacy;
@@ -283,6 +297,21 @@ export async function saveSettings(client: Client, settings: Settings): Promise<
     throw Object.assign(new Error('prefs_reload_required'), { code: 'prefs_reload_required' });
   }
   await writeSettings(client, state, settings);
+}
+
+/** Apply one preference change after earlier writes, merging against their latest saved state. */
+export async function updateSettings(client: Client, update: SettingsUpdate): Promise<Settings> {
+  const state = clientSettings.get(client);
+  if (state === undefined || !state.writable) {
+    throw Object.assign(new Error('prefs_reload_required'), { code: 'prefs_reload_required' });
+  }
+  await writeSettings(client, state, update);
+  return state.settings ?? readSettings();
+}
+
+/** Merge a workbench change into the serialized Host preference writer. */
+export async function saveWorkbenchSettings(client: Client, workbench: WorkbenchState): Promise<void> {
+  await updateSettings(client, current => ({ ...current, workbench: workbenchStateFrom(workbench) }));
 }
 
 // Host 重连后将暂停队列按顺序追加到草稿，保留原草稿在前，不自动发送。

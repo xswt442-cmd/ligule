@@ -38,6 +38,7 @@ test('background steering and new conversations preserve session-owned drafts', 
   const providerGate = new Promise((resolve) => { releaseProvider = resolve; });
   const providerStarted = new Promise((resolve) => { reportProviderStarted = resolve; });
   let providerRequests = 0;
+  const preferenceWrites = [];
   await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
     const second = await client.request('session.create', { projectRoot: projectDirectory, workspaceOrigin: 'explicit' });
     await client.request('workspace.trust', {
@@ -75,6 +76,7 @@ test('background steering and new conversations preserve session-owned drafts', 
       }
       if (method === 'prefs.write') {
         const saved = JSON.parse(params.json);
+        preferenceWrites.push(saved.drafts ?? {});
         const drafts = saved.drafts?.[projectDirectory] ?? {};
         if (drafts[second.sessionId] === 'draft from B' && !sawBackgroundDraft) {
           sawBackgroundDraft = true;
@@ -154,6 +156,76 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
         return field instanceof HTMLTextAreaElement && !field.readOnly;
       });
 
+      await page.getByRole('button', { name: 'Workbench' }).click();
+      await page.getByRole('button', { name: 'Subtasks', exact: true }).click();
+      await page.getByRole('button', { name: 'Help', exact: true }).click();
+      await page.getByRole('menuitem', { name: 'Diagnostics', exact: true }).click();
+      const subtasksTab = page.getByRole('tab', { name: 'Subtasks' });
+      const diagnosticsTab = page.getByRole('tab', { name: 'Diagnostics' });
+      await diagnosticsTab.waitFor();
+      assert.equal(await diagnosticsTab.getAttribute('aria-selected'), 'true');
+      await subtasksTab.focus();
+      await page.keyboard.press('ArrowRight');
+      assert.equal(await diagnosticsTab.getAttribute('aria-selected'), 'true');
+      await page.keyboard.press('ArrowLeft');
+      assert.equal(await subtasksTab.getAttribute('aria-selected'), 'true');
+      await page.keyboard.press('ArrowRight');
+      assert.equal(await diagnosticsTab.getAttribute('aria-selected'), 'true');
+      await page.getByRole('button', { name: 'Command workspace' }).click();
+      await page.getByRole('region', { name: 'Command workspace' }).waitFor();
+      const welcomeBounds = await page.getByRole('heading', { name: 'Start with an idea' }).boundingBox();
+      const composerBounds = await page.locator('.composer').boundingBox();
+      assert.ok(welcomeBounds !== null && composerBounds !== null && welcomeBounds.y + welcomeBounds.height <= composerBounds.y,
+        JSON.stringify({ welcomeBounds, composerBounds }));
+      if (process.env.LIGULE_TEST_SCREENSHOT_PATH !== undefined) {
+        await page.screenshot({ path: process.env.LIGULE_TEST_SCREENSHOT_PATH, fullPage: true });
+      }
+      const dockBefore = await page.locator('.workbench-dock').boundingBox();
+      const dockHandle = await page.getByRole('separator', { name: 'Workbench width' }).boundingBox();
+      assert.ok(dockBefore !== null && dockHandle !== null);
+      await page.mouse.move(dockHandle.x + dockHandle.width / 2, dockHandle.y + 20);
+      await page.mouse.down();
+      await page.mouse.move(dockHandle.x - 50, dockHandle.y + 20);
+      await page.mouse.up();
+      const dockAfter = await page.locator('.workbench-dock').boundingBox();
+      assert.ok(dockAfter !== null && dockAfter.width > dockBefore.width + 20, JSON.stringify({ dockBefore, dockAfter }));
+
+      const commandBefore = await page.locator('.bottom-workbench').boundingBox();
+      const commandHandle = await page.getByRole('separator', { name: 'Command workspace height' }).boundingBox();
+      assert.ok(commandBefore !== null && commandHandle !== null);
+      await page.mouse.move(commandHandle.x + 20, commandHandle.y + commandHandle.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(commandHandle.x + 20, commandHandle.y - 40);
+      await page.mouse.up();
+      const commandAfter = await page.locator('.bottom-workbench').boundingBox();
+      assert.ok(commandAfter !== null && commandAfter.height > commandBefore.height + 20,
+        JSON.stringify({ commandBefore, commandAfter }));
+      await page.getByRole('button', { name: 'Hide command workspace' }).click();
+      await page.getByRole('button', { name: 'Hide workbench' }).waitFor();
+      await subtasksTab.click();
+      assert.equal(await subtasksTab.getAttribute('aria-selected'), 'true');
+      await page.getByRole('button', { name: 'Hide workbench' }).click();
+      await page.getByRole('button', { name: 'Workbench' }).click();
+      assert.equal(await subtasksTab.getAttribute('aria-selected'), 'true');
+      assert.equal(await diagnosticsTab.getAttribute('aria-selected'), 'false');
+      await diagnosticsTab.click();
+      await page.getByRole('button', { name: 'Close Diagnostics' }).click();
+      await page.getByRole('button', { name: 'Hide workbench' }).click();
+      await waitFor(async () => {
+        const saved = await client.request('prefs.read', {});
+        const tabs = saved.settings.workbench?.tabs ?? [];
+        return tabs.length === 1 && tabs[0].title === 'Subtasks'
+          && tabs[0].resource.sessionId === sessionId && saved.settings.workbench.rightOpen === false
+          && saved.settings.workbench.rightWidth > 440 && saved.settings.workbench.bottomHeight > 240
+          && saved.settings.workbench.bottomOpen === false;
+      }, { within: 5_000 });
+      await page.setViewportSize({ width: 700, height: 720 });
+      await page.getByRole('button', { name: 'Workbench' }).click();
+      const narrowDock = await page.locator('.workbench-dock').boundingBox();
+      assert.ok(narrowDock !== null && narrowDock.width > 0 && narrowDock.width <= 700, JSON.stringify(narrowDock));
+      await page.getByRole('button', { name: 'Hide workbench' }).click();
+      await page.setViewportSize({ width: 1280, height: 720 });
+
       await input.fill('task in A');
       await page.getByRole('button', { name: 'Send' }).click();
       await within(providerStarted, 'initial provider request');
@@ -173,7 +245,8 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
       await within(backgroundDraftSaved, 'background draft persistence');
 
       releaseSteeringReply();
-      await within(sentDraftCleared, 'sent draft persistence');
+      try { await within(sentDraftCleared, 'sent draft persistence'); }
+      catch (error) { throw new Error(`${error instanceof Error ? error.message : String(error)}; writes=${JSON.stringify(preferenceWrites)}`); }
       assert.equal(await input.inputValue(), 'draft from B', 'the response for A does not change B');
       await page.getByRole('button', { name: 'SESSION_A' }).click();
       await page.waitForFunction(() => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { DropdownMenu } from 'radix-ui';
 import { type FlatIndexLocationWithAlign, type VirtuosoHandle } from 'react-virtuoso';
 import { code, createClient, type Client, type Transport } from './protocol';
@@ -7,6 +7,7 @@ import { QuestionCard, type QuestionAsk, type QuestionDrafts } from './component
 import { Icon } from './components/Icon';
 import { SettingsDialog, type SettingsSectionId } from './components/Settings';
 import { BranchPanel } from './components/BranchPanel';
+import { WorkbenchDock } from './components/WorkbenchDock';
 import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
 import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
@@ -33,7 +34,8 @@ import { thinkingRequest } from './thinking-request';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { appendProjectedRecords, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import { taskSummaryLabelOf, taskSummaryOf, type Status } from './status';
-import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, type Settings } from './settings';
+import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, saveWorkbenchSettings, updateSettings, type Settings } from './settings';
+import { closeWorkbenchTab, openWorkbenchResource, selectWorkbenchTab, workbenchStateFrom, type WorkbenchResource } from './workbench';
 import { LocaleProvider, localeOf } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
 import { SessionStreamBuffer } from './session-stream';
@@ -251,7 +253,6 @@ export function App({ transport }: { transport: Transport }) {
   // Host 重连期间暂停发送队列，也不触发轮次结束后的自动发送。
   const reconnecting = useRef(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [panel, setPanel] = useState<Panel<PanelProps> | null>(null);
   // 右侧面板存在未保存编辑或进行中的写入时，关闭或切换前先确认。
   const [dockGate, setDockGate] = useState<EditGate>({});
   const [dockHold, setDockHold] = useState<{ reasons: string[]; go: () => void } | null>(null);
@@ -262,6 +263,12 @@ export function App({ transport }: { transport: Transport }) {
     else setDockHold({ reasons, go });
   }, [dockGate]);
   const [settings, setSettings] = useState(readSettings);
+  const workbenchRef = useRef(settings.workbench);
+  const workbenchEditRevision = useRef(0);
+  const [workbenchError, setWorkbenchError] = useState<string | null>(null);
+  const activeWorkbenchTab = settings.workbench.tabs.find(tab => tab.key === settings.workbench.activeKey) ?? null;
+  const activePanelId = activeWorkbenchTab?.resource.kind === 'panel' ? activeWorkbenchTab.resource.panelId : null;
+  const panel = activePanelId === null ? null : menuPanels.find(item => item.id === activePanelId) ?? null;
   const language = localeOf(settings.language);
   const t = useCallback((chinese: string, english: string) => language === 'zh' ? chinese : english, [language]);
   const progress = status?.progress ?? null;
@@ -437,6 +444,114 @@ export function App({ transport }: { transport: Transport }) {
   const [prefsFailure, setPrefsFailure] = useState<string | null>(null);
   const [prefsDetails, setPrefsDetails] = useState('');
   const [prefsRevision, setPrefsRevision] = useState(0);
+  const applyWorkbenchState = useCallback((value: ReturnType<typeof workbenchStateFrom>) => {
+    const next = workbenchStateFrom(value);
+    workbenchRef.current = next;
+    const revision = workbenchEditRevision.current + 1;
+    workbenchEditRevision.current = revision;
+    setSettings(current => ({ ...current, workbench: next }));
+    void Promise.resolve(prefsSettled.current).then(() => saveWorkbenchSettings(client, next)).then(() => {
+      if (workbenchEditRevision.current === revision) workbenchEditRevision.current = 0;
+    }).catch(error => {
+      setPrefsFailure(code(error));
+      setPrefsDetails(error instanceof Error ? error.message : String(error));
+    });
+  }, [client]);
+  const openPanel = useCallback((item: Panel<PanelProps>) => {
+    const panelIds = ['panel.diagnostics', 'panel.branch', 'panel.export', 'panel.help'] as const;
+    const panelId = panelIds.find(id => id === item.id);
+    if (panelId === undefined) return;
+    leaveDock(() => {
+      const resource: WorkbenchResource = panelId === 'panel.help'
+        ? { kind: 'panel', panelId }
+        : { kind: 'panel', panelId,
+          ...(projectRoot === '' ? {} : { projectRoot }),
+          ...(sessionId === null ? {} : { sessionId }) };
+      try {
+        applyWorkbenchState(openWorkbenchResource(workbenchRef.current, resource, panelTitle(item)));
+        setWorkbenchError(null);
+      } catch (error) {
+        setWorkbenchError(code(error));
+      }
+    });
+  }, [applyWorkbenchState, leaveDock, panelTitle, projectRoot, sessionId]);
+  const selectWorkbench = useCallback((key: string) => {
+    leaveDock(() => applyWorkbenchState(selectWorkbenchTab(workbenchRef.current, key)));
+  }, [applyWorkbenchState, leaveDock]);
+  const closeWorkbench = useCallback((key: string) => {
+    leaveDock(() => applyWorkbenchState(closeWorkbenchTab(workbenchRef.current, key)));
+  }, [applyWorkbenchState, leaveDock]);
+  const hideWorkbench = useCallback(() => {
+    leaveDock(() => applyWorkbenchState({ ...workbenchRef.current, rightOpen: false }));
+  }, [applyWorkbenchState, leaveDock]);
+  const toggleWorkbench = useCallback(() => {
+    if (workbenchRef.current.rightOpen) hideWorkbench();
+    else applyWorkbenchState({ ...workbenchRef.current, rightOpen: true });
+  }, [applyWorkbenchState, hideWorkbench]);
+  const toggleCommandArea = useCallback(() => {
+    applyWorkbenchState({ ...workbenchRef.current, bottomOpen: !workbenchRef.current.bottomOpen });
+  }, [applyWorkbenchState]);
+  const hideCommandArea = useCallback(() => {
+    applyWorkbenchState({ ...workbenchRef.current, bottomOpen: false });
+  }, [applyWorkbenchState]);
+  const startDockResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const startX = event.clientX;
+    const startWidth = settings.workbench.rightWidth;
+    let resizedWidth = startWidth;
+    const target = event.currentTarget;
+    const dock = target.closest<HTMLElement>('.workbench-dock');
+    event.preventDefault();
+    try { target.setPointerCapture(event.pointerId); } catch { /* 全局监听仍可完成拖动 */ }
+    const move = (moveEvent: PointerEvent) => {
+      const delta = settings.dock === 'left' ? moveEvent.clientX - startX : startX - moveEvent.clientX;
+      resizedWidth = Math.min(900, Math.max(320, startWidth + delta));
+      dock?.setAttribute('data-resizing', 'true');
+      if (dock !== null) {
+        dock.style.flexBasis = `min(${resizedWidth}px, 100vw)`;
+        dock.style.inlineSize = `min(${resizedWidth}px, 100vw)`;
+      }
+    };
+    const stop = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      dock?.removeAttribute('data-resizing');
+      try { target.releasePointerCapture(event.pointerId); } catch { /* 指针已经松开 */ }
+      applyWorkbenchState({ ...workbenchRef.current, rightWidth: Math.round(resizedWidth) });
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+  }, [applyWorkbenchState, settings.dock, settings.workbench.rightWidth]);
+  const startBottomResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const startY = event.clientY;
+    const startHeight = settings.workbench.bottomHeight;
+    const target = event.currentTarget;
+    const panel = target.closest<HTMLElement>('.bottom-workbench');
+    event.preventDefault();
+    try { target.setPointerCapture(event.pointerId); } catch { /* 全局监听仍可完成拖动 */ }
+    const move = (moveEvent: PointerEvent) => {
+      const maximum = Math.max(160, Math.min(680, window.innerHeight - 260));
+      const height = `${Math.min(maximum, Math.max(160, startHeight + startY - moveEvent.clientY))}px`;
+      if (panel !== null) {
+        panel.setAttribute('data-resizing', 'true');
+        panel.style.flexBasis = height;
+        panel.style.height = height;
+      }
+    };
+    const stop = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      panel?.removeAttribute('data-resizing');
+      try { target.releasePointerCapture(event.pointerId); } catch { /* 指针已经松开 */ }
+      const raw = Number.parseFloat(panel?.style.height ?? '');
+      if (Number.isFinite(raw)) applyWorkbenchState({ ...workbenchRef.current, bottomHeight: Math.round(raw) });
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+  }, [applyWorkbenchState, settings.workbench.bottomHeight]);
   useEffect(() => {
     let live = true;
     setSettingsReady(false);
@@ -445,7 +560,9 @@ export function App({ transport }: { transport: Transport }) {
     const settled = loadSettings(client).then(
       (adopted) => {
         if (!live) return;
-        setSettings(adopted);
+        const workbench = workbenchEditRevision.current > 0 ? workbenchRef.current : adopted.workbench;
+        workbenchRef.current = workbench;
+        setSettings({ ...adopted, workbench });
         saveWarned.current = false;
         setSettingsReady(true);
       },
@@ -546,7 +663,6 @@ export function App({ transport }: { transport: Transport }) {
   // 切换会话、打开设置、查看历史或断连时保留输入。保存失败时明确提示用户。
   const persistInputs = useCallback(async () => {
     if (!settingsReady) throw Object.assign(new Error('prefs_reload_required'), { code: 'prefs_reload_required' });
-    const stored = readSettings();
     const draftId = sessionId ?? '$new';
     const remember = (root: string, id: string, value: { draft?: string; items?: string[] }) => {
       const key = JSON.stringify([root, id]);
@@ -570,13 +686,15 @@ export function App({ transport }: { transport: Transport }) {
       else next[root] = row;
       return next;
     };
-    let drafts = stored.drafts;
-    let queued = stored.queued;
-    for (const input of pending.values()) {
-      if (input.draft !== undefined) drafts = put(drafts, input.root, input.id, input.draft);
-      if (input.items !== undefined) queued = put(queued, input.root, input.id, input.items);
-    }
-    await saveSettings(client, { ...settings, drafts, queued });
+    await updateSettings(client, stored => {
+      let drafts = stored.drafts;
+      let queued = stored.queued;
+      for (const input of pending.values()) {
+        if (input.draft !== undefined) drafts = put(drafts, input.root, input.id, input.draft);
+        if (input.items !== undefined) queued = put(queued, input.root, input.id, input.items);
+      }
+      return { ...stored, ...settings, drafts, queued };
+    });
     for (const [key, input] of pending) {
       if (unsavedInputs.current.get(key) === input) unsavedInputs.current.delete(key);
     }
@@ -930,11 +1048,11 @@ export function App({ transport }: { transport: Transport }) {
     const target = notificationDestination;
     setNotificationDestination(null);
     leaveDock(() => {
-      setPanel(null);
+      applyWorkbenchState({ ...workbenchRef.current, rightOpen: false });
       setPaletteOpen(false);
       void openSession(target.sessionId, undefined, false, target.projectRoot);
     });
-  }, [leaveDock, notificationDestination, openSession, settingsOpen]);
+  }, [applyWorkbenchState, leaveDock, notificationDestination, openSession, settingsOpen]);
 
   useEffect(() => {
     const waiting = asks.length + queries.length;
@@ -1057,7 +1175,9 @@ export function App({ transport }: { transport: Transport }) {
       setPrefsDetails('');
       const refreshedPreferences = loadSettings(client).then(
         (adopted) => {
-          setSettings(adopted);
+          const workbench = workbenchEditRevision.current > 0 ? workbenchRef.current : adopted.workbench;
+          workbenchRef.current = workbench;
+          setSettings({ ...adopted, workbench });
           saveWarned.current = false;
           setSettingsReady(true);
         },
@@ -1234,9 +1354,10 @@ export function App({ transport }: { transport: Transport }) {
       const atRoot = { ...(drafts[projectRoot] ?? {}) };
       delete atRoot.$new;
       drafts[projectRoot] = atRoot;
-      const next = { ...cached, drafts, lastSession: { id: created.sessionId, projectRoot } };
+      const next = { ...cached, workbench: workbenchRef.current, drafts, lastSession: { id: created.sessionId, projectRoot } };
       await saveSettings(client, next);
       unsavedInputs.current.delete(JSON.stringify([projectRoot, '$new']));
+      workbenchRef.current = next.workbench;
       setSettings(next);
       setSessionsRevision((current) => current + 1);
       void submit(text, created.sessionId);
@@ -1567,12 +1688,12 @@ export function App({ transport }: { transport: Transport }) {
       // Radix 负责关闭命令面板、会话菜单、设置和其他浮层，并标记 Esc 已处理。
       // React 状态可能在按键事件到达 document 前更新，因此根据事件是否已处理判断是否继续关闭其他层。
       if (event.defaultPrevented) return;
-      if (panel !== null) leaveDock(() => setPanel(null));
+      if (settings.workbench.rightOpen) hideWorkbench();
       else if (running) void cancel();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [cancel, collapsed, copyLastAnswer, leaveDock, panel, patch, running]);
+  }, [cancel, collapsed, copyLastAnswer, hideWorkbench, patch, running, settings.workbench.rightOpen]);
 
   const streamContext = useMemo(() => ({ hasMore: page?.hasMore === true, loading: olderLoading, showEarlier }), [olderLoading, page?.hasMore, showEarlier]);
   // 按展示设置过滤转录行；虚拟列表不能保留不渲染的行，否则高度测量会得到零。
@@ -1691,6 +1812,29 @@ export function App({ transport }: { transport: Transport }) {
     settings,
     patch,
   };
+  const activePanelResource = activeWorkbenchTab?.resource.kind === 'panel' ? activeWorkbenchTab.resource : undefined;
+  const inactivePanelScope = activePanelResource !== undefined && activePanelResource.panelId !== 'panel.help'
+    && activePanelResource.sessionId !== sessionId;
+  const dockPanelProps: PanelProps = activePanelResource === undefined || activePanelResource.panelId === 'panel.help'
+    ? panelProps
+    : {
+      ...panelProps,
+      sessionId: activePanelResource.sessionId ?? null,
+      projectRoot: activePanelResource.projectRoot ?? panelProps.projectRoot,
+      ...(inactivePanelScope ? {
+        status: null,
+        running: false,
+        othersRunning: 0,
+        runningIds: [],
+        unread: [],
+        seconds: 0,
+        waiting: 0,
+        counts: { sent: 0, received: 0 },
+        link: null,
+        logs: [],
+        onReconnect: () => {},
+      } : {}),
+    };
 
   const currentQueries = queries.filter((query) => query.sessionId === sessionId);
   const currentAsks = asks.filter((ask) => ask.sessionId === sessionId);
@@ -1768,7 +1912,7 @@ export function App({ transport }: { transport: Transport }) {
           </DropdownMenu.Trigger>
           <DropdownMenu.Portal>
             <DropdownMenu.Content className="menu" side="top" align="start" sideOffset={4} onEscapeKeyDown={keepEscape}>
-              {registry.list('rail.menu').filter((item) => ['panel.help', 'panel.diagnostics'].includes(item.id)).map((item) => <DropdownMenu.Item key={item.id} onSelect={() => leaveDock(() => setPanel(item))}>
+              {registry.list('rail.menu').filter((item) => ['panel.help', 'panel.diagnostics'].includes(item.id)).map((item) => <DropdownMenu.Item key={item.id} onSelect={() => openPanel(item)}>
                 {item.id === 'panel.help' ? t('使用手册', 'User guide') : t('诊断', 'Diagnostics')}
               </DropdownMenu.Item>)}
               <DropdownMenu.Item onSelect={() => { setSettingsSection('keys'); setSettingsOpen(true); }}>{t('快捷键', 'Keyboard shortcuts')}</DropdownMenu.Item>
@@ -1796,12 +1940,16 @@ export function App({ transport }: { transport: Transport }) {
         {sessionId !== null && <BrowserControl key={`${sessionId}:${observingExternalSession ? 'read-only' : 'managed'}`} client={client} sessionId={sessionId} browser={status?.browser}
         readOnly={observingExternalSession} onStatus={(next) => { if (next.sessionId === renderedSessionRequest.scope
           && requestIsCurrent(renderedSessionRequest, active.current, openRequest.current)) { setStatus(next); setTaskSnapshotAt(Date.now()); } }} />}
+        <button className="icon-button" type="button" aria-label={t('工作台', 'Workbench')} aria-expanded={settings.workbench.rightOpen}
+          title={t('工作台', 'Workbench')} onClick={toggleWorkbench}><Icon name="folderOpen" size={17} /></button>
+        <button className="icon-button" type="button" aria-label={t('命令工作区', 'Command workspace')} aria-expanded={settings.workbench.bottomOpen}
+          title={t('命令工作区', 'Command workspace')} onClick={toggleCommandArea}><Icon name="terminal" size={17} /></button>
         <button className="icon-button" type="button" title={`${t('命令面板', 'Command palette')} (${formatKeys(CURRENT['palette'])})`} aria-label={t('命令面板', 'Command palette')} onClick={() => setPaletteOpen(true)}><Icon name="search" size={17} /></button>
         {sessionId !== null && <SessionActions key={sessionId} client={client} sessionId={sessionId} name={sessionLabel.name} archived={sessionLabel.archived}
           readOnly={observingExternalSession}
           onLabel={(label) => { setSessionLabel(label); setSessionsRevision((value) => value + 1); }}
-          onBranch={() => void branchFrom()} onExport={() => setPanel(menuPanels.find((item) => item.id === 'panel.export') ?? null)}
-          onTasks={() => setPanel(menuPanels.find((item) => item.id === 'panel.branch') ?? null)} onRefresh={() => {
+          onBranch={() => void branchFrom()} onExport={() => openPanel(menuPanels.find((item) => item.id === 'panel.export')!)}
+          onTasks={() => openPanel(menuPanels.find((item) => item.id === 'panel.branch')!)} onRefresh={() => {
             if (observingExternalSession) void openSession(sessionId, undefined, false, projectRoot);
             else void readBack();
           }} onCompact={() => void compact()} />}
@@ -1954,15 +2102,42 @@ export function App({ transport }: { transport: Transport }) {
         onSend={() => void send()}
         onSteer={() => void steer()}
       />}
+      {settings.workbench.bottomOpen && <section className="bottom-workbench" aria-label={t('命令工作区', 'Command workspace')}
+        style={{ height: `${settings.workbench.bottomHeight}px`, flexBasis: `${settings.workbench.bottomHeight}px` }}>
+        <div className="bottom-workbench-resize" role="separator" aria-orientation="horizontal"
+          aria-label={t('命令工作区高度', 'Command workspace height')} onPointerDown={startBottomResize} />
+        <header className="bottom-workbench-head">
+          <strong>{t('命令工作区', 'Command workspace')}</strong>
+          <span>{t('当前会话的命令记录', 'Commands for this conversation')}</span>
+          <button type="button" className="icon-button" aria-label={t('隐藏命令工作区', 'Hide command workspace')}
+            onClick={hideCommandArea}><Icon name="close" size={14} /></button>
+        </header>
+        <div className="bottom-workbench-body">
+          <p>{t('选择一条命令后，这里会显示它的输出与清理状态。', 'Select a command to view its output and cleanup state here.')}</p>
+        </div>
+      </section>}
     </main>
 
-    {panel !== null && <aside className="dock">
-      <div className="dock-head">
-        <strong className="dock-title">{panelTitle(panel)}{panel.pending === true && <span className="menu-tag">{t('待实现', 'Coming soon')}</span>}</strong>
-        <button type="button" className="icon-button" aria-label={t('关闭面板', 'Close panel')} onClick={() => leaveDock(() => setPanel(null))}><Icon name="close" size={15} /></button>
-      </div>
-      <div className="dock-body">{panel.view(panelProps)}</div>
-    </aside>}
+    {settings.workbench.rightOpen && <WorkbenchDock state={settings.workbench}
+      activeTitle={activeWorkbenchTab?.title ?? null}
+      error={workbenchError}
+      onSelect={selectWorkbench}
+      onCloseTab={closeWorkbench}
+      onHide={hideWorkbench}
+      onResizeStart={startDockResize}>
+      {panel !== null
+        ? panel.view(dockPanelProps)
+        : activeWorkbenchTab === null
+          ? <section className="workbench-home">
+            <h2>{t('工作台', 'Workbench')}</h2>
+            <p>{t('打开子任务、交付或诊断；它们会保留在各自的标签中。', 'Open subtasks, deliveries, or diagnostics; each stays in its own tab.')}</p>
+            <div className="workbench-home-actions">
+              {menuPanels.filter(item => item.id !== 'panel.help').map(item => <button type="button" key={item.id}
+                onClick={() => openPanel(item)}>{panelTitle(item)}</button>)}
+            </div>
+          </section>
+          : <p className="stub" role="status">{t('这个资源暂时无法显示。', 'This resource is not available to display.')}</p>}
+    </WorkbenchDock>}
 
     {/* 面板收起后把焦点交回输入坞：面板自己那一个过滤框带着 `autoFocus`，它收掉之后没人可交，落在页面上就得从页头重新 Tab 过去。 */}
     {paletteOpen && <Palette commands={commands} onClose={() => { setPaletteOpen(false); composerRef.current?.focus(); }} />}
