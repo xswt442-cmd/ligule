@@ -1,0 +1,9 @@
+schemaVersion = 1
+description = "Research approved project material and report supported facts with evidence."
+instruction = """Read only the material made available through the current Session. Separate observed facts, interpretation, and unresolved questions. Cite files or Session records you actually read. Do not claim online research when network access is unavailable."""
+permissionProfile = "read-only"
+network = "disabled"
+
+[mode]
+tools = ["read", "find", "search"]
+prompt = []

@@ -40,7 +40,7 @@ try {
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
 const mcpServerFixture = fileURLToPath(new URL('../../tests/fixtures/mcp-minimal.mjs', import.meta.url));
-const { foldText, editDraft, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, subrunReferenceOf, executionReferenceOf, parseExecCommand, parseSubrunCommand, parseToolCommand, requestDiagnosticLines, detailTitle, routeInput, clearCancelledLocalQuestion, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
+const { foldText, editDraft, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, subrunReferenceOf, executionReferenceOf, parseExecCommand, parseSubrunCommand, parsePresetCommand, parseToolCommand, requestDiagnosticLines, detailTitle, routeInput, clearCancelledLocalQuestion, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
 // 界面记录只带界面关心的字段；测试直接写这种不带 `seq` 的投影输入。
 const projectRecord = rows.projectRecord as (record: Record<string, unknown>, locale?: Locale) => TranscriptItem[];
 const quoted = (value: string) => `"${value.replaceAll('"', '\\"')}"`;
@@ -306,9 +306,23 @@ test('/subrun parses bounded controls by parent event sequence', options, () => 
     action: 'message', seq: 4, input: 'Keep the work inside the requested folder.',
   });
   assert.deepEqual(parseSubrunCommand('cancel 7'), { action: 'cancel', seq: 7 });
+  assert.deepEqual(parseSubrunCommand('status session.sub-12'), { action: 'status', subrunId: 'session.sub-12' });
+  assert.deepEqual(parseSubrunCommand('message session.sub-12 Read the new guidance.'), {
+    action: 'message', subrunId: 'session.sub-12', input: 'Read the new guidance.',
+  });
   assert.deepEqual(parseSubrunCommand('wait 1 30001'), { code: 'tui_subrun_timeout_invalid' });
   assert.deepEqual(parseSubrunCommand('message 1   '), { code: 'tui_subrun_input_required' });
   assert.deepEqual(parseSubrunCommand('status -1'), { code: 'tui_subrun_sequence_invalid' });
+});
+
+test('/preset parses list, preview, and start without changing task text', options, () => {
+  assert.deepEqual(parsePresetCommand('list'), { action: 'list' });
+  assert.deepEqual(parsePresetCommand('preview research'), { action: 'preview', presetId: 'research' });
+  assert.deepEqual(parsePresetCommand('start implement Keep the change within core/src.'), {
+    action: 'start', presetId: 'implement', task: 'Keep the change within core/src.',
+  });
+  assert.deepEqual(parsePresetCommand('preview ../secret'), { code: 'tui_preset_id_invalid' });
+  assert.deepEqual(parsePresetCommand('start research   '), { code: 'tui_preset_task_required' });
 });
 
 test('/exec parses bounded finite-command controls by execution ID', options, () => {
@@ -624,6 +638,100 @@ test('TUI steers an asynchronous child by its parent event and opens the child S
     });
   } finally {
     releaseChild();
+  }
+});
+
+test('TUI lists, previews, and starts a Host-resolved preset under the active parent Run', options, async () => {
+  let releaseParent!: () => void;
+  let releaseChild!: () => void;
+  let markParentReached!: () => void;
+  let markChildReached!: () => void;
+  const parentGate = new Promise<void>(resolve => { releaseParent = resolve; });
+  const childGate = new Promise<void>(resolve => { releaseChild = resolve; });
+  const parentReached = new Promise<void>(resolve => { markParentReached = resolve; });
+  const childReached = new Promise<void>(resolve => { markChildReached = resolve; });
+  try {
+    await withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+      const parent = await client.request('run.submit', { sessionId, input: 'preset parent held' }) as { runId: string };
+      await parentReached;
+
+      const { createElement } = await import('react');
+      const { render } = await import('ink');
+      const { PassThrough } = await import('node:stream');
+      const { setTimeout: delay } = await import('node:timers/promises');
+      const { App } = await import('../dist/tui/app.js');
+      const stdout = new PassThrough() as unknown as FakeOutput;
+      stdout.columns = 120;
+      stdout.isTTY = true;
+      let painted = '';
+      stdout.on('data', chunk => { painted += chunk; });
+      const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+      const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true }), {
+        stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true,
+      });
+      const sendCommand = async (value: string) => {
+        stdin.write(value);
+        await delay(80);
+        stdin.write('\r');
+      };
+      try {
+        await sendCommand('/preset list');
+        await waitFor(() => plainOutput(painted).includes('tui-task · project'), { within: 5_000, read: () => plainOutput(painted) });
+        await sendCommand('/preset preview tui-task');
+        await waitFor(() => plainOutput(painted).includes('权限上限：read-only'), { within: 5_000, read: () => plainOutput(painted) });
+        await sendCommand('/preset start tui-task Do the requested work.');
+        await waitFor(() => plainOutput(painted).includes('已启动 tui-task'), { within: 5_000, read: () => plainOutput(painted) });
+        await childReached;
+        assert.ok(requests.some(request => request.method === 'subrun.start'
+          && (request.params as { presetId?: string }).presetId === 'tui-task'));
+        await sendCommand('/subrun list');
+        await waitFor(() => plainOutput(painted).includes('· running'), { within: 5_000, read: () => plainOutput(painted) });
+        const children = await client.request('subrun.list', { sessionId, parentRunId: parent.runId, limit: 32 }) as {
+          subruns: { subrunId: string }[];
+        };
+        const childId = children.subruns[0]?.subrunId;
+        assert.ok(childId);
+        await sendCommand(`/subrun message ${childId} Check the latest task guidance.`);
+        await waitFor(() => plainOutput(painted).includes('子任务已接受补充输入'), { within: 5_000, read: () => plainOutput(painted) });
+        assert.ok(requests.some(request => request.method === 'subrun.message'
+          && (request.params as { subrunId?: string }).subrunId === childId));
+        releaseChild();
+        releaseParent();
+        await client.request('run.wait', { sessionId, runId: parent.runId });
+        await sendCommand(`/subrun status ${childId}`);
+        await waitFor(() => plainOutput(painted).includes(`${childId}: completed`), { within: 5_000, read: () => plainOutput(painted) });
+        await sendCommand('/subrun list');
+        await waitFor(() => plainOutput(painted).includes('· completed'), { within: 5_000, read: () => plainOutput(painted) });
+      } finally {
+        instance.unmount();
+      }
+    }, {
+      setup: async ({ projectDirectory }) => {
+        await mkdir(join(projectDirectory, '.ligule', 'agents'), { recursive: true });
+        await writeFile(join(projectDirectory, '.ligule', 'agents', 'tui-task.toml'), [
+          'schemaVersion = 1',
+          'description = "A TUI preset flow fixture."',
+          'instruction = "Follow the current parent permissions."',
+          'permissionProfile = "workspace-write"',
+          'network = "policy"',
+          '',
+          '[mode]',
+          'tools = ["read"]',
+          'prompt = []',
+        ].join('\n'));
+      },
+      beforeResponse: async body => {
+        const user = [...body.messages].reverse().find(message => message.role === 'user')?.content;
+        if (user === 'preset parent held') { markParentReached(); await parentGate; }
+        if (user === 'Do the requested work.') { markChildReached(); await childGate; }
+      },
+      modeName: 'full',
+      config: { loop: { iterations: 5, modelCalls: 10, totalModelCalls: 20 } },
+      testDirectory: 'testplace/tmp',
+    });
+  } finally {
+    releaseChild();
+    releaseParent();
   }
 });
 

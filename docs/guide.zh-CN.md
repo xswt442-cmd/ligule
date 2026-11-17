@@ -179,6 +179,28 @@ serviceId = "deepseek"
 
 工具模式选择交给模型的工具清单和提示片段，不会更改 Permission、Policy 或 Agent Control Grant。随包提供的 `minimal` 是默认模式；`full` 会包含当前 Host 注册的全部工具。模式文件按项目、用户、随包的顺序查找；高优先级文件完整替代低优先级同名文件。
 
+#### 子任务预设
+
+预设把一段任务说明、Mode、Permission/网络上限、生成与循环限制、结构化输出要求和可选检查名称保存在 TOML 中。查找路径为项目 `.ligule/agents/<id>.toml`、用户数据根 `agents/<id>.toml`、随包 `core/agents/<id>.toml`；优先级为项目、用户、随包，同名整份替换。项目文件是输入数据，不执行脚本；未知字段、无效覆盖和越界路径会报错，不会回退到低优先级预设。每份定义须有 `schemaVersion = 1`、`description`、`instruction` 和 `mode`。
+
+```toml
+schemaVersion = 1
+description = "只读研究项目材料"
+instruction = "仅报告实际读取到的事实和未确定事项。"
+permissionProfile = "read-only"
+network = "disabled"
+
+[mode]
+tools = ["read", "find"]
+prompt = []
+```
+
+`permissionProfile`、`network`、`outputTokens`、`thinkingEffort`、`loopIterations`、`modelCalls`、`outputSchema`、`requiredChecks` 都是可选字段；它们只能收窄当前父任务允许的能力和限制。预设的 Mode 和显式 Mode 覆盖只取子任务已注册工具、父任务工具清单和两份 Mode 的交集。预览会列出最终限制；启动时 Host 重新核对活动父 Run，过期 Run 不能启动孩子。
+
+TUI 使用 `/preset list` 列出预设，`/preset preview <id>` 查看当前生效设置，`/preset start <id> <任务>` 在活动父任务下启动子任务。主 Agent 可通过 `subagent_preset_list`、`subagent_preset_preview` 发现并检查预设，再在 `subagent` 或 `subagent_start` 请求中给出 `presetId`。MCP 控制器通过 `ligule_preset_list`、`ligule_preset_preview` 和带 `presetId` 的 `ligule_subrun_start` 使用相同 Host 解析；`subrun.list` 可从 Session 的已校验 parentage 找回 Host 启动和模型启动的子任务。
+
+每个已启动子任务在 Session 中保存一份有界配置快照，包含说明文本、来源层、摘要、Mode、有效 Permission、预算和输出 Schema 摘要。修改同名文件只影响之后启动的任务。设置 `requiredChecks = ["verification"]` 会要求最新同名 P13 检查同时满足退出码、结构化报告、完整日志和未过期的范围采样；至少有一个测试通过。Ligule 不会自动运行检查命令。随包 `research`、`implement`、`verify` 分别示范只读研究、受现有权限限制的实现和基于 P13 检查事实的验证。
+
 #### 用户 DIY 最小示例
 
 在用户数据根中创建 `skills/release-check/SKILL.md`，可用 `ligule skills` 检查发现结果，然后让模型按名称激活技能：

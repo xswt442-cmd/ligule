@@ -132,6 +132,7 @@ export interface LoopRunOptions {
   readonly steering?: LoopSteeringInbox;
   readonly runId?: string;
   readonly onAccepted?: (userSeq: number) => void;
+  readonly onContextPersisted?: (userSeq: number | undefined) => void | Promise<void>;
   readonly persistTerminal?: (status: 'completed' | 'failed' | 'cancelled', summary: RunSummary, fields: Record<string, unknown>) => Promise<RunResultRef>;
   readonly signal?: AbortSignal;
   readonly source?: 'human' | 'controller';
@@ -561,8 +562,13 @@ export function createLoop({
           ...(parentExecutionId === undefined ? {} : { parentExecutionId }), ...(parentRunId === undefined ? {} : { parentRunId }),
           ...(parentCallId === undefined ? {} : { parentCallId }) });
         // 用户事件写入后若快照失败，记录本轮失败终态。Host 在接受输入前失败时没有事件序号，不写终态事件。
+        const hasTurnContext = session !== undefined && (turnContext !== null || runTurnContext !== undefined);
+        if (runOptions.onContextPersisted !== undefined && !hasTurnContext) {
+          throw new KernelError('loop_turn_context_required');
+        }
         if (session && (turnContext !== null || runTurnContext !== undefined)) {
           await session.append({ kind: 'turnContext', ignorable: true, userSeq, ...(turnContext?.() ?? {}), ...(runTurnContext ?? {}) });
+          await runOptions.onContextPersisted?.(userSeq);
         }
         runLoop: for (let iteration = 1; iteration <= limits.iterations; iteration += 1) {
           if (controller.signal.aborted) throw cancelled();

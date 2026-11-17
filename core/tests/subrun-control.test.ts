@@ -13,7 +13,8 @@ test('P10 Host publishes one set of independently controllable subrun tools', as
   await withTuiHost(async ({ client, sessionId }) => {
     const status = await client.request('status.get', { sessionId }) as { tools: string[] };
     assert.deepEqual(status.tools.filter((name) => name.startsWith('subagent_')).sort(), [
-      'subagent_cancel', 'subagent_message', 'subagent_start', 'subagent_status', 'subagent_wait',
+      'subagent_cancel', 'subagent_message', 'subagent_preset_list', 'subagent_preset_preview',
+      'subagent_start', 'subagent_status', 'subagent_wait',
     ]);
   }, { modeName: 'full', permissionControl: true, testDirectory: 'testplace/tmp' });
 });

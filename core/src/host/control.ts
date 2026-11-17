@@ -984,9 +984,42 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
         sessionId, runId, executionId,
       } }, connection)));
     },
-    async subrunStart(sessionId: string, parentRunId: string, task: string) {
+    async subrunStart(sessionId: string, parentRunId: string, task: string, options: {
+      readonly presetId?: string;
+      readonly mode?: unknown;
+      readonly outputTokens?: number;
+      readonly thinkingEffort?: string;
+      readonly loopIterations?: number;
+      readonly modelCalls?: number;
+      readonly outputSchema?: Record<string, unknown>;
+    } = {}) {
       writable(sessionId);
-      return record(await tracked(host.handle({ method: 'subrun.start', params: { sessionId, parentRunId, task } }, connection)));
+      return record(await tracked(host.handle({ method: 'subrun.start', params: { sessionId, parentRunId, task, ...options } }, connection)));
+    },
+    async subrunList(sessionId: string, parentRunId: string, cursor?: string, limit = 32) {
+      owned(sessionId);
+      return record(await tracked(host.handle({ method: 'subrun.list', params: {
+        sessionId, parentRunId, ...(cursor === undefined ? {} : { cursor }), limit,
+      } }, connection)));
+    },
+    async presetList(sessionId: string, cursor?: string, limit = 64) {
+      owned(sessionId);
+      return record(await tracked(host.handle({ method: 'preset.list', params: {
+        sessionId, ...(cursor === undefined ? {} : { cursor }), limit,
+      } }, connection)));
+    },
+    async presetPreview(sessionId: string, presetId: string, parentRunId?: string, overrides: {
+      readonly mode?: unknown;
+      readonly outputTokens?: number;
+      readonly thinkingEffort?: string;
+      readonly loopIterations?: number;
+      readonly modelCalls?: number;
+      readonly outputSchema?: Record<string, unknown>;
+    } = {}) {
+      owned(sessionId);
+      return record(await tracked(host.handle({ method: 'preset.preview', params: {
+        sessionId, presetId, ...(parentRunId === undefined ? {} : { parentRunId }), ...overrides,
+      } }, connection)));
     },
     async subrunStatus(sessionId: string, parentRunId: string, subrunId: string) {
       owned(sessionId);

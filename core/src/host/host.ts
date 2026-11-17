@@ -35,6 +35,7 @@ import {
   applyModeToPrompt, DEFAULT_MODE, listModes, loadMode, resolveModeSelection,
   type ModeDirectories, type ModeFile,
 } from '../kernel/modes.js';
+import { agentPresetDirectories } from '../kernel/agent-presets.js';
 import { readRegistry, registerWorkspace, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { isTrusted, setTrusted } from '../kernel/workspace-trust.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
@@ -2520,6 +2521,9 @@ export function createHost({
           close: async () => { try { await childRegistry.close(); await browser.closeSession(childId); } finally { state.childMcp.delete(childRegistry); } } };
       },
       modePaths,
+      ...(modePaths === undefined ? {} : {
+        presetDirectories: agentPresetDirectories(env.projectRoot, join(dirname(modePaths.shipped), 'agents'), dirname(modePaths.user)),
+      }),
       modeFile: () => state.mode.file,
       promptFragments: () => fragments,
       promptFragmentBytes: limitsOf(config).promptFragmentBytes,
@@ -3439,7 +3443,7 @@ export function createHost({
             if (grant !== undefined) await recordDelegationEvent(agentControl!.storePath, { kind: 'grant.used', grantId: grant.id });
             if (message.params.mode !== undefined) {
               if (state.environment.modePaths === undefined) throw new KernelError('host_mode_paths_required');
-              const requested = await loadMode(message.params.mode, state.environment.modePaths);
+              const requested = await loadMode(requiredString(message.params.mode, 'mode'), state.environment.modePaths);
               if (state.running === undefined) await state.adopt(requested);
               else state.pending = requested;
             }
@@ -3485,7 +3489,8 @@ export function createHost({
             }
           }
           // 新打开的会话也在轮次边界应用模式变更。
-          const opened = await buildSession(sessionId, connection, true, message.params.mode, env);
+          const opened = await buildSession(sessionId, connection, true,
+            message.params.mode === undefined ? undefined : requiredString(message.params.mode, 'mode'), env);
           if (grant !== undefined) await recordDelegationEvent(agentControl!.storePath, { kind: 'grant.used', grantId: grant.id });
           await noteWorkspace(env);
           return opened;
@@ -4393,11 +4398,58 @@ export function createHost({
           await requireSubrunParent(state, parentRunId);
           if (state.activeRunId !== parentRunId || state.running === undefined) throw new KernelError('subagent_parent_not_active');
           const source = runOriginOf(undefined, 'human', mayRecordHumanRun(controlTrust, bridge));
-          return await state.subagents.start({ task: requiredString(message.params.task, 'task') }, {
+          return await state.subagents.start({
+            task: requiredString(message.params.task, 'task'),
+            ...(message.params.presetId === undefined ? {} : { presetId: requiredString(message.params.presetId, 'presetId') }),
+            ...(message.params.mode === undefined ? {} : { mode: message.params.mode as Parameters<SubagentRuntime['start']>[0]['mode'] }),
+            ...(message.params.outputTokens === undefined ? {} : { outputTokens: message.params.outputTokens }),
+            ...(message.params.thinkingEffort === undefined ? {} : { thinkingEffort: message.params.thinkingEffort as Parameters<SubagentRuntime['start']>[0]['thinkingEffort'] }),
+            ...(message.params.loopIterations === undefined ? {} : { loopIterations: message.params.loopIterations }),
+            ...(message.params.modelCalls === undefined ? {} : { modelCalls: message.params.modelCalls }),
+            ...(message.params.outputSchema === undefined ? {} : { outputSchema: message.params.outputSchema }),
+          }, {
             signal: state.running.signal,
             permission: state.permission,
             runId: parentRunId,
           }, source);
+        }
+        case 'subrun.list': {
+          const state = open(sessionId);
+          const parentRunId = requiredString(message.params.parentRunId, 'parentRunId');
+          await requireSubrunParent(state, parentRunId);
+          return await state.subagents.list(parentRunId, {
+            ...(message.params.cursor === undefined ? {} : { cursor: requiredString(message.params.cursor, 'cursor') }),
+            ...(message.params.limit === undefined ? {} : { limit: message.params.limit as number }),
+          });
+        }
+        case 'preset.list': {
+          const state = open(sessionId);
+          if (grant !== undefined) assertGrantSessionScope(grant, state);
+          return await state.subagents.listPresets({
+            ...(message.params.cursor === undefined ? {} : { cursor: requiredString(message.params.cursor, 'cursor') }),
+            ...(message.params.limit === undefined ? {} : { limit: message.params.limit as number }),
+          });
+        }
+        case 'preset.preview': {
+          const state = open(sessionId);
+          if (grant !== undefined) assertGrantSessionScope(grant, state);
+          const parentRunId = message.params.parentRunId === undefined
+            ? state.activeRunId : requiredString(message.params.parentRunId, 'parentRunId');
+          if (parentRunId !== undefined) {
+            await requireSubrunParent(state, parentRunId);
+            if (state.activeRunId !== parentRunId) throw new KernelError('subagent_parent_not_active');
+          }
+          return await state.subagents.previewPreset(requiredString(message.params.presetId, 'presetId'), {
+            ...(message.params.mode === undefined ? {} : { mode: message.params.mode as Parameters<SubagentRuntime['previewPreset']>[1]['mode'] }),
+            ...(message.params.outputTokens === undefined ? {} : { outputTokens: message.params.outputTokens as number }),
+            ...(message.params.thinkingEffort === undefined ? {} : { thinkingEffort: message.params.thinkingEffort as Parameters<SubagentRuntime['previewPreset']>[1]['thinkingEffort'] }),
+            ...(message.params.loopIterations === undefined ? {} : { loopIterations: message.params.loopIterations as number }),
+            ...(message.params.modelCalls === undefined ? {} : { modelCalls: message.params.modelCalls as number }),
+            ...(message.params.outputSchema === undefined ? {} : { outputSchema: message.params.outputSchema as Record<string, unknown> }),
+          }, {
+            permission: state.permission,
+            ...(parentRunId === undefined ? {} : { runId: parentRunId }),
+          });
         }
         case 'subrun.status': {
           const state = open(sessionId);

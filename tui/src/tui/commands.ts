@@ -50,7 +50,8 @@ export const UI_COMMANDS = Object.freeze([
   { name: 'tools', usage: '/tools', text: '列出可用工具', hint: '', whenRunning: true },
   { name: 'show', usage: '/show [序号]', text: '查看完整记录；不带序号收起', hint: '[序号]', whenRunning: true },
   { name: 'sub', usage: '/sub [序号]', text: '查看子任务记录；不带序号收起', hint: '[序号]', whenRunning: true },
-  { name: 'subrun', usage: '/subrun [list|status|wait|message|cancel]', text: '查看并控制异步子任务', hint: '[动作]', whenRunning: true },
+  { name: 'subrun', usage: '/subrun [list|status|wait|message|cancel] <序号或 ID>', text: '查看并控制异步子任务', hint: '[动作]', whenRunning: true },
+  { name: 'preset', usage: '/preset <list|preview <id>|start <id> <任务>>', text: '查看并启动子任务预设', hint: '<动作>', whenRunning: true },
   { name: 'exec', usage: '/exec <status|wait|logs|cancel> <executionId> [毫秒或游标]', text: '查看或控制当前会话的有限命令', hint: '<动作>', whenRunning: true },
   { name: 'tool', usage: '/tool <callId> [游标]', text: '查看一次工具调用的结果和有限输出页', hint: '<callId>', whenRunning: true },
   { name: 'new', usage: '/new', text: '创建新会话', hint: '', whenRunning: false },
@@ -91,7 +92,8 @@ const ENGLISH_COMMANDS: Record<CommandName, readonly [string, string, string]> =
   tools: ['/tools', 'List available tools', ''],
   show: ['/show [seq]', 'View an event; omit seq to close', '[seq]'],
   sub: ['/sub [seq]', 'View a subtask; omit seq to close', '[seq]'],
-  subrun: ['/subrun [list|status|wait|message|cancel]', 'Inspect and control asynchronous subtasks', '[action]'],
+  subrun: ['/subrun [list|status|wait|message|cancel] <seq or ID>', 'Inspect and control asynchronous subtasks', '[action]'],
+  preset: ['/preset <list|preview <id>|start <id> <task>>', 'Inspect and start child task presets', '<action>'],
   exec: ['/exec <status|wait|logs|cancel> <executionId> [ms or cursor]', 'Inspect or control finite commands in this session', '<action>'],
   tool: ['/tool <callId> [cursor]', 'Inspect one tool call and a bounded output page', '<callId>'],
   new: ['/new', 'Start a new session', ''],
@@ -122,9 +124,12 @@ export function findUiCommand(name: string): UiCommand | undefined {
 
 export type SubrunCommand =
   | { readonly action: 'list' }
-  | { readonly action: 'status' | 'cancel'; readonly seq: number }
-  | { readonly action: 'wait'; readonly seq: number; readonly timeoutMs: number }
-  | { readonly action: 'message'; readonly seq: number; readonly input: string }
+  | { readonly action: 'status' | 'cancel'; readonly seq: number; readonly subrunId?: undefined }
+  | { readonly action: 'status' | 'cancel'; readonly subrunId: string; readonly seq?: undefined }
+  | { readonly action: 'wait'; readonly seq: number; readonly subrunId?: undefined; readonly timeoutMs: number }
+  | { readonly action: 'wait'; readonly subrunId: string; readonly seq?: undefined; readonly timeoutMs: number }
+  | { readonly action: 'message'; readonly seq: number; readonly subrunId?: undefined; readonly input: string }
+  | { readonly action: 'message'; readonly subrunId: string; readonly seq?: undefined; readonly input: string }
   | { readonly code: 'tui_subrun_command_invalid' | 'tui_subrun_sequence_invalid' | 'tui_subrun_timeout_invalid' | 'tui_subrun_input_required' };
 
 export function parseSubrunCommand(argument: string): SubrunCommand {
@@ -133,20 +138,46 @@ export function parseSubrunCommand(argument: string): SubrunCommand {
   const action = match[1];
   const rest = match[2] ?? '';
   if (action === 'list') return rest === '' ? { action } : { code: 'tui_subrun_command_invalid' };
-  const args = /^(0|[1-9]\d*)(?:\s+([\s\S]*))?$/u.exec(rest);
+  const args = /^(\S+)(?:\s+([\s\S]*))?$/u.exec(rest);
   if (args === null) return { code: 'tui_subrun_sequence_invalid' };
-  const seq = Number(args[1]);
-  if (!Number.isSafeInteger(seq)) return { code: 'tui_subrun_sequence_invalid' };
+  const rawTarget = args[1]!;
+  const seq = /^(0|[1-9]\d*)$/u.test(rawTarget) ? Number(rawTarget) : undefined;
+  const subrunId = seq === undefined && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(rawTarget) ? rawTarget : undefined;
+  if (seq !== undefined && !Number.isSafeInteger(seq) || seq === undefined && subrunId === undefined) {
+    return { code: 'tui_subrun_sequence_invalid' };
+  }
+  const target = seq === undefined ? { subrunId: subrunId! } : { seq };
   const tail = args[2] ?? '';
   if (action === 'status' || action === 'cancel') {
-    return tail === '' ? { action, seq } : { code: 'tui_subrun_command_invalid' };
+    return tail === '' ? { action, ...target } as SubrunCommand : { code: 'tui_subrun_command_invalid' };
   }
-  if (action === 'message') return tail.trim() === '' ? { code: 'tui_subrun_input_required' } : { action, seq, input: tail };
+  if (action === 'message') return tail.trim() === '' ? { code: 'tui_subrun_input_required' } : { action, ...target, input: tail } as SubrunCommand;
   if (action !== 'wait') return { code: 'tui_subrun_command_invalid' };
   const timeoutMs = tail === '' ? 30_000 : Number(tail);
   return Number.isSafeInteger(timeoutMs) && timeoutMs >= 0 && timeoutMs <= 30_000
-    ? { action, seq, timeoutMs }
+    ? { action, ...target, timeoutMs } as SubrunCommand
     : { code: 'tui_subrun_timeout_invalid' };
+}
+
+export type PresetCommand =
+  | { readonly action: 'list' }
+  | { readonly action: 'preview'; readonly presetId: string }
+  | { readonly action: 'start'; readonly presetId: string; readonly task: string }
+  | { readonly code: 'tui_preset_command_invalid' | 'tui_preset_id_invalid' | 'tui_preset_task_required' };
+
+export function parsePresetCommand(argument: string): PresetCommand {
+  const match = /^(list|preview|start)(?:[ \t]+([\s\S]*))?$/u.exec(argument.trimStart());
+  if (match === null) return { code: 'tui_preset_command_invalid' };
+  const action = match[1];
+  const rest = match[2] ?? '';
+  if (action === 'list') return rest.trim() === '' ? { action } : { code: 'tui_preset_command_invalid' };
+  const separator = rest.search(/[ \t]/u);
+  const presetId = separator < 0 ? rest : rest.slice(0, separator);
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(presetId)) return { code: 'tui_preset_id_invalid' };
+  if (action === 'preview') return separator < 0 ? { action, presetId } : { code: 'tui_preset_command_invalid' };
+  if (separator < 0) return { code: 'tui_preset_task_required' };
+  const task = rest.slice(separator + 1);
+  return task.trim() === '' ? { code: 'tui_preset_task_required' } : { action: 'start', presetId, task };
 }
 
 export type ExecCommand =

@@ -450,6 +450,15 @@ test('a granted Controller cannot turn a path-specific deny into an approval', a
 test('stdio MCP child controls use the Host manager and preserve wait, steering, and cancellation semantics', { timeout: 40_000 }, async () => {
   await fixture(async ({ projectRoot, home }) => {
     await writeFile(join(projectRoot, 'note.txt'), 'child read fixture');
+    await mkdir(join(projectRoot, '.ligule', 'agents'), { recursive: true });
+    await writeFile(join(projectRoot, '.ligule', 'agents', 'mcp-child.toml'), [
+      'schemaVersion = 1',
+      'description = "Read one local MCP fixture."',
+      'instruction = "Read the requested fixture and report what it contains."',
+      'permissionProfile = "read-only"',
+      'network = "disabled"',
+      'mode = "full"',
+    ].join('\n'));
     let releaseMessageChild!: () => void;
     let releaseCancelChild!: () => void;
     let markMessageChild!: () => void;
@@ -483,7 +492,8 @@ test('stdio MCP child controls use the Host manager and preserve wait, steering,
       client = connected.client;
       stderr = connected.stderr;
       const names = (await client.listTools()).tools.map((tool) => tool.name);
-      for (const name of ['ligule_subrun_start', 'ligule_subrun_status', 'ligule_subrun_message', 'ligule_subrun_wait', 'ligule_subrun_cancel']) {
+      for (const name of ['ligule_preset_list', 'ligule_preset_preview', 'ligule_subrun_start', 'ligule_subrun_list',
+        'ligule_subrun_status', 'ligule_subrun_message', 'ligule_subrun_wait', 'ligule_subrun_cancel']) {
         assert.ok(names.includes(name), `missing MCP control ${name}`);
       }
 
@@ -493,6 +503,18 @@ test('stdio MCP child controls use the Host manager and preserve wait, steering,
       });
       assert.equal(made.isError, undefined, `${JSON.stringify(made)}\n${stderr()}`);
       const sessionId = made.structuredContent.sessionId;
+      const presets = await callTool(client, 'ligule_preset_list', { sessionId, limit: 64 }) as unknown as {
+        isError?: boolean; structuredContent: { presets: { id: string; layer: string }[] };
+      };
+      assert.equal(presets.isError, undefined, `${JSON.stringify(presets)}\n${stderr()}`);
+      assert.ok(presets.structuredContent.presets.some((item: { id: string; layer: string }) => item.id === 'mcp-child' && item.layer === 'project'));
+      const preview = await callTool(client, 'ligule_preset_preview', { sessionId, presetId: 'mcp-child' }) as unknown as {
+        isError?: boolean; structuredContent: { executable: boolean; permission: { profile: string; network: string } };
+      };
+      assert.equal(preview.isError, undefined, `${JSON.stringify(preview)}\n${stderr()}`);
+      assert.equal(preview.structuredContent.executable, false);
+      assert.equal(preview.structuredContent.permission.profile, 'read-only');
+      assert.equal(preview.structuredContent.permission.network, 'disabled');
       const parent = await callTool(client, 'ligule_run_start', { sessionId, input: 'parent waits for a local answer' });
       assert.equal(parent.isError, undefined, `${JSON.stringify(parent)}\n${stderr()}`);
       const parentRunId = parent.structuredContent.receipt?.runId;
@@ -508,7 +530,7 @@ test('stdio MCP child controls use the Host manager and preserve wait, steering,
       const parentQuestion = waitingQuestion.structuredContent.pendingInteractions!.find((item) => item.type === 'question')! as { type: string; requestId: string };
 
       const child = await callTool(client, 'ligule_subrun_start', {
-        sessionId, parentRunId, task: 'mcp-child inspect the fixture',
+        sessionId, parentRunId, task: 'mcp-child inspect the fixture', presetId: 'mcp-child',
       }) as unknown as { isError?: boolean; structuredContent: { subrunId: string; sessionId: string; runId: string } };
       assert.equal(child.isError, undefined, `${JSON.stringify(child)}\n${stderr()}`);
       await withTimeout(messageChildStarted, 'child_provider_started', 10_000);
@@ -531,6 +553,10 @@ test('stdio MCP child controls use the Host manager and preserve wait, steering,
       assert.equal(childDone.isError, undefined, `${JSON.stringify(childDone)}\n${stderr()}`);
       assert.equal(childDone.structuredContent.timedOut, false);
       assert.equal(childDone.structuredContent.subruns[0]?.state, 'completed');
+      const children = await callTool(client, 'ligule_subrun_list', { sessionId, parentRunId, limit: 32 });
+      const listedChildren = children as unknown as { isError?: boolean; structuredContent: { subruns: { subrunId: string }[] } };
+      assert.equal(listedChildren.isError, undefined, `${JSON.stringify(children)}\n${stderr()}`);
+      assert.ok(listedChildren.structuredContent.subruns.some(item => item.subrunId === child.structuredContent.subrunId));
       assert.ok(model.requests.some((request) => JSON.stringify(request).includes('Apply the updated child guidance')),
         'the message must appear in a later Provider request');
       const childStatus = await callTool(client, 'ligule_subrun_status', {

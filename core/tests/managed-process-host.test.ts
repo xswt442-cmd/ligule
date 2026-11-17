@@ -12,6 +12,7 @@ import { detectPermissionCapabilities } from '../dist/capability/permission-capa
 import { createPermissionContext } from '../dist/kernel/permission.js';
 import type { PermissionContext } from '../dist/kernel/permission.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.ts';
+import { fetchablePort } from './helpers/port.ts';
 
 type ManagedContent = { id: string; status: string; port: number; logs: string };
 
@@ -31,12 +32,16 @@ const windowsWorkspaceWrite = createPermissionContext('workspace-write', 'unrest
 });
 
 async function availableLoopbackPort(): Promise<number> {
-  const server = net.createServer();
-  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
-  const address = server.address();
-  assert.notEqual(address, null);
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-  return (address as AddressInfo).port;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.notEqual(address, null);
+    const port = (address as AddressInfo).port;
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (fetchablePort(port)) return port;
+  }
+  throw new Error('managed_process_test_port_unavailable');
 }
 
 async function waitForUnavailable(url: string): Promise<void> {

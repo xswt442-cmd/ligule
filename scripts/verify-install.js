@@ -102,6 +102,10 @@ const bundledCoreDirectory = join(consumer, 'node_modules', pkg.name, 'node_modu
 if (!existsSync(join(bundledCoreDirectory, 'dist', 'index.js')) || !existsSync(join(bundledCoreDirectory, 'modes', 'minimal.toml'))) {
   throw new Error('the installed npm package does not contain the complete private Core runtime');
 }
+if (!existsSync(join(bundledCoreDirectory, 'dist', 'kernel', 'agent-presets.js'))
+  || ['research', 'implement', 'verify'].some(name => !existsSync(join(bundledCoreDirectory, 'agents', `${name}.toml`)))) {
+  throw new Error('the installed npm package is missing the bundled child agent presets or resolver');
+}
 const installedPackageRoot = realpathSync(installedPackageDirectory);
 const installedCoreRoot = realpathSync(bundledCoreDirectory);
 const relativeCore = relative(installedPackageRoot, installedCoreRoot);
@@ -152,9 +156,12 @@ if (version.status !== 0 || version.stdout.trim() !== pkg.version) {
 readings.push(`--version: ${version.stdout.trim()}`);
 
 const tools = run(['tools']);
-const counted = tools.stdout.split('\n').filter((line) => line.trim() !== '').length;
-if (tools.status !== 0 || counted !== 9) throw new Error(`${pkg.name} tools listed ${counted}, expected 9`);
-readings.push(`tools: ${counted}`);
+const listedTools = tools.stdout.trim().split('\n').filter((line) => line.trim() !== '');
+const expectedTools = ['create', 'delete', 'edit', 'exec', 'exec_control', 'fetch', 'find', 'read', 'search', 'write'];
+if (tools.status !== 0 || JSON.stringify(listedTools) !== JSON.stringify(expectedTools)) {
+  throw new Error(`${pkg.name} tools listed ${JSON.stringify(listedTools)}, expected ${JSON.stringify(expectedTools)}`);
+}
+readings.push(`tools: ${listedTools.length}`);
 
 // 非交互终端启动 TUI 时应返回稳定错误码；这也会加载并检查 TUI 入口依赖。
 const tui = run(['tui']);
@@ -359,9 +366,12 @@ const coreRequire = createRequire(corePackage);
 const { Client } = coreRequire('@modelcontextprotocol/sdk/client');
 const { StdioClientTransport, getDefaultEnvironment } = coreRequire('@modelcontextprotocol/sdk/client/stdio.js');
 const expected = [
-  'ligule_interaction_reply', 'ligule_run', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_get', 'ligule_run_start', 'ligule_run_status', 'ligule_session_close', 'ligule_session_configure',
-  'ligule_session_create', 'ligule_session_list', 'ligule_session_open', 'ligule_session_read', 'ligule_session_send', 'ligule_subrun_cancel',
-  'ligule_subrun_message', 'ligule_subrun_start', 'ligule_subrun_status', 'ligule_subrun_wait', 'ligule_usage_get',
+  'ligule_execution_cancel', 'ligule_execution_logs', 'ligule_execution_status', 'ligule_execution_wait',
+  'ligule_interaction_reply', 'ligule_preset_list', 'ligule_preset_preview',
+  'ligule_run', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_get', 'ligule_run_start', 'ligule_run_status',
+  'ligule_session_close', 'ligule_session_configure', 'ligule_session_create', 'ligule_session_list', 'ligule_session_open',
+  'ligule_session_read', 'ligule_session_send', 'ligule_subrun_cancel', 'ligule_subrun_list', 'ligule_subrun_message',
+  'ligule_subrun_start', 'ligule_subrun_status', 'ligule_subrun_wait', 'ligule_tool_result', 'ligule_usage_get',
 ].sort();
 const projectRoot = ${JSON.stringify(mcpProject)};
 const { setTrusted } = await import(pathToFileURL(join(${JSON.stringify(bundledCoreDirectory)}, 'dist', 'kernel', 'workspace-trust.js')).href);
@@ -400,6 +410,12 @@ try {
       const history = await call('ligule_session_read', { sessionId: created.sessionId, limit: 10 });
       assert.equal(history.sessionId, created.sessionId);
       assert.ok(Array.isArray(history.records));
+      const presets = await call('ligule_preset_list', { sessionId: created.sessionId });
+      assert.deepEqual(presets.presets.filter(({ errorCode }) => errorCode === undefined).map(({ id }) => id), ['implement', 'research', 'verify']);
+      const preset = await call('ligule_preset_preview', { sessionId: created.sessionId, presetId: 'research' });
+      assert.equal(preset.executable, false);
+      assert.equal(preset.permission.profile, 'read-only');
+      console.log('child presets: list and non-executable preview passed from the installed Core package');
       writeFileSync(join(process.cwd(), 'mcp-session-id'), created.sessionId + '\\n');
       console.log('stdio MCP: initialize, tools/list, create/list/open/read passed');
     } else {

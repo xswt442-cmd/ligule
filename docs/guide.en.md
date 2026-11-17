@@ -179,6 +179,28 @@ For `web_search`, `query` must be non-empty text of 1–128 Unicode characters. 
 
 A tool mode selects the tool manifest and prompt fragments visible to the model. It does not change Permission, Policy, or an Agent Control Grant. The bundled `minimal` mode is the default; `full` includes every tool registered in the current Host. Mode files are resolved in project, user, then bundled order; a higher-priority file replaces the complete lower-priority file with the same name.
 
+#### Child task presets
+
+A preset stores task guidance, a Mode, Permission and network ceilings, generation and loop limits, an optional structured output schema, and optional required check names. Ligule searches `.ligule/agents/<id>.toml` in the project, `agents/<id>.toml` under the user data root, then the bundled `core/agents/<id>.toml`. Precedence is project, user, bundled; a higher-priority definition replaces the whole lower-priority file. Project files are data and never execute code. Unknown fields, invalid overrides, and paths outside the layer fail without falling back. Every definition requires `schemaVersion = 1`, `description`, `instruction`, and `mode`.
+
+```toml
+schemaVersion = 1
+description = "Research project material without making changes"
+instruction = "Report only facts from material actually read and list unresolved questions."
+permissionProfile = "read-only"
+network = "disabled"
+
+[mode]
+tools = ["read", "find"]
+prompt = []
+```
+
+Optional fields are `permissionProfile`, `network`, `outputTokens`, `thinkingEffort`, `loopIterations`, `modelCalls`, `outputSchema`, and `requiredChecks`. They can only narrow the active parent run's capabilities and limits. The preset Mode and explicit Mode override are intersected with the child's registered tools and the parent manifest. Preview shows the effective limits; the Host verifies the active parent Run again when starting a child, so a stale Run cannot start one.
+
+In the TUI, use `/preset list`, `/preset preview <id>`, and `/preset start <id> <task>`. The model can discover and inspect presets with `subagent_preset_list` and `subagent_preset_preview`, then pass `presetId` to `subagent` or `subagent_start`. MCP controllers use `ligule_preset_list`, `ligule_preset_preview`, and `ligule_subrun_start` with the same Host resolver. `subrun.list` can rediscover both Host-started and model-started children from validated Session parentage.
+
+Each started child Session records a bounded configuration snapshot: instruction text, source layer, digest, Mode, effective Permission, budgets, and output-schema digest. Editing a preset affects later children only. `requiredChecks = ["verification"]` requires the latest same-name P13 check to have a met exit condition, a passing structured report, complete logs, and a current sampled scope; at least one test must have passed. Ligule does not run check commands automatically. The bundled `research`, `implement`, and `verify` presets demonstrate read-only research, implementation within existing permissions, and verification using P13 check facts.
+
 #### Minimal user DIY examples
 
 Create `skills/release-check/SKILL.md` under the data root. Use `ligule skills` to inspect discovery, then ask the model to activate the named Skill:

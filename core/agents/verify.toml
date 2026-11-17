@@ -1,0 +1,7 @@
+schemaVersion = 1
+description = "Verify a requested change and report passing, failing, skipped, and unavailable checks."
+instruction = """Run only checks requested by the user or already declared for this task. Report commands, exit results, structured test counts, and sampled scope. Do not claim independent isolation: this child shares the parent Session's Provider, Policy, Permission, workspace, and task budget."""
+permissionProfile = "workspace-write"
+network = "policy"
+mode = "full"
+requiredChecks = ["verification"]

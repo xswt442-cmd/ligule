@@ -3,7 +3,7 @@
 // 参数模式使用 Kernel 支持的子集，客户端和 Host 共用同一份定义。
 import { KernelError } from '../kernel/error.js';
 import { assertSupportedSchema, validateArgs } from '../kernel/schema.js';
-import { DELEGATION_SPEC_SCHEMA, type DelegationSpec } from '../delegation.js';
+import { DELEGATION_SPEC_SCHEMA, MODE_SELECTION_SCHEMA, type DelegationSpec } from '../delegation.js';
 
 interface MethodSpec {
   readonly description: string;
@@ -14,7 +14,7 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly sessionId?: string;
   readonly projectRoot?: string;
   readonly workspaceOrigin?: string;
-  readonly mode?: string;
+  readonly mode?: unknown;
   readonly policy?: string;
   readonly permissionProfile?: string;
   readonly permissionNetwork?: string;
@@ -41,11 +41,13 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly parentRunId?: string;
   readonly subrunId?: string;
   readonly subrunIds?: string[];
+  readonly presetId?: string;
   readonly timeoutMs?: number;
   readonly waitMs?: number;
   readonly cursor?: string;
   readonly limitBytes?: number;
   readonly task?: string;
+  readonly outputSchema?: Record<string, unknown>;
   readonly artifactKey?: string;
   readonly offset?: number;
   readonly directory?: string;
@@ -69,6 +71,7 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly thinkingEffort?: string;
   readonly outputTokens?: number;
   readonly loopIterations?: number;
+  readonly modelCalls?: number;
   readonly resetModel?: boolean;
   readonly resetThinking?: boolean;
   readonly resetOutputTokens?: boolean;
@@ -471,7 +474,36 @@ export const METHODS = Object.freeze({
       sessionId: SESSION_ID,
       parentRunId: SESSION_ID,
       task: { type: 'string', minLength: 1, maxLength: 65536 },
+      presetId: { type: 'string', minLength: 1, maxLength: 64 },
+      mode: MODE_SELECTION_SCHEMA,
+      outputTokens: { type: 'integer', minimum: 1 },
+      thinkingEffort: { type: 'string', enum: ['none', 'low', 'high', 'max'] },
+      loopIterations: { type: 'integer', minimum: 1 },
+      modelCalls: { type: 'integer', minimum: 1 },
+      outputSchema: { type: 'object' },
     }, required: ['sessionId', 'parentRunId', 'task'] },
+  },
+  'subrun.list': {
+    description: 'List bounded child Runs under one parent Run, derived from validated persisted Session parentage.',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID, parentRunId: SESSION_ID,
+      limit: { type: 'integer', minimum: 1, maximum: 32 }, cursor: { type: 'string', minLength: 1, maxLength: 256 },
+    }, required: ['sessionId', 'parentRunId'] },
+  },
+  'preset.list': {
+    description: 'List bounded task presets visible to one Session, including safe errors for invalid definitions.',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID, limit: { type: 'integer', minimum: 1, maximum: 64 }, cursor: { type: 'string', minLength: 1, maxLength: 128 },
+    }, required: ['sessionId'] },
+  },
+  'preset.preview': {
+    description: 'Resolve a task preset through the Host and return its effective mode, Permission, generation, limits, output contract, and restrictions.',
+    parameters: { type: 'object', properties: {
+      sessionId: SESSION_ID, parentRunId: SESSION_ID, presetId: { type: 'string', minLength: 1, maxLength: 64 },
+      mode: MODE_SELECTION_SCHEMA,
+      outputTokens: { type: 'integer', minimum: 1 }, thinkingEffort: { type: 'string', enum: ['none', 'low', 'high', 'max'] },
+      loopIterations: { type: 'integer', minimum: 1 }, modelCalls: { type: 'integer', minimum: 1 }, outputSchema: { type: 'object' },
+    }, required: ['sessionId', 'presetId'] },
   },
   'subrun.status': {
     description: 'Read a child Run owned by the parent Run, including phase, shared budget snapshot, pending interaction counts, and terminal summary.',

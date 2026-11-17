@@ -77,6 +77,10 @@ try {
     || !existsSync(join(bundledCore, 'README.md')) || !existsSync(join(bundledCore, 'LICENSE'))) {
     throw new Error(`${tarball} is missing the bundled @ligule/core runtime, modes, README, or license`);
   }
+  if (!existsSync(join(bundledCore, 'dist', 'kernel', 'agent-presets.js'))
+    || ['research', 'implement', 'verify'].some(name => !existsSync(join(bundledCore, 'agents', `${name}.toml`)))) {
+    throw new Error(`${tarball} is missing the bundled child agent presets or resolver`);
+  }
   if (!existsSync(join(bundledCore, 'dist', 'host', 'control.js'))) {
     throw new Error(`${tarball} is missing the Host control module required by the MCP server`);
   }

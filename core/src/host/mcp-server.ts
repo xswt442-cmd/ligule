@@ -7,7 +7,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema, McpError, ErrorCode, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { createConfig } from '../kernel/config.js';
 import { KernelError } from '../kernel/error.js';
-import { DELEGATION_SPEC_SCHEMA, type DelegationSpec } from '../delegation.js';
+import { DELEGATION_SPEC_SCHEMA, MODE_SELECTION_SCHEMA, type DelegationSpec } from '../delegation.js';
 import { createPermissionContext } from '../kernel/permission.js';
 import { isTrusted } from '../kernel/workspace-trust.js';
 import { createHost } from './host.js';
@@ -115,6 +115,32 @@ const subrunStatusOutput = object({
     validation: { type: 'object', additionalProperties: true } }, ['state', 'textCharacters']),
   startedAt: { type: 'number', minimum: 0 }, updatedAt: { type: 'number', minimum: 0 }, completedAt: { type: 'number', minimum: 0 },
 }, ['subrunId', 'sessionId', 'runId', 'parentRunId', 'state', 'phase', 'task', 'pendingInteractions', 'startedAt', 'updatedAt']);
+const subrunListOutput = object({
+  subruns: { type: 'array', maxItems: 32, items: subrunStatusOutput },
+  nextCursor: { type: 'string', maxLength: 256 }, truncated: { type: 'boolean' },
+}, ['subruns', 'truncated']);
+const presetListOutput = object({
+  presets: { type: 'array', maxItems: 64, items: object({
+    id: { type: 'string', minLength: 1, maxLength: 64 },
+    layer: { type: 'string', enum: ['shipped', 'user', 'project'] },
+    description: { type: 'string', maxLength: 512 }, digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+    errorCode: { type: 'string', maxLength: 80 },
+  }, ['id', 'layer']) },
+  nextCursor: { type: 'string', maxLength: 128 }, truncated: { type: 'boolean' },
+}, ['presets', 'truncated']);
+const presetPreviewOutput = object({
+  presetId: { type: 'string', minLength: 1, maxLength: 64 },
+  layer: { type: 'string', enum: ['shipped', 'user', 'project'] }, digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+  description: { type: 'string', maxLength: 512 }, instruction: { type: 'string', maxLength: 8192 }, executable: { type: 'boolean' },
+  mode: object({ name: { type: 'string', maxLength: 64 }, tools: { type: ['array', 'string'], maxItems: 128, items: { type: 'string', maxLength: 128 } },
+    prompt: { type: ['array', 'string'], maxItems: 128, items: { type: 'string', maxLength: 128 } } }, ['name', 'tools', 'prompt']),
+  permission: object({ profile: { type: 'string', enum: ['read-only', 'workspace-write', 'full-access'] },
+    network: { type: 'string', enum: ['policy', 'unrestricted', 'disabled'] } }, ['profile', 'network']),
+  generation: object({ outputTokens: { type: ['integer', 'null'], minimum: 1 }, thinkingEffort: { type: ['string', 'null'], enum: ['none', 'low', 'high', 'max', null] } }, ['outputTokens', 'thinkingEffort']),
+  limits: object({ loopIterations: { type: 'integer', minimum: 1 }, modelCalls: { type: 'integer', minimum: 1 } }, ['loopIterations', 'modelCalls']),
+  outputSchemaDigest: { type: 'string', maxLength: 64 }, requiredChecks: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 64 } },
+  narrowedFields: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: 32 } },
+}, ['presetId', 'layer', 'digest', 'description', 'instruction', 'executable', 'mode', 'permission', 'generation', 'limits', 'requiredChecks', 'narrowedFields']);
 const finiteExecutionProperties: Record<string, object> = {
   executionId: id,
   projectIdentity: { type: 'string', minLength: 1, maxLength: 4096 },
@@ -493,8 +519,24 @@ const tools: Tool[] = [
     inputSchema: object({ operationId: id, timeoutMs: { type: 'integer', minimum: 0, maximum: 300_000, default: 60_000 } }, ['operationId']), outputSchema: awaitOutput },
   { name: 'ligule_run_cancel', description: 'Cancel this known operation and wait for Host cleanup. Reports terminated only after it settles. Completed operations keep their outcome; other sessions are unaffected.',
     inputSchema: object({ operationId: id }, ['operationId']), outputSchema: object({ ...operationProperties, terminated: { type: 'boolean' } }, ['operationId', 'sessionId', 'state', 'terminated']) },
-  { name: 'ligule_subrun_start', description: 'Start one child Run under this session’s expected active parentRunId. The same Host-owned manager, Permission, Policy and shared task budget are used; this is not an independent background job.',
-    inputSchema: object({ sessionId: id, parentRunId: id, task: { type: 'string', minLength: 1, maxLength: 65536 } }, ['sessionId', 'parentRunId', 'task']), outputSchema: subrunReferenceOutput },
+  { name: 'ligule_preset_list', description: 'List task presets visible to this Session through the Host. Invalid definitions return safe error codes and do not expose filesystem paths.',
+    inputSchema: object({ sessionId: id, cursor: { type: 'string', minLength: 1, maxLength: 128 }, limit: { type: 'integer', minimum: 1, maximum: 64, default: 64 } }, ['sessionId']),
+    outputSchema: presetListOutput },
+  { name: 'ligule_preset_preview', description: 'Resolve one task preset through the Host and show its effective mode, Permission, generation, limits, output contract, required checks, and parent restrictions. Without parentRunId the result is a non-executable preview.',
+    inputSchema: object({ sessionId: id, parentRunId: id, presetId: { type: 'string', minLength: 1, maxLength: 64 },
+      mode: MODE_SELECTION_SCHEMA, outputTokens: { type: 'integer', minimum: 1 },
+      thinkingEffort: { type: 'string', enum: ['none', 'low', 'high', 'max'] },
+      loopIterations: { type: 'integer', minimum: 1 }, modelCalls: { type: 'integer', minimum: 1 }, outputSchema: { type: 'object' },
+    }, ['sessionId', 'presetId']), outputSchema: presetPreviewOutput },
+  { name: 'ligule_subrun_start', description: 'Start one child Run under this session’s expected active parentRunId. The same Host-owned manager, Permission, Policy and shared task budget are used; an optional presetId selects a Host-resolved task preset.',
+    inputSchema: object({ sessionId: id, parentRunId: id, task: { type: 'string', minLength: 1, maxLength: 65536 },
+      presetId: { type: 'string', minLength: 1, maxLength: 64 }, mode: MODE_SELECTION_SCHEMA,
+      outputTokens: { type: 'integer', minimum: 1 }, thinkingEffort: { type: 'string', enum: ['none', 'low', 'high', 'max'] },
+      loopIterations: { type: 'integer', minimum: 1 }, modelCalls: { type: 'integer', minimum: 1 }, outputSchema: { type: 'object' },
+    }, ['sessionId', 'parentRunId', 'task']), outputSchema: subrunReferenceOutput },
+  { name: 'ligule_subrun_list', description: 'List bounded child Runs under one parent Run from validated persisted Session parentage. Results remain discoverable after Host restart.',
+    inputSchema: object({ sessionId: id, parentRunId: id, cursor: { type: 'string', minLength: 1, maxLength: 256 },
+      limit: { type: 'integer', minimum: 1, maximum: 32, default: 32 } }, ['sessionId', 'parentRunId']), outputSchema: subrunListOutput },
   { name: 'ligule_subrun_status', description: 'Read a child Run owned by this parent Run. After Host restart, status is read from the persisted child Session without replaying work.',
     inputSchema: object({ sessionId: id, parentRunId: id, subrunId: id }, ['sessionId', 'parentRunId', 'subrunId']), outputSchema: subrunStatusOutput },
   { name: 'ligule_subrun_message', description: 'Send bounded steering to one active child Run. The Host derives source from this connection and checks both child IDs.',
@@ -556,6 +598,13 @@ interface Arguments {
   parentRunId?: string;
   subrunId?: string;
   subrunIds?: string[];
+  presetId?: string;
+  mode?: unknown;
+  outputTokens?: number;
+  thinkingEffort?: string;
+  loopIterations?: number;
+  modelCalls?: number;
+  outputSchema?: Record<string, unknown>;
   task?: string;
   input?: string;
   initial?: McpInitialSettings;
@@ -689,7 +738,25 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
         case 'ligule_run_status': result = control.status(input.operationId!, input.after ?? 0, input.limit ?? 20); break;
         case 'ligule_run_await': result = await control.await(input.operationId!, input.timeoutMs ?? 60_000); break;
         case 'ligule_run_cancel': result = await control.cancel(input.operationId!); break;
-        case 'ligule_subrun_start': result = await control.subrunStart(input.sessionId!, input.parentRunId!, input.task!); break;
+        case 'ligule_preset_list': result = await control.presetList(input.sessionId!, input.cursor, input.limit ?? 64); break;
+        case 'ligule_preset_preview': result = await control.presetPreview(input.sessionId!, input.presetId!, input.parentRunId, {
+          ...(input.mode === undefined ? {} : { mode: input.mode }),
+          ...(input.outputTokens === undefined ? {} : { outputTokens: input.outputTokens }),
+          ...(input.thinkingEffort === undefined ? {} : { thinkingEffort: input.thinkingEffort }),
+          ...(input.loopIterations === undefined ? {} : { loopIterations: input.loopIterations }),
+          ...(input.modelCalls === undefined ? {} : { modelCalls: input.modelCalls }),
+          ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }),
+        }); break;
+        case 'ligule_subrun_start': result = await control.subrunStart(input.sessionId!, input.parentRunId!, input.task!, {
+          ...(input.presetId === undefined ? {} : { presetId: input.presetId }),
+          ...(input.mode === undefined ? {} : { mode: input.mode }),
+          ...(input.outputTokens === undefined ? {} : { outputTokens: input.outputTokens }),
+          ...(input.thinkingEffort === undefined ? {} : { thinkingEffort: input.thinkingEffort }),
+          ...(input.loopIterations === undefined ? {} : { loopIterations: input.loopIterations }),
+          ...(input.modelCalls === undefined ? {} : { modelCalls: input.modelCalls }),
+          ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }),
+        }); break;
+        case 'ligule_subrun_list': result = await control.subrunList(input.sessionId!, input.parentRunId!, input.cursor, input.limit ?? 32); break;
         case 'ligule_subrun_status': result = await control.subrunStatus(input.sessionId!, input.parentRunId!, input.subrunId!); break;
         case 'ligule_subrun_message': result = await control.subrunMessage(input.sessionId!, input.parentRunId!, input.subrunId!, input.runId!, input.input!); break;
         case 'ligule_subrun_wait': result = await control.subrunWait(input.sessionId!, input.parentRunId!, input.subrunIds!, input.timeoutMs ?? 30_000); break;

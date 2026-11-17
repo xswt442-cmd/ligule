@@ -1,0 +1,9 @@
+schemaVersion = 1
+description = "Implement a requested change within the current Session permissions and project boundary."
+instruction = """Use the user's task as the exact change request. Inspect relevant files before editing. Keep edits within the authorized project boundary, run only checks that the current Policy and Permission allow, and report changed files and actual command results. The preset does not grant write or command permission."""
+permissionProfile = "workspace-write"
+network = "policy"
+
+[mode]
+tools = ["exec", "exec_control", "find", "search", "read", "create", "write", "edit", "delete"]
+prompt = []

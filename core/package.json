@@ -40,7 +40,7 @@
     "./modes/*": "./modes/*",
     "./package.json": "./package.json"
   },
-  "files": ["dist", "modes", "README.md", "LICENSE"],
+  "files": ["dist", "modes", "agents", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc -b tsconfig.json",
     "typecheck:test": "tsc --noEmit -p tests/tsconfig.json",

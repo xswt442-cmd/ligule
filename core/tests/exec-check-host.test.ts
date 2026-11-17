@@ -250,7 +250,8 @@ test('a finite-command timeout is recorded separately from a valid structured re
     await writeFile(join(projectDirectory, 'scope.txt'), 'stable\n');
     const report = { schema: 'ligule-test-report', version: 1, passed: 1, failed: 0, skipped: 0, todo: 0 };
     const scriptPath = join(projectDirectory, 'timeout-after-report.mjs');
-    await writeFile(scriptPath, `process.stdout.write('LIGULE_TEST_REPORT_V1\\t${JSON.stringify(report)}\\n');\nsetTimeout(() => {}, 10000);\n`);
+    const reportText = `LIGULE_TEST_REPORT_V1\t${JSON.stringify(report)}\n`;
+    await writeFile(scriptPath, `import { writeSync } from 'node:fs';\nwriteSync(1, ${JSON.stringify(reportText)});\nsetTimeout(() => {}, 10000);\n`);
     await client.request('workspace.trust', { projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true });
     client.onRequest((message) => message.method === 'approval.request' ? { decision: 'allow' } : undefined);
     await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: {
@@ -260,14 +261,14 @@ test('a finite-command timeout is recorded separately from a valid structured re
     } }) });
     const history = await client.request('session.read', { sessionId }) as {
       events: { kind?: string; executionId?: string; errorCode?: string; executionState?: string; commandStatus?: string;
-        reportStatus?: string; report?: { failed: number } }[];
+        reportStatus?: string; reportReason?: string; logStatus?: string; logTotalBytes?: number; report?: { failed: number } }[];
     };
     const check = history.events.find((event) => event.kind === 'check');
     assert.ok(check, JSON.stringify(history.events));
     assert.equal(check.executionState, 'failed');
     assert.equal(check.commandStatus, 'not_met');
     assert.equal(check.errorCode, 'exec_timeout');
-    assert.equal(check.reportStatus, 'reported_pass', 'the report and command terminal result stay separate');
+    assert.equal(check.reportStatus, 'reported_pass', `the report and command terminal result stay separate: ${JSON.stringify(check)}`);
     assert.equal(check.report?.failed, 0);
   }, {
     permission,

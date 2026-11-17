@@ -4,8 +4,8 @@
 // 它沿用父会话的权限判定、不能递归启动其他子 Agent，且拥有独立记录以便恢复。
 //
 // 该工具通过插件注册，不属于 Kernel 内置能力。每个父会话最多同时运行三个派生任务。
-import { randomUUID } from 'node:crypto';
-import { readdir } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { opendir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import type { ExecController } from '../capability/exec.js';
@@ -17,6 +17,9 @@ import { createSessionLog, type SessionLog } from '../session/session.js';
 import { createRunAcceptance, isRunAcceptance, publishRunResult, readRunResult, runReceipts } from '../session/run.js';
 import { runEvidenceReferences } from '../session/run-evidence.js';
 import { readSessionRecord } from '../session/record.js';
+import { checkedCheckDeclaration, checkedCheckEvent } from '../session/checks.js';
+import { checkedFileChangeFact } from '../session/file-changes.js';
+import type { SessionEvent } from '../session/format.js';
 import { createRunSteeringInbox, type RunSteeringInbox } from '../kernel/run-steering.js';
 import { currentKernelExecutionContext } from '../kernel/execution-context.js';
 import type { RequestDiagnostic } from '../kernel/request-diagnostics.js';
@@ -46,8 +49,13 @@ import { createScreenshotPlugin } from './screenshot.js';
 import { createMediaStore, type MediaStore } from '../capability/media.js';
 import { boundaryOf } from '../capability/limits.js';
 import type { PermissionContext } from '../kernel/permission.js';
+import { createPermissionContext, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
 import type { Telemetry } from '../kernel/telemetry.js';
 import type { RunResult } from '../delegation.js';
+import {
+  listAgentPresets, loadAgentPreset,
+  type AgentPreset, type AgentPresetDirectories, type AgentPresetPage,
+} from '../kernel/agent-presets.js';
 
 type LoopOptions = Parameters<typeof createLoop>[0];
 type ThinkingEffort = 'none' | 'low' | 'high' | 'max';
@@ -85,6 +93,7 @@ export interface SubagentDeps {
   /** Custom user tools inherit into the child after its built-ins have registered. */
   customToolPlugin?: Plugin<Kernel>;
   modePaths?: ModeDirectories;
+  presetDirectories?: AgentPresetDirectories;
   modeFile?: () => ModeFile | undefined;
   promptFragments?: () => readonly ModePromptFragment[];
   promptFragmentBytes?: number;
@@ -99,12 +108,29 @@ export interface SubagentDeps {
 
 export interface SubagentRunArguments {
   readonly task?: string;
+  readonly presetId?: string;
   readonly mode?: RequestedModeSelection;
   readonly outputTokens?: number;
   readonly thinkingEffort?: ThinkingEffort;
   readonly loopIterations?: number;
   readonly modelCalls?: number;
   readonly outputSchema?: Record<string, unknown>;
+}
+
+export interface AgentPresetPreview {
+  readonly presetId: string;
+  readonly layer: AgentPreset['layer'];
+  readonly digest: string;
+  readonly description: string;
+  readonly instruction: string;
+  readonly executable: boolean;
+  readonly mode: { readonly name: string; readonly tools: readonly string[] | '*'; readonly prompt: readonly string[] | '*' };
+  readonly permission: { readonly profile: PermissionProfile; readonly network: PermissionNetwork };
+  readonly generation: { readonly outputTokens: number | null; readonly thinkingEffort: string | null };
+  readonly limits: { readonly loopIterations: number; readonly modelCalls: number };
+  readonly outputSchemaDigest?: string;
+  readonly requiredChecks: readonly string[];
+  readonly narrowedFields: readonly string[];
 }
 
 export interface SubagentCallContext {
@@ -139,6 +165,13 @@ export interface SubagentRuntime {
   readonly name: string;
   setup(kernel: { register(tool: unknown): () => void; manifest(): readonly { readonly name: string }[] }): () => void;
   start(args: SubagentRunArguments, context: SubagentCallContext, source?: 'human' | 'controller'): Promise<SubrunReference>;
+  listPresets(options?: { readonly cursor?: string; readonly limit?: number }): Promise<AgentPresetPage>;
+  previewPreset(presetId: string, overrides: Omit<SubagentRunArguments, 'task' | 'presetId'>, context: SubagentCallContext): Promise<AgentPresetPreview>;
+  list(parentRunId: string, options?: { readonly cursor?: string; readonly limit?: number }): Promise<{
+    readonly subruns: readonly SubrunStatus[];
+    readonly nextCursor?: string;
+    readonly truncated: boolean;
+  }>;
   status(subrunId: string, parentRunId: string): Promise<SubrunStatus>;
   message(args: { readonly subrunId: string; readonly runId: string; readonly parentRunId: string; readonly input: string }, source: 'human' | 'controller', onAccepted?: () => void): Promise<{
     readonly inputId: string;
@@ -198,8 +231,22 @@ interface ChildRunLifecycle {
   readonly subrunId: string;
   readonly sessionId: string;
   readonly source: 'human' | 'controller';
+  readonly prepared?: PreparedSubagentRun;
   readonly onStarted: (child: ChildRunStarted) => void;
+  readonly onContextPersisted?: () => void;
   readonly onProgress: (event: LoopProgressEvent) => void;
+}
+
+interface PreparedSubagentRun {
+  readonly args: SubagentRunArguments;
+  readonly preset?: AgentPreset;
+  readonly provider: SubagentProvider;
+  readonly limits: LoopLimits;
+  readonly outputContract?: ReturnType<typeof createOutputSchemaContract>;
+  readonly permission: PermissionContext;
+  readonly resolvedMode?: Awaited<ReturnType<typeof resolveModeSelection>>;
+  readonly preview?: AgentPresetPreview;
+  readonly snapshot?: Record<string, unknown>;
 }
 
 function deferred<TResult>() {
@@ -252,6 +299,73 @@ function childProvider(args: { outputTokens?: number; thinkingEffort?: ThinkingE
   return provider.withGeneration(options);
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (typeof value === 'object' && value !== null) {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+const PROFILE_RANK: Record<PermissionProfile, number> = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
+const NETWORK_RANK: Record<PermissionNetwork, number> = { disabled: 0, policy: 1, unrestricted: 2 };
+const THINKING_RANK: Record<ThinkingEffort, number> = { none: 0, low: 1, high: 2, max: 3 };
+
+function intersection(left: readonly string[] | '*', right: readonly string[] | '*', allowed: readonly string[]): readonly string[] | '*' {
+  if (left === '*' && right === '*') return '*';
+  const leftSet = new Set(left === '*' ? allowed : left);
+  const rightSet = new Set(right === '*' ? allowed : right);
+  return allowed.filter(name => leftSet.has(name) && rightSet.has(name));
+}
+
+function requiredCheckFailures(events: readonly SessionEvent[], runId: string, required: readonly string[]): { name: string; reason: string }[] {
+  const latestByName = new Map<string, { readonly callId: string; readonly seq: number }>();
+  const checkByCall = new Map<string, { readonly event: SessionEvent; readonly check: NonNullable<ReturnType<typeof checkedCheckEvent>> }>();
+  for (const event of events) {
+    if (event.kind === 'tool' && event.runId === runId && event.tool === 'exec'
+      && typeof event.callId === 'string' && typeof event.args === 'object' && event.args !== null && !Array.isArray(event.args)) {
+      const declaration = checkedCheckDeclaration((event.args as Record<string, unknown>).check);
+      if (declaration !== undefined && typeof event.seq === 'number') latestByName.set(declaration.name, { callId: event.callId, seq: event.seq });
+    }
+    if (event.kind === 'check' && event.runId === runId && typeof event.callId === 'string') {
+      const check = checkedCheckEvent(event);
+      if (check !== undefined) checkByCall.set(check.callId, { event, check });
+    }
+  }
+  const failures: { name: string; reason: string }[] = [];
+  for (const name of required) {
+    const latest = latestByName.get(name);
+    const recorded = latest === undefined ? undefined : checkByCall.get(latest.callId);
+    const check = recorded?.check;
+    const checkSeq = recorded?.event.seq;
+    const knownChangeAfter = check !== undefined && checkSeq !== undefined && events.some(event =>
+      event.kind === 'tool' && event.runId === runId && event.seq > checkSeq && Array.isArray(event.fileChanges)
+      && event.fileChanges.some(value => {
+        const change = checkedFileChangeFact(value);
+        return change !== undefined && check.declaration.scope.includes(change.path) && change.outcome !== 'unchanged';
+      }));
+    const complete = check !== undefined
+      && check.commandStatus === 'met'
+      && check.reportStatus === 'reported_pass'
+      && check.report !== undefined && check.report.passed > 0 && check.report.failed === 0
+      && check.logStatus === 'complete'
+      && check.scopeStatus === 'sampled'
+      && !knownChangeAfter;
+    if (!complete) {
+      const reason = latest === undefined ? 'not_run' : check === undefined ? 'result_unavailable'
+        : knownChangeAfter || check.scopeStatus === 'stale' ? 'scope_stale'
+          : check.reportStatus === 'zero_tests' || check.report?.passed === 0 ? 'no_tests_passed'
+            : check.reportStatus !== 'reported_pass' || (check.report?.failed ?? 0) > 0 ? 'report_not_passing'
+              : check.commandStatus !== 'met' ? 'command_not_met'
+                : check.logStatus !== 'complete' ? 'log_incomplete'
+                  : check.scopeStatus !== 'sampled' ? 'scope_unverified' : 'result_unavailable';
+      failures.push({ name, reason });
+    }
+  }
+  return failures;
+}
+
 export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
   const loopConfig = typeof deps.config.loop === 'object' && deps.config.loop !== null && !Array.isArray(deps.config.loop)
     ? deps.config.loop as Record<string, unknown> : {};
@@ -259,13 +373,226 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
   if (typeof concurrency !== 'number' || !Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > MAX_CONCURRENT_SUBAGENTS) {
     throw new KernelError('subagent_concurrency_invalid', { detail: `loop.maxConcurrentSubagents must be an integer between 1 and ${MAX_CONCURRENT_SUBAGENTS}` });
   }
+  const maxConcurrentSubagents = concurrency as number;
   let counter = 0;
   let counterInitialization: Promise<void> | undefined;
   let closed = false;
   let active = 0;
   const subruns = new Map<string, SubrunRecord>();
   const closedParents = new Set<string>();
+  let parentKernel: { manifest(): readonly { readonly name: string }[]; selectable(): readonly string[] } | undefined;
   let executeSubagent: ((args: SubagentRunArguments, context: SubagentCallContext, lifecycle?: ChildRunLifecycle) => Promise<Record<string, unknown>>) | undefined;
+
+  async function listPresets(options: { readonly cursor?: string; readonly limit?: number } = {}): Promise<AgentPresetPage> {
+    if (deps.presetDirectories === undefined) throw new KernelError('agent_preset_unavailable');
+    return await listAgentPresets(deps.presetDirectories, options);
+  }
+
+  async function prepareRun(args: SubagentRunArguments, context: SubagentCallContext, requireTask: boolean): Promise<PreparedSubagentRun> {
+    if (requireTask && (typeof args.task !== 'string' || args.task.trim() === '')) {
+      throw new KernelError('subagent_task_required');
+    }
+    const parentLimits = deps.loopLimits ?? DEFAULT_LOOP_LIMITS;
+    if (args.presetId === undefined) {
+      const namedMode = typeof args.mode === 'string' || (typeof args.mode === 'object' && args.mode?.type === 'named');
+      if (namedMode && deps.modePaths === undefined) {
+        throw new KernelError('subagent_mode_paths_required', { detail: 'this run has no mode directories to look a name up in' });
+      }
+      const outputContract = args.outputSchema === undefined ? undefined : createOutputSchemaContract(args.outputSchema);
+      const limits = childLimits(args, parentLimits);
+      const provider = childProvider(args, deps.provider);
+      const resolvedMode = await resolveModeSelection(args.mode, deps.modePaths, deps.modeFile?.());
+      return { args, provider, limits, ...(outputContract === undefined ? {} : { outputContract }),
+        permission: context.permission, resolvedMode };
+    }
+    if (deps.presetDirectories === undefined) throw new KernelError('agent_preset_unavailable');
+    if (parentKernel === undefined) throw new KernelError('subagent_runtime_unavailable');
+    const preset = await loadAgentPreset(args.presetId, deps.presetDirectories);
+    const parentMode = deps.modeFile?.();
+    const parentTools = parentKernel.selectable();
+    const fragments = deps.promptFragments?.() ?? [];
+    const parentPrompt = parentMode?.prompt === undefined || parentMode.prompt === '*'
+      ? fragments.map(fragment => fragment.name) : [...parentMode.prompt];
+    const fragmentNames = new Set(fragments.map(fragment => fragment.name));
+
+    const resolvePresetMode = async (selection: AgentPreset['mode'] | RequestedModeSelection) => {
+      if (deps.modePaths === undefined) throw new KernelError('agent_preset_mode_invalid');
+      try {
+        const resolved = await resolveModeSelection(selection as RequestedModeSelection, deps.modePaths);
+        if (resolved === undefined) throw new KernelError('agent_preset_mode_invalid');
+        return resolved;
+      } catch {
+        throw new KernelError('agent_preset_mode_invalid');
+      }
+    };
+    const validateMode = (mode: NonNullable<PreparedSubagentRun['resolvedMode']>): void => {
+      const tools = mode.application.tools;
+      if (tools !== '*' && tools.some(name => !parentTools.includes(name))) {
+        throw new KernelError('agent_preset_tool_unavailable');
+      }
+      const prompt = mode.application.prompt;
+      if (prompt !== '*' && prompt.some(name => !parentPrompt.includes(name) || !fragmentNames.has(name))) {
+        throw new KernelError('agent_preset_prompt_unavailable');
+      }
+    };
+    const presetSelection: RequestedModeSelection = typeof preset.mode === 'string' ? preset.mode : preset.mode;
+    const presetMode = await resolvePresetMode(presetSelection);
+    validateMode(presetMode);
+    const presetPrompt = presetMode.application.prompt === '*' ? parentPrompt : presetMode.application.prompt;
+    let resolvedMode = {
+      ...presetMode,
+      application: { ...presetMode.application, prompt: presetPrompt },
+    };
+    if (args.mode !== undefined) {
+      const override = await resolvePresetMode(args.mode);
+      validateMode(override);
+      const tools = intersection(presetMode.application.tools, override.application.tools, parentTools);
+      const overridePrompt = override.application.prompt === '*' ? parentPrompt : override.application.prompt;
+      const promptSelection = intersection(presetPrompt, overridePrompt, parentPrompt);
+      const prompt = promptSelection === '*' ? parentPrompt : promptSelection;
+      resolvedMode = {
+        application: { name: 'inline', tools, prompt }, source: 'inline', name: 'inline', layer: 'inline',
+      };
+    }
+
+    const narrowedFields: string[] = [];
+    const parentPermission = context.permission;
+    const profile = preset.permissionProfile === undefined || PROFILE_RANK[preset.permissionProfile] > PROFILE_RANK[parentPermission.profile]
+      ? parentPermission.profile : preset.permissionProfile;
+    const network = preset.network === undefined || NETWORK_RANK[preset.network] > NETWORK_RANK[parentPermission.network]
+      ? parentPermission.network : preset.network;
+    if (profile !== preset.permissionProfile && preset.permissionProfile !== undefined) narrowedFields.push('permissionProfile');
+    if (network !== preset.network && preset.network !== undefined) narrowedFields.push('network');
+    if (profile !== parentPermission.profile) narrowedFields.push('permissionProfile');
+    if (network !== parentPermission.network) narrowedFields.push('network');
+    const permission = createPermissionContext(profile, network, parentPermission.capabilities, {
+      profiles: parentPermission.profiles,
+      limitations: parentPermission.limitations,
+      partialWorkspaceWriteConfirmationRequired: parentPermission.partialWorkspaceWriteConfirmationRequired,
+      partialWorkspaceWriteConfirmed: parentPermission.partialWorkspaceWriteConfirmed,
+      workspaceTrusted: parentPermission.workspaceTrusted,
+    });
+
+    const explicitLimits = {
+      loopIterations: args.loopIterations,
+      modelCalls: args.modelCalls,
+    };
+    const resolveLimit = (field: 'loopIterations' | 'modelCalls', presetValue: number | undefined, explicit: number | undefined, parent: number): number => {
+      if (explicit !== undefined && presetValue !== undefined && explicit > presetValue) {
+        throw new KernelError('agent_preset_override_escalation', { detail: `${field} exceeds the selected preset limit` });
+      }
+      if (explicit !== undefined && explicit > parent) {
+        throw new KernelError('subagent_budget_escalation', { detail: `${field} exceeds the parent session limit` });
+      }
+      if (presetValue !== undefined && presetValue > parent) narrowedFields.push(field);
+      return explicit ?? Math.min(presetValue ?? parent, parent);
+    };
+    const loopIterations = resolveLimit('loopIterations', preset.loopIterations, explicitLimits.loopIterations, parentLimits.iterations);
+    const modelCalls = resolveLimit('modelCalls', preset.modelCalls, explicitLimits.modelCalls, parentLimits.modelCalls);
+
+    const parentOutputTokens = deps.provider.outputTokens;
+    const explicitOutputTokens = args.outputTokens;
+    if (explicitOutputTokens !== undefined && preset.outputTokens !== undefined && explicitOutputTokens > preset.outputTokens) {
+      throw new KernelError('agent_preset_override_escalation', { detail: 'outputTokens exceeds the selected preset limit' });
+    }
+    if (explicitOutputTokens !== undefined && (parentOutputTokens === undefined || explicitOutputTokens > parentOutputTokens)) {
+      throw new KernelError('subagent_output_budget_escalation');
+    }
+    if (preset.outputTokens !== undefined && parentOutputTokens !== undefined && preset.outputTokens > parentOutputTokens) {
+      narrowedFields.push('outputTokens');
+    }
+    const effectiveOutputTokens = explicitOutputTokens
+      ?? (preset.outputTokens === undefined ? undefined : Math.min(preset.outputTokens, parentOutputTokens ?? preset.outputTokens));
+
+    const parentEffort = deps.provider.thinkingEffort ?? deps.provider.thinkingCapability?.defaultEffort;
+    const explicitEffort = args.thinkingEffort;
+    if (explicitEffort !== undefined && preset.thinkingEffort !== undefined
+      && THINKING_RANK[explicitEffort] > THINKING_RANK[preset.thinkingEffort]) {
+      throw new KernelError('agent_preset_override_escalation', { detail: 'thinkingEffort exceeds the selected preset limit' });
+    }
+    if (explicitEffort !== undefined && parentEffort !== undefined
+      && THINKING_RANK[explicitEffort] > (THINKING_RANK[parentEffort as ThinkingEffort] ?? 0)) {
+      throw new KernelError('subagent_thinking_escalation');
+    }
+    if (preset.thinkingEffort !== undefined && deps.provider.thinkingCapability?.efforts.includes(preset.thinkingEffort) !== true) {
+      throw new KernelError('provider_thinking_effort_invalid');
+    }
+    const effectiveEffort = explicitEffort ?? (preset.thinkingEffort === undefined ? undefined
+      : parentEffort !== undefined && THINKING_RANK[preset.thinkingEffort] > (THINKING_RANK[parentEffort as ThinkingEffort] ?? 0)
+        ? (narrowedFields.push('thinkingEffort'), parentEffort as ThinkingEffort) : preset.thinkingEffort);
+    if (effectiveEffort !== undefined && parentEffort !== undefined && effectiveEffort !== parentEffort) narrowedFields.push('thinkingEffort');
+
+    if (args.outputSchema !== undefined && preset.outputSchema !== undefined
+      && canonicalJson(args.outputSchema) !== canonicalJson(preset.outputSchema)) {
+      throw new KernelError('agent_preset_output_schema_conflict');
+    }
+    const outputSchema = preset.outputSchema ?? args.outputSchema;
+    let outputContract: ReturnType<typeof createOutputSchemaContract> | undefined;
+    try { outputContract = outputSchema === undefined ? undefined : createOutputSchemaContract(outputSchema); }
+    catch { throw new KernelError('agent_preset_schema_invalid'); }
+
+    const generationArgs: { outputTokens?: number; thinkingEffort?: ThinkingEffort } = {};
+    if (effectiveOutputTokens !== undefined && (explicitOutputTokens !== undefined || effectiveOutputTokens !== parentOutputTokens)) {
+      generationArgs.outputTokens = effectiveOutputTokens;
+    }
+    if (effectiveEffort !== undefined && (explicitEffort !== undefined || effectiveEffort !== parentEffort)) {
+      generationArgs.thinkingEffort = effectiveEffort;
+    }
+    const provider = childProvider(generationArgs, deps.provider);
+    const limits = childLimits({ loopIterations, modelCalls }, parentLimits);
+    const effectiveArgs: SubagentRunArguments = {
+      ...args,
+      loopIterations,
+      modelCalls,
+      ...(generationArgs.outputTokens === undefined ? {} : { outputTokens: generationArgs.outputTokens }),
+      ...(generationArgs.thinkingEffort === undefined ? {} : { thinkingEffort: generationArgs.thinkingEffort }),
+      ...(outputSchema === undefined ? {} : { outputSchema }),
+    };
+    const preview: AgentPresetPreview = {
+      presetId: preset.id, layer: preset.layer, digest: preset.digest, description: preset.description,
+      instruction: preset.instruction, executable: context.runId !== undefined && !closedParents.has(context.runId),
+      mode: { name: resolvedMode.name, tools: resolvedMode.application.tools, prompt: resolvedMode.application.prompt },
+      permission: { profile: permission.profile, network: permission.network },
+      generation: {
+        outputTokens: provider.outputTokens ?? null,
+        thinkingEffort: provider.thinkingEffort ?? provider.thinkingCapability?.defaultEffort ?? null,
+      },
+      limits: { loopIterations: limits.iterations, modelCalls: limits.modelCalls },
+      ...(outputContract === undefined ? {} : { outputSchemaDigest: outputContract.digest }),
+      requiredChecks: preset.requiredChecks ?? [],
+      narrowedFields: [...new Set(narrowedFields)],
+    };
+    const snapshot: Record<string, unknown> = {
+      version: 1,
+      preset: { id: preset.id, layer: preset.layer, digest: preset.digest },
+      instruction: preset.instruction,
+      instructionDigest: createHash('sha256').update(preset.instruction).digest('hex'),
+      mode: {
+        name: resolvedMode.name,
+        source: resolvedMode.source,
+        layer: resolvedMode.layer,
+        ...(resolvedMode.fileDigest === undefined ? {} : { fileDigest: resolvedMode.fileDigest }),
+        tools: resolvedMode.application.tools,
+        prompt: resolvedMode.application.prompt,
+      },
+      generation: preview.generation,
+      limits: preview.limits,
+      permission: preview.permission,
+      ...(outputContract === undefined ? {} : { outputSchemaDigest: outputContract.digest }),
+      requiredChecks: preview.requiredChecks,
+    };
+    return { args: effectiveArgs, preset, provider, limits, outputContract, permission, resolvedMode, preview, snapshot };
+  }
+
+  async function previewPreset(
+    presetId: string,
+    overrides: Omit<SubagentRunArguments, 'task' | 'presetId'>,
+    context: SubagentCallContext,
+  ): Promise<AgentPresetPreview> {
+    const prepared = await prepareRun({ ...overrides, presetId }, context, false);
+    if (prepared.preview === undefined) throw new KernelError('agent_preset_preview_unavailable');
+    return prepared.preview;
+  }
 
   async function nextSessionId(): Promise<string> {
     if (counterInitialization === undefined) {
@@ -346,6 +673,11 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
     if (context.runId !== undefined && closedParents.has(context.runId)) throw new KernelError('subagent_parent_not_active');
     const execute = executeSubagent;
     if (execute === undefined) throw new KernelError('subagent_runtime_unavailable');
+    if (active >= maxConcurrentSubagents) throw new KernelError('subagent_concurrency_limit');
+    const prepared = await prepareRun(args, context, true);
+    if (closed || (context.runId !== undefined && closedParents.has(context.runId))) {
+      throw new KernelError(closed ? 'subagent_host_closed' : 'subagent_parent_not_active');
+    }
     const sessionId = await nextSessionId();
     if (closed) throw new KernelError('subagent_host_closed');
     if (context.runId !== undefined && closedParents.has(context.runId)) throw new KernelError('subagent_parent_not_active');
@@ -373,10 +705,12 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
     };
     subruns.set(subrunId, record);
     let started = false;
-    const work = Promise.resolve().then(() => execute(args, { ...context, signal: controller.signal }, {
+    let referenceReady = false;
+    const work = Promise.resolve().then(() => execute(prepared.args, { ...context, permission: prepared.permission, signal: controller.signal }, {
       subrunId,
       sessionId,
       source,
+      prepared,
       onStarted: (child) => {
         record.sessionId = child.sessionId;
         record.runId = child.runId;
@@ -386,8 +720,17 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
         record.phase = 'preparing';
         record.updatedAt = Date.now();
         started = true;
-        ready.resolve(referenceOf(record));
+        if (prepared.preset === undefined) {
+          referenceReady = true;
+          ready.resolve(referenceOf(record));
+        }
       },
+      ...(prepared.preset === undefined ? {} : {
+        onContextPersisted: () => {
+          referenceReady = true;
+          ready.resolve(referenceOf(record));
+        },
+      }),
       onProgress: (event) => {
         record.phase = event.kind === 'phase' ? event.phase : event.phase;
         record.updatedAt = Date.now();
@@ -404,14 +747,14 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
       else if (record.state === 'failed' && typeof nested?.code === 'string') record.errorCode = nested.code;
       record.updatedAt = Date.now();
       record.completedAt = record.updatedAt;
-      if (!started) ready.reject(new KernelError(record.errorCode ?? 'subagent_failed'));
+      if (!referenceReady) ready.reject(new KernelError(record.errorCode ?? (started ? 'agent_preset_snapshot_unavailable' : 'subagent_failed')));
       return result;
     }, (error: unknown) => {
       record.state = controller.signal.aborted ? 'cancelled' : 'failed';
       record.errorCode = stableErrorCode(error);
       record.updatedAt = Date.now();
       record.completedAt = record.updatedAt;
-      if (!started) ready.reject(error);
+      if (!referenceReady) ready.reject(error);
       throw error;
     }).finally(() => parentSignal?.removeEventListener('abort', abortParent));
     void record.work.catch(() => undefined);
@@ -477,6 +820,64 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
 
   async function persistedStatus(subrunId: string, parentRunId: string): Promise<SubrunStatus> {
     return (await persistedChild(subrunId, parentRunId)).status;
+  }
+
+  async function list(parentRunId: string, options: { readonly cursor?: string; readonly limit?: number } = {}) {
+    const limit = options.limit ?? 32;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 32) throw new KernelError('subagent_list_limit_invalid');
+    let after: string | undefined;
+    if (options.cursor !== undefined) {
+      if (options.cursor.length > 256 || !/^[A-Za-z0-9_-]+$/u.test(options.cursor)) throw new KernelError('subagent_list_cursor_invalid');
+      const decoded = Buffer.from(options.cursor, 'base64url').toString('utf8');
+      if (!/^v1:[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(decoded)) throw new KernelError('subagent_list_cursor_invalid');
+      after = decoded.slice(3);
+    }
+    const prefix = `${deps.sessionId}.sub-`;
+    if (after !== undefined && (!after.startsWith(prefix) || !/^\d+$/u.test(after.slice(prefix.length)))) {
+      throw new KernelError('subagent_list_cursor_invalid');
+    }
+    const persistedNames: string[] = [];
+    let directoryEntries = 0;
+    let directoryTruncated = false;
+    let directory;
+    try { directory = await opendir(deps.directory); }
+    catch (cause) { throw new KernelError('subagent_session_directory_read_failed', { cause }); }
+    try {
+      for await (const entry of directory) {
+        directoryEntries += 1;
+        if (directoryEntries > 4_096) { directoryTruncated = true; break; }
+        if (!entry.isFile() || !entry.name.startsWith(prefix) || !entry.name.endsWith('.jsonl')) continue;
+        const id = entry.name.slice(0, -'.jsonl'.length);
+        if (/^\d+$/u.test(id.slice(prefix.length))) persistedNames.push(id);
+      }
+    } finally { await directory.close().catch(() => undefined); }
+    const persisted = persistedNames.sort((left, right) => Number(left.slice(prefix.length)) - Number(right.slice(prefix.length)));
+    const scanLimit = 256;
+    const scanned = persisted.slice(0, scanLimit);
+    const truncated = directoryTruncated || persisted.length > scanned.length;
+    const ids = new Set(scanned);
+    for (const record of subruns.values()) {
+      if (record.parentRunId === parentRunId && record.runId !== undefined) ids.add(record.subrunId);
+    }
+    const afterNumber = after === undefined ? undefined : Number(after.slice(prefix.length));
+    const ordered = [...ids].filter(id => afterNumber === undefined || Number(id.slice(prefix.length)) > afterNumber)
+      .sort((left, right) => Number(left.slice(prefix.length)) - Number(right.slice(prefix.length)));
+    const pageIds = ordered.slice(0, limit);
+    const items = await Promise.all(pageIds.map(async id => {
+      try { return await status(id, parentRunId); }
+      catch (error) {
+        if (error instanceof KernelError && error.code === 'subagent_not_found') return undefined;
+        throw error;
+      }
+    }));
+    const visible = items.filter((item): item is SubrunStatus => item !== undefined);
+    const last = pageIds.at(-1);
+    const hasMore = ordered.length > pageIds.length;
+    return {
+      subruns: visible,
+      ...(hasMore && last !== undefined ? { nextCursor: Buffer.from(`v1:${last}`).toString('base64url') } : {}),
+      truncated: truncated || hasMore,
+    };
   }
 
   async function status(subrunId: string, parentRunId: string): Promise<SubrunStatus> {
@@ -613,16 +1014,19 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
     setup(kernel: {
       register(tool: unknown): () => void;
       manifest(): readonly { readonly name: string }[];
+      selectable(): string[];
     }) {
+      parentKernel = kernel;
       const subagentTool = {
         name: 'subagent',
         access: 'inherit',
         execution: 'parallel',
-        description: `Delegate independent work to child runs with the parent policy and separate session records. Up to ${concurrency} children can run at once; children cannot create more children. Optional output, thinking, and loop budgets can only lower the parent session limits. Check result.state because a failed or cancelled child still returns its saved Session reference. When outputSchema is provided, the child must submit its final value with ligule_delegation_result.`,
+        description: `Delegate independent work to child runs with the parent policy and separate session records. Use subagent_preset_list and subagent_preset_preview to discover task presets. Optional presetId selects a Host-resolved bounded task preset; explicit settings cannot widen its limits. Up to ${maxConcurrentSubagents} children can run at once; children cannot create more children. Check result.state because a failed or cancelled child still returns its saved Session reference. When outputSchema is provided, the child must submit its final value with ligule_delegation_result.`,
         parameters: {
           type: 'object',
           properties: {
             task: { type: 'string', description: 'What the derived agent should do, as one instruction.' },
+            presetId: { type: 'string', minLength: 1, maxLength: 64, description: 'optional named Host-resolved child task preset' },
             mode: MODE_SELECTION_SCHEMA,
             outputTokens: { type: 'integer', minimum: 1, description: 'optional child output-token limit; it cannot exceed the parent session limit' },
             thinkingEffort: { type: 'string', enum: ['none', 'low', 'high', 'max'], description: 'optional child thinking effort; it cannot exceed the parent session setting' },
@@ -638,15 +1042,16 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
           if (typeof args.task !== 'string' || args.task.trim() === '') {
             throw new KernelError('subagent_task_required', { detail: 'the derived agent needs a task to work on' });
           }
-          const namedMode = typeof args.mode === 'string' || (typeof args.mode === 'object' && args.mode?.type === 'named');
-          if (namedMode && deps.modePaths === undefined) {
-            throw new KernelError('subagent_mode_paths_required', { detail: 'this run has no mode directories to look a name up in' });
-          }
-          const outputContract = args.outputSchema === undefined ? undefined : createOutputSchemaContract(args.outputSchema);
-          const limits = childLimits(args, deps.loopLimits ?? DEFAULT_LOOP_LIMITS);
-          const provider = childProvider(args, deps.provider);
-          if (active >= concurrency) {
-            throw new KernelError('subagent_concurrency_limit', { detail: `at most ${concurrency} derived runs can be active for this parent` });
+          const prepared = lifecycle?.prepared ?? await prepareRun(args, { signal, permission, runId, executionId, callId }, true);
+          args = prepared.args;
+          const childTask = args.task;
+          if (typeof childTask !== 'string' || childTask.trim() === '') throw new KernelError('subagent_task_required');
+          const outputContract = prepared.outputContract;
+          const limits = prepared.limits;
+          const provider = prepared.provider;
+          const childPermission = prepared.permission;
+          if (active >= maxConcurrentSubagents) {
+            throw new KernelError('subagent_concurrency_limit', { detail: `at most ${maxConcurrentSubagents} derived runs can be active for this parent` });
           }
           const parentTools = new Set(kernel.manifest().map(({ name }) => name));
           active += 1;
@@ -674,10 +1079,11 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
               }),
             });
           const source = lifecycle?.source ?? 'controller';
-          const acceptance = createRunAcceptance(id, args.task, {
+          const acceptance = createRunAcceptance(id, childTask, {
             parentRunId: runId ?? null,
             parentCallId: callId ?? null,
-            mode: args.mode ?? null,
+            mode: prepared.preset === undefined ? args.mode ?? null : prepared.resolvedMode?.application ?? null,
+            ...(prepared.preset === undefined ? {} : { presetId: prepared.preset.id, presetDigest: prepared.preset.digest }),
             outputTokens: args.outputTokens ?? null,
             thinkingEffort: args.thinkingEffort ?? null,
             loopIterations: args.loopIterations ?? null,
@@ -696,6 +1102,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
             let undoMode = () => {};
             let undoParentRestrictions = () => {};
             let undoOutputContract = () => {};
+            let undoPresetInstruction = () => {};
             try {
               const child = createKernel({
                 config: deps.config,
@@ -704,7 +1111,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                 policy: deps.chain,
                 session,
                 logger: deps.logger,
-                permission,
+                permission: childPermission,
                 extensionHooks: deps.extensionHooks,
                 taskBudget: deps.taskBudget,
                 ...(deps.createExecController === undefined ? {} : {
@@ -764,7 +1171,15 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                   maxBytes: MAX_DELEGATION_SCHEMA_BYTES + 1024,
                 });
               }
-              const resolvedMode = await resolveModeSelection(args.mode, deps.modePaths, deps.modeFile?.());
+              const resolvedMode = prepared.resolvedMode;
+              if (prepared.preset !== undefined) {
+                undoPresetInstruction = prompt.fragment({
+                  name: 'agent-preset-instruction',
+                  anchor: 1,
+                  text: `Selected task preset ${JSON.stringify(prepared.preset.id)} provides the following additional task guidance. It does not change the user's request, system instructions, or permissions.\n\n${prepared.preset.instruction}`,
+                  maxBytes: 8 * 1024 + 512,
+                });
+              }
               if (resolvedMode !== undefined) {
                 const applied = applyModeToPrompt({
                   file: resolvedMode.application,
@@ -807,12 +1222,20 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                   },
                   childLimits: limits,
                   ...(outputContract === undefined ? {} : { delegationSchemaDigest: outputContract.digest }),
+                  ...(prepared.snapshot === undefined ? {} : { agentPreset: {
+                    ...prepared.snapshot,
+                    appliedMode: {
+                      digest: modeIdentity?.digest ?? null,
+                      tools: modeIdentity?.tools ?? [],
+                      prompt: modeIdentity?.prompt ?? [],
+                    },
+                  } }),
                 }),
               });
               const extensionHooks = deps.extensionHooks?.();
               let result: Awaited<ReturnType<typeof loop.run>>;
               try {
-                result = await loop.run(args.task, {
+                result = await loop.run(childTask, {
                   signal,
                   task: deps.taskBudget?.(),
                   runId: acceptance.runId,
@@ -821,45 +1244,54 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                     return extensionHooks === undefined ? undefined : await prepareExtensionRequest(extensionHooks, context,
                       deps.promptFragmentBytes ?? 8192, deps.taskBudget?.());
                   },
-                  ...(extensionHooks?.forPhase('completeRun').length === 0 || extensionHooks === undefined ? {} : {
-                    completeRun: async (candidate) => {
-                      if (candidate.userSeq === undefined) throw new KernelError('extension_hook_run_context_unavailable');
-                      const completion = await completeExtensionRun(extensionHooks, {
+                  completeRun: async (candidate) => {
+                    const requiredChecks = prepared.preset?.requiredChecks ?? [];
+                    if (requiredChecks.length > 0) {
+                      const failures = requiredCheckFailures(await session.read(), acceptance.runId, requiredChecks);
+                      if (failures.length > 0) {
+                        const context = `Required checks remain incomplete: ${failures.map(item => `${item.name} (${item.reason})`).join(', ')}. Run each named check through the existing finite check tool and wait for a passing report with complete logs and a sampled unchanged scope.`;
+                        completionContext = context;
+                        return { decision: 'continue' as const, context };
+                      }
+                    }
+                    if (extensionHooks === undefined || extensionHooks.forPhase('completeRun').length === 0) return;
+                    const candidateContext = candidate;
+                    if (candidateContext.userSeq === undefined) throw new KernelError('extension_hook_run_context_unavailable');
+                    const completion = await completeExtensionRun(extensionHooks, {
                         sessionId: id,
                         runId: acceptance.runId,
                         source,
-                        signal: candidate.signal,
-                        callId: candidate.callId,
-                        ...(candidate.parentCallId === undefined ? {} : { parentCallId: candidate.parentCallId }),
-                        ...(candidate.parentRunId === undefined ? {} : { parentRunId: candidate.parentRunId }),
-                        ...(candidate.executionId === undefined ? {} : { executionId: candidate.executionId }),
-                        ...(candidate.parentExecutionId === undefined ? {} : { parentExecutionId: candidate.parentExecutionId }),
-                        userSeq: candidate.userSeq,
-                        candidate: candidate.candidate,
+                        signal: candidateContext.signal,
+                        callId: candidateContext.callId,
+                        ...(candidateContext.parentCallId === undefined ? {} : { parentCallId: candidateContext.parentCallId }),
+                        ...(candidateContext.parentRunId === undefined ? {} : { parentRunId: candidateContext.parentRunId }),
+                        ...(candidateContext.executionId === undefined ? {} : { executionId: candidateContext.executionId }),
+                        ...(candidateContext.parentExecutionId === undefined ? {} : { parentExecutionId: candidateContext.parentExecutionId }),
+                        userSeq: candidateContext.userSeq,
+                        candidate: candidateContext.candidate,
                         ...(structuredSubmitted ? { structuredDigest: structuredOutputDigest(structuredResult) } : {}),
-                        ...(candidate.completedBy === undefined ? {} : { completedBy: candidate.completedBy }),
-                        summary: candidate.summary,
+                        ...(candidateContext.completedBy === undefined ? {} : { completedBy: candidateContext.completedBy }),
+                        summary: candidateContext.summary,
                         request: async (name, requestArgs) => {
                           if (!child.readOnly().includes(name)) throw new KernelError('extension_request_read_only_required');
-                          const requestSignal = currentKernelExecutionContext()?.signal ?? candidate.signal;
+                          const requestSignal = currentKernelExecutionContext()?.signal ?? candidateContext.signal;
                           return await child.call(name, requestArgs, {
                             signal: requestSignal,
                             sessionId: id,
                             runId: acceptance.runId,
                             source,
                             callId: randomUUID(),
-                            parentCallId: candidate.callId,
-                            ...(candidate.executionId === undefined ? {} : { executionId: candidate.executionId }),
-                            ...(candidate.userSeq === undefined ? {} : { userSeq: candidate.userSeq }),
-                            ...(candidate.parentRunId === undefined ? {} : { parentRunId: candidate.parentRunId }),
-                            ...(candidate.parentExecutionId === undefined ? {} : { parentExecutionId: candidate.parentExecutionId }),
+                            parentCallId: candidateContext.callId,
+                            ...(candidateContext.executionId === undefined ? {} : { executionId: candidateContext.executionId }),
+                            ...(candidateContext.userSeq === undefined ? {} : { userSeq: candidateContext.userSeq }),
+                            ...(candidateContext.parentRunId === undefined ? {} : { parentRunId: candidateContext.parentRunId }),
+                            ...(candidateContext.parentExecutionId === undefined ? {} : { parentExecutionId: candidateContext.parentExecutionId }),
                           });
                         },
                       }, deps.promptFragmentBytes ?? 8192, deps.taskBudget?.(), completionContext);
-                      if (completion.decision === 'continue') completionContext = completion.context;
-                      return completion;
-                    },
-                  }),
+                    if (completion.decision === 'continue') completionContext = completion.context;
+                    return completion;
+                  },
                   onCompletionInvalidated: () => {
                     structuredSubmitted = false;
                     structuredResult = undefined;
@@ -886,6 +1318,9 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                       session,
                     });
                   },
+                  ...(prepared.preset === undefined ? {} : {
+                    onContextPersisted: () => lifecycle?.onContextPersisted?.(),
+                  }),
                   persistTerminal: async (status, summary, fields) => {
                     const validation = status === 'completed'
                       ? outputContract === undefined ? { status: 'not_requested' as const }
@@ -979,12 +1414,15 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                 finally {
                   try { undoOutputContract(); }
                   finally {
-                    try { disposeResultTool?.(); }
+                    try { undoPresetInstruction(); }
                     finally {
-                      try { disposeAssembly?.(); }
+                      try { disposeResultTool?.(); }
                       finally {
-                        try { await deps.finiteCommands?.finishRun(id, acceptance.runId); }
-                        finally { try { await closeMcp?.(); } finally { await session.close(); } }
+                        try { disposeAssembly?.(); }
+                        finally {
+                          try { await deps.finiteCommands?.finishRun(id, acceptance.runId); }
+                          finally { try { await closeMcp?.(); } finally { await session.close(); } }
+                        }
                       }
                     }
                   }
@@ -998,6 +1436,38 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
       };
       executeSubagent = subagentTool.run;
       const unregister = [
+        kernel.register({
+          name: 'subagent_preset_list',
+          access: 'read',
+          readOnly: true,
+          execution: 'parallel',
+          description: 'List bounded Host-resolved child task presets and safe error codes. Read a specific preset with subagent_preset_preview before selecting it.',
+          parameters: { type: 'object', properties: {
+            limit: { type: 'integer', minimum: 1, maximum: 64 },
+            cursor: { type: 'string', minLength: 1, maxLength: 128 },
+          }, additionalProperties: false },
+          run: async (args: { limit?: number; cursor?: string }) => await listPresets(args),
+        }),
+        kernel.register({
+          name: 'subagent_preset_preview',
+          access: 'read',
+          readOnly: true,
+          execution: 'parallel',
+          description: 'Resolve one child task preset through the Host and show its effective mode, Permission, generation, limits, output schema digest, required checks, and restrictions.',
+          parameters: { type: 'object', properties: {
+            presetId: { type: 'string', minLength: 1, maxLength: 64 },
+            mode: MODE_SELECTION_SCHEMA,
+            outputTokens: { type: 'integer', minimum: 1 },
+            thinkingEffort: { type: 'string', enum: ['none', 'low', 'high', 'max'] },
+            loopIterations: { type: 'integer', minimum: 1 },
+            modelCalls: { type: 'integer', minimum: 1 },
+            outputSchema: { type: 'object' },
+          }, required: ['presetId'], additionalProperties: false },
+          run: async (args: { presetId: string } & Omit<SubagentRunArguments, 'task' | 'presetId'>, context: SubagentCallContext) => {
+            const { presetId, ...overrides } = args;
+            return await previewPreset(presetId, overrides, context);
+          },
+        }),
         kernel.register({
           ...subagentTool,
           run: async (args: SubagentRunArguments, context: SubagentCallContext) => {
@@ -1084,6 +1554,9 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
       return () => { for (const dispose of unregister.reverse()) dispose(); };
     },
     start,
+    listPresets,
+    previewPreset,
+    list,
     status,
     message,
     wait,

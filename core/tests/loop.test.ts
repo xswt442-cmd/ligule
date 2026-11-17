@@ -57,6 +57,26 @@ test('a turn without tool calls ends the run and the provider is asked once', as
   assert.deepEqual(provider.requests[0].messages, [{ role: 'user', text: 'question' }]);
 });
 
+test('a caller can wait for the durable turn context without changing acceptance order', async () => {
+  const root = await mkdtemp(join(process.cwd(), 'testplace', 'loop-context-'));
+  try {
+    const session = createSessionLog({ directory: root, id: 'durable-turn-context' });
+    const callbackOrder: string[] = [];
+    await createLoop({ kernel: kernelWith([]), provider: scriptedProvider([[{ type: 'text', text: 'done' }]]), session,
+      turnContext: () => ({ snapshot: { version: 1 } }) }).run('work', {
+      onAccepted: () => callbackOrder.push('accepted'),
+      onContextPersisted: () => { callbackOrder.push('persisted'); },
+    });
+    const events = await session.read();
+    assert.deepEqual(callbackOrder, ['accepted', 'persisted']);
+    assert.equal(events.find(event => event.kind === 'turnContext')?.snapshot &&
+      (events.find(event => event.kind === 'turnContext')?.snapshot as { version: number }).version, 1);
+    await session.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('parallel tool limits reject unsafe concurrency', () => {
   for (const maxParallelTools of [0, 33]) {
     assert.throws(
