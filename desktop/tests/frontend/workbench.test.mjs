@@ -79,6 +79,17 @@ test('file drafts persist with their read version and respect file and aggregate
   });
 });
 
+test('Git change resources are bound to a valid project root', () => {
+  const gitTab = openWorkbenchResource(DEFAULT_WORKBENCH_STATE,
+    { kind: 'git', projectRoot: 'C:/repo' }, 'Project changes');
+  assert.equal(gitTab.tabs.at(-1).resource.kind, 'git');
+  assert.equal(gitTab.tabs.at(-1).key, JSON.stringify(['git', 'c:/repo']));
+  const restored = workbenchStateFrom(JSON.parse(JSON.stringify(gitTab)));
+  assert.equal(restored.tabs.at(-1).resource.kind, 'git');
+  assert.throws(() => openWorkbenchResource(DEFAULT_WORKBENCH_STATE,
+    { kind: 'git', projectRoot: '../repo' }, 'Project changes'), { code: 'workbench_resource_invalid' });
+});
+
 test('workbench accepts filesystem roots while keeping the file target relative', () => {
   const unixRoot = openWorkbenchResource(DEFAULT_WORKBENCH_STATE,
     { kind: 'file', projectRoot: '/', path: 'etc/config.toml' }, 'config.toml');

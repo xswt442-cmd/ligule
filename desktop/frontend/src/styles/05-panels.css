@@ -332,6 +332,28 @@
 .project-file-markdown { min-block-size: 0; overflow: auto; padding: var(--space-4); }
 .project-file-image { display: grid; flex: 1; min-block-size: 0; place-items: center; overflow: auto; padding: var(--space-4); }
 .project-file-image img { max-inline-size: 100%; max-block-size: 100%; object-fit: contain; }
+.project-git-panel { display: flex; flex: 1; min-block-size: 0; flex-direction: column; gap: var(--space-2); overflow: auto; }
+.project-git-head { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-block-end: 1px solid var(--line); }
+.project-git-head > div { display: grid; min-inline-size: 0; gap: 3px; }
+.project-git-head small { color: var(--fg-muted); font-size: var(--text-xs); }
+.project-git-files { display: grid; flex: 0 0 auto; max-block-size: 180px; gap: 2px; overflow: auto; padding: 0 var(--space-4); }
+.project-git-file { display: grid; min-inline-size: 0; gap: 3px; padding: 0.4rem 0.5rem; color: var(--fg); background: transparent; border: 1px solid transparent; border-radius: var(--radius); text-align: start; font: inherit; }
+.project-git-file:hover { background: var(--bg-raised); border-color: var(--line); }
+.project-git-file[aria-pressed="true"] { background: var(--bg-raised); border-color: var(--accent); }
+.project-git-file-name { overflow-wrap: anywhere; font: 12px/1.4 var(--mono); }
+.project-git-file-flags { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--fg-muted); }
+.project-git-file-flags small { font-size: 10px; }
+.project-git-diff { display: flex; flex: 1 0 180px; min-block-size: 180px; flex-direction: column; border-block: 1px solid var(--line); }
+.project-git-diff > header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-4); }
+.project-git-diff > header strong { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/1.4 var(--mono); }
+.project-git-patches { display: grid; min-block-size: 0; gap: var(--space-2); overflow: auto; padding: 0 var(--space-3) var(--space-2); }
+.project-git-patches h3 { margin: var(--space-1) 0; font-size: var(--text-xs); }
+.project-git-patches pre { max-block-size: 320px; margin: 0; padding: var(--space-2); overflow: auto; color: var(--fg); background: var(--bg-sunk); font: 11px/1.45 var(--mono); white-space: pre; }
+.project-recorded-changes { display: grid; flex: 0 0 auto; gap: var(--space-2); padding: var(--space-2) var(--space-4) var(--space-3); }
+.project-recorded-changes h2 { margin: 0; font-size: var(--text-sm); }
+.project-recorded-change { display: grid; min-inline-size: 0; gap: 3px; padding: var(--space-2); background: var(--bg-raised); border: 1px solid var(--line); border-radius: var(--radius); font-size: var(--text-xs); }
+.project-recorded-change button { justify-self: start; max-inline-size: 100%; overflow-wrap: anywhere; color: var(--accent); background: transparent; border: 0; text-align: start; font: 11px/1.4 var(--mono); }
+.project-recorded-change small { overflow-wrap: anywhere; color: var(--fg-muted); font: 10px/1.4 var(--mono); }
 
 @media (max-width: 760px) {
   .bottom-workbench { max-block-size: 42vh; }

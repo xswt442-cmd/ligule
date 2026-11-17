@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -24,6 +25,10 @@ function within(promise, label, timeoutMs = 8_000) {
       timer = setTimeout(() => reject(new Error(`${label} did not happen within ${timeoutMs}ms`)), timeoutMs);
     }),
   ]).finally(() => clearTimeout(timer));
+}
+
+function git(cwd, ...args) {
+  execFileSync('git', args, { cwd, stdio: 'ignore', windowsHide: true });
 }
 
 const fullAccess = createPermissionContext('full-access', 'unrestricted', {
@@ -55,6 +60,12 @@ test('background steering and new conversations preserve session-owned drafts', 
     await writeFile(join(projectDirectory, 'pixel.png'), await sharp({
       create: { width: 1, height: 1, channels: 3, background: '#4269ed' },
     }).png().toBuffer());
+    git(projectDirectory, 'init', '--quiet');
+    git(projectDirectory, 'config', 'user.name', 'Ligule browser test');
+    git(projectDirectory, 'config', 'user.email', 'ligule-browser-test@example.invalid');
+    git(projectDirectory, 'add', '--', '.');
+    git(projectDirectory, '-c', 'user.name=Ligule browser test', '-c', 'user.email=ligule-browser-test@example.invalid',
+      'commit', '--quiet', '-m', 'baseline');
     const second = await client.request('session.create', { projectRoot: projectDirectory, workspaceOrigin: 'explicit' });
     await client.request('workspace.trust', {
       projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
@@ -276,6 +287,9 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
       const afterConflict = await client.request('session.read', { sessionId });
       assert.equal(afterConflict.events.filter(event => event.kind === 'workspaceFileChange').length, 2,
         'a conflicted save neither overwrites the external edit nor records a successful change');
+      const gitAfterConflict = await client.request('project.git.status', { sessionId });
+      assert.equal(gitAfterConflict.state, 'ready');
+      assert.ok(gitAfterConflict.files.some(file => file.path === 'src/app.ts' && file.unstaged));
       await page.getByRole('button', { name: 'Close app.ts' }).click();
       await page.getByRole('button', { name: 'Close Files' }).click();
       await page.getByRole('button', { name: 'Workbench' }).click();
@@ -287,6 +301,24 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
       assert.ok(requests.some(request => request.method === 'project.files.list'));
       assert.ok(requests.some(request => request.method === 'project.files.search'));
       assert.ok(requests.some(request => request.method === 'project.file.read'));
+
+      await page.getByRole('button', { name: 'Project changes' }).click();
+      await page.locator('.project-git-panel').waitFor();
+      await page.locator('.project-git-files').waitFor();
+      const gitFile = page.locator('.project-git-files').getByRole('button', { name: /app\.ts/u });
+      assert.equal(await gitFile.count(), 1, `Git panel contents: ${await page.locator('.project-git-panel').innerText()}`);
+      await gitFile.click();
+      await page.locator('.project-git-patches pre').getByText(/answer = 7/u).waitFor();
+      await page.getByText('Desktop save', { exact: false }).first().waitFor();
+      assert.ok(requests.some(request => request.method === 'project.git.status'));
+      assert.ok(requests.some(request => request.method === 'project.git.diff'));
+      assert.equal(providerRequests.length, providerRequestsBeforeFileBrowse,
+        'Git and P13 change views do not call the model');
+      const afterGitRead = await client.request('session.read', { sessionId });
+      assert.equal(afterGitRead.events.length, afterConflict.events.length,
+        'Git and P13 change views do not append Session events');
+      await page.getByRole('button', { name: 'Close Project changes' }).click();
+      await page.getByRole('button', { name: 'Workbench' }).click();
 
       await page.getByRole('button', { name: 'Subtasks', exact: true }).click();
       await page.getByRole('button', { name: 'Help', exact: true }).click();

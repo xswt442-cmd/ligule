@@ -10,6 +10,7 @@ import { BranchPanel } from './components/BranchPanel';
 import { WorkbenchDock } from './components/WorkbenchDock';
 import { ProjectFilesPanel } from './components/ProjectFilesPanel';
 import { ProjectFileView } from './components/ProjectFileView';
+import { ProjectGitPanel } from './components/ProjectGitPanel';
 import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
 import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
@@ -531,7 +532,19 @@ export function App({ transport }: { transport: Transport }) {
       } catch (error) { setWorkbenchError(code(error)); }
     });
   }, [applyWorkbenchState, leaveDock, projectRoot, sessionId, t]);
-  const openProjectFile = useCallback((root: string, path: string) => {
+  const openProjectGit = useCallback((root: string) => {
+    if (sessionId === null || projectRoot === '' || !sameProjectRoot(root, projectRoot)) {
+      setWorkbenchError('project_files_session_required');
+      return;
+    }
+    leaveDock(() => {
+      try {
+        applyWorkbenchState(openWorkbenchResource(workbenchRef.current, { kind: 'git', projectRoot: root }, t('项目改动', 'Project changes')));
+        setWorkbenchError(null);
+      } catch (error) { setWorkbenchError(code(error)); }
+    });
+  }, [applyWorkbenchState, leaveDock, projectRoot, sessionId, t]);
+  const openProjectFile = useCallback((root: string, path: string, version?: string) => {
     if (sessionId === null || projectRoot === '' || !sameProjectRoot(root, projectRoot)) {
       setWorkbenchError('project_files_session_required');
       return;
@@ -539,7 +552,8 @@ export function App({ transport }: { transport: Transport }) {
     leaveDock(() => {
       const title = path.split('/').at(-1) ?? path;
       try {
-        applyWorkbenchState(openWorkbenchResource(workbenchRef.current, { kind: 'file', projectRoot: root, path }, title));
+        applyWorkbenchState(openWorkbenchResource(workbenchRef.current,
+          { kind: 'file', projectRoot: root, path, ...(version === undefined ? {} : { version }) }, title));
         setWorkbenchError(null);
       } catch (error) { setWorkbenchError(code(error)); }
     });
@@ -1884,6 +1898,7 @@ export function App({ transport }: { transport: Transport }) {
   const activePanelResource = activeWorkbenchTab?.resource.kind === 'panel' ? activeWorkbenchTab.resource : undefined;
   const activeDirectoryResource = activeWorkbenchTab?.resource.kind === 'directory' ? activeWorkbenchTab.resource : undefined;
   const activeFileResource = activeWorkbenchTab?.resource.kind === 'file' ? activeWorkbenchTab.resource : undefined;
+  const activeGitResource = activeWorkbenchTab?.resource.kind === 'git' ? activeWorkbenchTab.resource : undefined;
   const inactivePanelScope = activePanelResource !== undefined && activePanelResource.panelId !== 'panel.help'
     && activePanelResource.sessionId !== sessionId;
   const dockPanelProps: PanelProps = activePanelResource === undefined || activePanelResource.panelId === 'panel.help'
@@ -2201,10 +2216,12 @@ export function App({ transport }: { transport: Transport }) {
         : activeWorkbenchTab === null
           ? <section className="workbench-home">
             <h2>{t('工作台', 'Workbench')}</h2>
-            <p>{t('浏览当前工作区文件，或打开子任务、交付和诊断。', 'Browse project files or open subtasks, deliveries, and diagnostics.')}</p>
+            <p>{t('浏览当前工作区文件和 Git 改动，或打开子任务、交付和诊断。', 'Browse project files and Git changes, or open subtasks, deliveries, and diagnostics.')}</p>
             <div className="workbench-home-actions">
               <button type="button" disabled={sessionId === null || projectRoot === ''}
                 onClick={() => openProjectDirectory(projectRoot, '.')}>{t('项目文件', 'Browse files')}</button>
+              <button type="button" disabled={sessionId === null || projectRoot === ''}
+                onClick={() => openProjectGit(projectRoot)}>{t('项目改动', 'Project changes')}</button>
               {menuPanels.filter(item => item.id !== 'panel.help').map(item => <button type="button" key={item.id}
                 onClick={() => openPanel(item)}>{panelTitle(item)}</button>)}
             </div>
@@ -2224,6 +2241,11 @@ export function App({ transport }: { transport: Transport }) {
                   fileDraft={activeWorkbenchTab?.fileDraft} readOnly={observingExternalSession}
                   onDraftChange={draft => activeWorkbenchTab !== null && updateProjectFileDraft(activeWorkbenchTab.key, draft)}
                   onEdit={reportDock} />
+              : activeGitResource !== undefined
+                ? sessionId === null || projectRoot === '' || !sameProjectRoot(activeGitResource.projectRoot, projectRoot)
+                  ? <p className="stub" role="status">{t('请切换到这个工作区的会话后再查看改动。', 'Select a session in this project to view its changes.')}</p>
+                  : <ProjectGitPanel key={`${sessionId}:${activeGitResource.projectRoot}`} client={client} sessionId={sessionId}
+                    onOpenFile={(path, version) => openProjectFile(activeGitResource.projectRoot, path, version)} />
           : <p className="stub" role="status">{t('这个资源暂时无法显示。', 'This resource is not available to display.')}</p>}
     </WorkbenchDock>}
 

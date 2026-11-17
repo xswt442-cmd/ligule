@@ -1,6 +1,7 @@
 export type WorkbenchResource =
   | { readonly kind: 'file'; readonly projectRoot: string; readonly path: string; readonly line?: number; readonly version?: string }
   | { readonly kind: 'directory'; readonly projectRoot: string; readonly path: string }
+  | { readonly kind: 'git'; readonly projectRoot: string }
   | { readonly kind: 'diff'; readonly projectRoot: string; readonly path: string; readonly beforeVersion: string; readonly afterVersion: string }
   | { readonly kind: 'execution'; readonly sessionId: string; readonly runId: string; readonly executionId: string }
   | { readonly kind: 'subrun'; readonly sessionId: string; readonly parentRunId: string; readonly subrunId: string; readonly childSessionId: string; readonly childRunId: string }
@@ -118,6 +119,10 @@ function resourceFrom(value: unknown): WorkbenchResource | undefined {
       if (projectRoot === undefined || path === undefined) return undefined;
       return { kind: 'directory', projectRoot, path };
     }
+    case 'git': {
+      const projectRoot = absoluteRoot(value.projectRoot);
+      return projectRoot === undefined ? undefined : { kind: 'git', projectRoot };
+    }
     case 'diff': {
       const projectRoot = absoluteRoot(value.projectRoot);
       const path = relativePath(value.path);
@@ -195,6 +200,7 @@ function resourceKey(resource: WorkbenchResource): string {
   switch (resource.kind) {
     case 'file': return JSON.stringify(['file', rootIdentity(resource.projectRoot), pathIdentity(resource.projectRoot, resource.path)]);
     case 'directory': return JSON.stringify(['directory', rootIdentity(resource.projectRoot), pathIdentity(resource.projectRoot, resource.path)]);
+    case 'git': return JSON.stringify(['git', rootIdentity(resource.projectRoot)]);
     case 'diff': return JSON.stringify(['diff', rootIdentity(resource.projectRoot), pathIdentity(resource.projectRoot, resource.path),
       resource.beforeVersion, resource.afterVersion]);
     case 'execution': return JSON.stringify(['execution', resource.sessionId, resource.runId, resource.executionId]);
