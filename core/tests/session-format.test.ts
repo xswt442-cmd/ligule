@@ -377,6 +377,31 @@ test('direct file change facts are bounded, portable, and tied to a tool result'
   }, 'the recorded operation must match the tool name');
 });
 
+test('Desktop file saves are additive ignorable Session facts and cannot claim an Agent Run', () => {
+  const header = { kind: 'session', formatVersion: 5, sessionId: 'desktop-file-session', projectRoot: '/repo' };
+  const fact = {
+    path: 'src/example.ts', operation: 'write', outcome: 'written',
+    beforeVersion: 'a'.repeat(16), expectedAfterVersion: 'b'.repeat(16), observedAfterVersion: 'b'.repeat(16),
+    observedAt: '2026-11-17T00:00:00.000Z', baselineStatus: 'available', baselineExists: true,
+    baselineVersion: 'a'.repeat(16), baselineRef: { name: `change-${'d'.repeat(16)}-${'0'.repeat(8)}-${'0'.repeat(4)}-4000-8000-${'0'.repeat(12)}.snapshot`,
+      bytes: 12, sha256: 'c'.repeat(64) },
+    observedStatus: 'available', observedExists: true, expectedMatchesObserved: true, changedFromBaseline: true,
+  };
+  const event = { seq: 0, kind: 'workspaceFileChange', ignorable: true, source: 'desktop', fileChanges: [fact] };
+  assert.equal(parseSessionEvents([header, event] as unknown as SessionEvent[]).events[0]?.kind, 'workspaceFileChange');
+  for (const invalid of [
+    { ...event, source: 'model' },
+    { ...event, ignorable: false },
+    { ...event, fileChanges: [] },
+    { ...event, runId: '00000000-0000-4000-8000-000000000001' },
+    { ...event, fileChanges: [{ ...fact, operation: 'delete' }] },
+  ]) {
+    assert.throws(() => parseSessionEvents([header, invalid] as unknown as SessionEvent[]), {
+      code: 'session_workspace_file_change_invalid',
+    });
+  }
+});
+
 test('check results require Session format 5 and a matching terminal finite execution', () => {
   const sessionId = 'check-session';
   const runId = '00000000-0000-4000-8000-000000000001';

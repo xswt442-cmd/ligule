@@ -1,8 +1,10 @@
 import { isUtf8 } from 'node:buffer';
+import { constants } from 'node:fs';
 import type { Dirent } from 'node:fs';
-import { opendir, realpath, stat } from 'node:fs/promises';
+import { lstat, open, opendir, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';
+import type { FileWriteQueue } from '../kernel/file-write-queue.js';
 import { FILE_CHANGE_MAX_FILE_BYTES } from '../session/file-changes.js';
 import { previewFileArtifact, readFileArtifact } from '../capability/artifact.js';
 import { boundaryOf, limitsOf, skippedDirectories, workingDirectoryOf, type CapabilityConfig } from '../capability/limits.js';
@@ -77,6 +79,7 @@ function safeResolutionError(error: unknown): never {
   if (code === 'path_escapes_boundary' || code === 'path_escapes_through_link' || code === 'path_escapes_workspace') {
     throw new KernelError(code);
   }
+  if (code === 'path_hard_linked') throw new KernelError(code);
   if (code === 'boundary_missing' || code === 'boundary_required') throw new KernelError('project_boundary_unavailable');
   if (code === 'path_parent_missing' || code === 'path_not_found') throw new KernelError('project_file_not_found');
   throw new KernelError('project_file_path_unavailable');
@@ -95,11 +98,11 @@ function boundaryPath(config: CapabilityConfig): string {
   return !boundaryWithinProject || relativeBoundary === '' ? '.' : relativeBoundary.split(sep).join('/');
 }
 
-async function resolveProjectPath(config: CapabilityConfig, pathValue: unknown, allowDot: boolean): Promise<string> {
+async function resolveProjectPath(config: CapabilityConfig, pathValue: unknown, allowDot: boolean, forWrite = false): Promise<string> {
   const requested = textPath(pathValue, { allowDot });
   const path = allowDot && requested === '.' ? boundaryPath(config) : requested;
   try {
-    const target = await resolveWithin(boundaryOf(config), path.split('/').join(sep), { cwd: workingDirectoryOf(config) });
+    const target = await resolveWithin(boundaryOf(config), path.split('/').join(sep), { cwd: workingDirectoryOf(config), forWrite });
     const workspaceRoot = await realpath(workingDirectoryOf(config));
     if (!isWithin(workspaceRoot, target)) throw new KernelError('path_escapes_workspace');
     return target;
@@ -364,4 +367,135 @@ export async function readProjectFile(config: CapabilityConfig, sessionId: strin
     offsetBytes: start,
     nextOffsetBytes: end < bytes.length ? end : null,
   };
+}
+
+export type ProjectFileSave = {
+  readonly path: string;
+  readonly target: string;
+  readonly beforeBytes: Buffer;
+  readonly expectedAfterBytes: Buffer;
+  readonly outcome: 'written' | 'unchanged' | 'unknown';
+  readonly saved: boolean;
+  readonly changed: boolean | null;
+  readonly mutationAttempted: boolean;
+  readonly version: string | null;
+  readonly recorded: boolean;
+  readonly errorCode?: string;
+};
+
+function wellFormedText(text: string): boolean {
+  for (const character of text) {
+    const point = character.codePointAt(0)!;
+    if (point >= 0xd800 && point <= 0xdfff) return false;
+  }
+  return !text.includes('\u0000');
+}
+
+function sameFileIdentity(left: Awaited<ReturnType<typeof lstat>>, right: Awaited<ReturnType<typeof lstat>>): boolean {
+  return left.isFile() && right.isFile() && !left.isSymbolicLink() && !right.isSymbolicLink()
+    && left.dev === right.dev && left.ino === right.ino && left.nlink === right.nlink && left.mode === right.mode;
+}
+
+export async function saveProjectFile(config: CapabilityConfig, sessionId: string, pathValue: unknown, expectedVersionValue: unknown,
+  textValue: unknown, queue: FileWriteQueue, authorize: () => Promise<void>,
+  recordChange: (result: Omit<ProjectFileSave, 'recorded'>) => Promise<boolean>): Promise<ProjectFileSave> {
+  const path = textPath(pathValue);
+  if (typeof expectedVersionValue !== 'string' || !/^[a-f0-9]{16}$/iu.test(expectedVersionValue)) {
+    throw new KernelError('project_file_version_invalid');
+  }
+  if (typeof textValue !== 'string' || !wellFormedText(textValue)) throw new KernelError('project_file_text_invalid');
+  const expectedAfterBytes = Buffer.from(textValue, 'utf8');
+  if (expectedAfterBytes.length > FILE_CHANGE_MAX_FILE_BYTES) throw new KernelError('project_file_too_large');
+  const target = await resolveProjectPath(config, path, false, true);
+  let initialInfo;
+  try { initialInfo = await lstat(target); }
+  catch { throw new KernelError('project_file_not_found'); }
+  if (!initialInfo.isFile() || initialInfo.isSymbolicLink()) throw new KernelError('project_file_not_regular');
+  if (initialInfo.size > FILE_CHANGE_MAX_FILE_BYTES) throw new KernelError('project_file_too_large');
+
+  return await queue.run(target, async () => {
+    await authorize();
+    const currentTarget = await resolveProjectPath(config, path, false, true);
+    if (currentTarget !== target) throw new KernelError('project_file_target_changed');
+    let currentInfo;
+    try { currentInfo = await lstat(currentTarget); }
+    catch { throw new KernelError('project_file_target_changed'); }
+    if (!sameFileIdentity(initialInfo, currentInfo)) throw new KernelError('project_file_target_changed');
+
+    const displayPath = relativeFromWorkingDirectory(workingDirectoryOf(config), currentTarget);
+    const withRecord = async (result: Omit<ProjectFileSave, 'recorded'>): Promise<ProjectFileSave> => {
+      let recorded = false;
+      try { recorded = await recordChange(result); }
+      catch { recorded = false; }
+      return { ...result, recorded, ...(recorded ? {} : { errorCode: 'workspace_file_change_record_failed' }) };
+    };
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let beforeBytes: Buffer | undefined;
+    let mutationAttempted = false;
+    let writeFailed = false;
+    try {
+      const flags = constants.O_RDWR | (process.platform === 'win32' ? 0 : (constants.O_NOFOLLOW ?? 0));
+      handle = await open(currentTarget, flags);
+      const [openedInfo, namedInfo, realTarget] = await Promise.all([
+        handle.stat(), lstat(currentTarget), realpath(currentTarget),
+      ]);
+      const realBoundary = await realpath(boundaryOf(config));
+      if (!sameFileIdentity(initialInfo, openedInfo) || !sameFileIdentity(initialInfo, namedInfo)
+        || realTarget !== currentTarget || !isWithin(realBoundary, realTarget)) {
+        throw new KernelError('project_file_target_changed');
+      }
+      beforeBytes = await handle.readFile();
+      if (beforeBytes.length > FILE_CHANGE_MAX_FILE_BYTES) throw new KernelError('project_file_too_large');
+      if (beforeBytes.includes(0) || !isUtf8(beforeBytes)) throw new KernelError('project_file_not_utf8');
+      const version = versionOf(beforeBytes);
+      if (version !== expectedVersionValue.toLowerCase()) throw new KernelError('project_file_conflict');
+      if (beforeBytes.equals(expectedAfterBytes)) {
+        return { path: displayPath, target: currentTarget, beforeBytes, expectedAfterBytes, outcome: 'unchanged',
+          saved: true, changed: false, mutationAttempted: false, version, recorded: true };
+      }
+
+      mutationAttempted = true;
+      await handle.truncate(0);
+      let written = 0;
+      while (written < expectedAfterBytes.length) {
+        const result = await handle.write(expectedAfterBytes, written, expectedAfterBytes.length - written, written);
+        if (result.bytesWritten === 0) throw new Error('project_file_write_zero_bytes');
+        written += result.bytesWritten;
+      }
+      await handle.truncate(expectedAfterBytes.length);
+      await handle.sync();
+    } catch (error) {
+      if (!mutationAttempted) {
+        if (error instanceof KernelError) throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') throw new KernelError('project_file_target_changed');
+        if (code === 'EACCES' || code === 'EPERM') throw new KernelError('project_file_permission_denied');
+        throw new KernelError('project_file_save_unavailable');
+      }
+      writeFailed = true;
+    } finally {
+      try { await handle?.close(); }
+      catch { if (mutationAttempted) writeFailed = true; else throw new KernelError('project_file_target_changed'); }
+    }
+
+    if (!mutationAttempted || beforeBytes === undefined) throw new KernelError('project_file_save_state_invalid');
+    let observed: Buffer | undefined;
+    try {
+      const after = await readFileArtifact({ path: displayPath }, sessionId, workingDirectoryOf(config), boundaryOf(config),
+        undefined, FILE_CHANGE_MAX_FILE_BYTES, FILE_CHANGE_MAX_FILE_BYTES);
+      observed = after.preview;
+    } catch { /* The write result stays unknown when a safe readback is unavailable. */ }
+
+    if (observed?.equals(expectedAfterBytes)) {
+      return await withRecord({ path: displayPath, target: currentTarget, beforeBytes, expectedAfterBytes, outcome: 'written',
+        saved: true, changed: true, mutationAttempted: true, version: versionOf(observed) });
+    }
+    if (observed?.equals(beforeBytes)) {
+      return await withRecord({ path: displayPath, target: currentTarget, beforeBytes, expectedAfterBytes, outcome: 'unchanged',
+        saved: false, changed: false, mutationAttempted: true, version: versionOf(beforeBytes), errorCode: 'project_file_save_failed' });
+    }
+    return await withRecord({ path: displayPath, target: currentTarget, beforeBytes, expectedAfterBytes, outcome: 'unknown',
+      saved: false, changed: null, mutationAttempted: true, version: observed === undefined ? null : versionOf(observed),
+      errorCode: writeFailed ? 'project_file_save_outcome_unknown' : 'project_file_readback_mismatch' });
+  });
 }

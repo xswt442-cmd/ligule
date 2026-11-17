@@ -19,7 +19,7 @@ import { createFileWriteQueue, fileWriteTargetKey, type FileWriteQueue } from '.
 import { runExtensionHook } from './extensions.js';
 import type { ExtensionAfterToolContext, ExtensionHookRegistry } from './extensions.js';
 import { currentKernelExecutionContext } from './execution-context.js';
-import { createFileChangeStore, type FileChangeFact, type ToolFileChangeRecorder } from '../session/file-changes.js';
+import { createFileChangeStore, type FileChangeFact, type FileChangeStore, type ToolFileChangeRecorder } from '../session/file-changes.js';
 import type { TaskBudget } from './task-budget.js';
 import type { ExecController } from '../capability/exec.js';
 
@@ -128,6 +128,8 @@ export interface KernelOptions {
   readonly execController?: () => ExecController | undefined;
   /** Shared by Sessions that belong to the same Host; omitted Kernels get a private queue. */
   readonly fileWriteQueue?: FileWriteQueue;
+  /** Shared by kernels rebuilt for one Host Session and trusted UI file saves. */
+  readonly fileChangeStore?: FileChangeStore;
 }
 
 export interface Kernel {
@@ -205,7 +207,8 @@ export function createKernel(options: KernelOptions = {}): Kernel {
   const policy = options.policy;
   const permission = options.permission ?? DEFAULT_PERMISSION_CONTEXT;
   const session = options.session;
-  const fileChangeStore = session === undefined ? undefined : createFileChangeStore(session);
+  if (session === undefined && options.fileChangeStore !== undefined) throw new KernelError('file_change_store_requires_session');
+  const fileChangeStore = session === undefined ? undefined : options.fileChangeStore ?? createFileChangeStore(session);
   const extensionHooks = options.extensionHooks;
   const taskBudget = options.taskBudget;
   const fileWriteQueue = options.fileWriteQueue ?? createFileWriteQueue();

@@ -44,7 +44,9 @@ export function runEvidenceReferences(events: readonly SessionEvent[], runId: st
         observedStatus: change.observedStatus, changedFromBaseline: change.changedFromBaseline });
     }
   }
-  const laterChangesByCheck = (check: CheckEvent, eventSeq: number): boolean => events.some((event) => event.kind === 'tool' && event.runId === runId && event.seq > eventSeq
+  const laterChangesByCheck = (check: CheckEvent, eventSeq: number): boolean => events.some((event) =>
+    (event.kind === 'tool' && event.runId === runId || event.kind === 'workspaceFileChange' && event.source === 'desktop')
+      && event.seq > eventSeq
       && Array.isArray(event.fileChanges) && event.fileChanges.some((value) => {
         const change = checkedFileChangeFact(value);
         return change !== undefined && check.declaration.scope.includes(change.path) && change.outcome !== 'unchanged';

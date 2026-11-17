@@ -98,7 +98,7 @@ function checkedSessionHeader(event: SessionEvent, version: number): SessionHead
 const WRITTEN_KINDS = [
   'session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection',
   'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule',
-  'compaction', 'todoWrite', 'image', 'screenCapture', 'policyReview', 'runInput', 'execution',
+  'compaction', 'todoWrite', 'image', 'screenCapture', 'policyReview', 'runInput', 'execution', 'workspaceFileChange',
   'toolActivity', 'check',
 ];
 
@@ -288,6 +288,17 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         throw new KernelRuntimeError('session_check_event_invalid');
       }
       checkExecutions.add(checked.executionId);
+    }
+    if (kind === 'workspaceFileChange') {
+      if (event.ignorable !== true || event.source !== 'desktop'
+        || Object.keys(event).some(key => !['seq', 'kind', 'ignorable', 'source', 'fileChanges'].includes(key))
+        || !Array.isArray(event.fileChanges) || event.fileChanges.length !== 1
+        || event.fileChanges.some(change => {
+          const checked = checkedFileChangeFact(change);
+          return checked === undefined || checked.operation !== 'write';
+        })) {
+        throw new KernelRuntimeError('session_workspace_file_change_invalid');
+      }
     }
     if (kind === 'toolActivity') {
       const safeText = (value: unknown, max: number): value is string => typeof value === 'string'

@@ -49,6 +49,7 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly task?: string;
   readonly outputSchema?: Record<string, unknown>;
   readonly artifactKey?: string;
+  readonly expectedVersion?: string;
   readonly offset?: number;
   readonly offsetBytes?: number;
   readonly directory?: string;
@@ -273,6 +274,15 @@ export const METHODS = Object.freeze({
       offsetBytes: { type: 'integer', minimum: 0 },
       limitBytes: { type: 'integer', minimum: 4, maximum: 64000 },
     }, required: ['sessionId', 'path'] },
+  },
+  'project.file.save': {
+    description: 'Save a complete UTF-8 text file from the trusted project UI against the version it read; permission, path, and conflict checks stay in the Host.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID,
+      path: { type: 'string', minLength: 1, maxLength: 2048 },
+      expectedVersion: { type: 'string', minLength: 16, maxLength: 16 },
+      text: { type: 'string', maxLength: 262144 },
+    }, required: ['sessionId', 'path', 'expectedVersion', 'text'] },
   },
   'session.read': {
     description: 'Read events from an open session. Use `limit` and `before` for a history page, or `at` to read exactly one event by sequence number; `at` and `before` cannot be combined',

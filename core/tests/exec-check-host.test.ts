@@ -113,6 +113,56 @@ test('a later in-Run file edit makes a sampled check stale in RunResult without 
   });
 });
 
+test('a Desktop save after a Run makes its scoped check stale without attributing the save to the Agent', {
+  timeout: 30_000,
+}, async (t) => {
+  const permission = await measuredPermissionContext('full-access', 'unrestricted');
+  if (permission.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');
+  await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+    const scopedPath = join(projectDirectory, 'scope.txt');
+    await mkdir(projectDirectory, { recursive: true });
+    await writeFile(scopedPath, 'before Desktop save\n');
+    const report = { schema: 'ligule-test-report', version: 1, passed: 1, failed: 0, skipped: 0, todo: 0 };
+    const scriptPath = join(projectDirectory, 'emit-report.mjs');
+    await writeFile(scriptPath, `process.stdout.write('LIGULE_TEST_REPORT_V1\\t${JSON.stringify(report)}\\n');\n`);
+    await client.request('workspace.trust', { projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true });
+    client.onRequest((message) => message.method === 'approval.request' ? { decision: 'allow' } : undefined);
+    await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: {
+      command: `node "${scriptPath.replaceAll('\\', '/')}"`, waitMs: 30_000,
+      check: { name: 'desktop-edit scope', purpose: 'verify the scoped file', expectedExitCodes: [0],
+        scope: ['scope.txt'], report: { format: 'ligule-test-report-v1' } },
+    } }) });
+
+    const history = await client.request('session.read', { sessionId }) as {
+      events: { kind?: string; runId?: string; tool?: string; callId?: string; fileChanges?: unknown[] }[];
+    };
+    const call = history.events.find(event => event.kind === 'tool' && event.tool === 'exec');
+    assert.ok(typeof call?.runId === 'string');
+    const read = await client.request('project.file.read', { sessionId, path: 'scope.txt' }) as { version: string };
+    await client.request('project.file.save', {
+      sessionId, path: 'scope.txt', expectedVersion: read.version, text: 'after Desktop save\n',
+    });
+
+    const result = await client.request('run.result', {
+      projectRoot: projectDirectory, sessionId, runId: call.runId,
+    }) as { json: string };
+    const runResult = JSON.parse(result.json) as {
+      checks?: { name: string; scopeStatus: string }[];
+      fileChanges?: { path: string; operation: string; outcome: string }[];
+    };
+    assert.equal(runResult.checks?.[0]?.name, 'desktop-edit scope');
+    assert.equal(runResult.checks?.[0]?.scopeStatus, 'stale');
+    assert.deepEqual(runResult.fileChanges ?? [], [], 'Desktop facts do not appear as Agent Run tool changes');
+    assert.equal(await readFile(scopedPath, 'utf8'), 'after Desktop save\n');
+  }, {
+    permission,
+    permissionControl: true,
+    modeName: 'full',
+    config: { loop: { iterations: 4, modelCalls: 4 } },
+    testDirectory: join(process.cwd(), 'testplace', 'tmp'),
+  });
+});
+
 test('check exit conditions and structured report statuses remain independent', { timeout: 45_000 }, async (t) => {
   const permission = await measuredPermissionContext('full-access', 'unrestricted');
   if (permission.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');

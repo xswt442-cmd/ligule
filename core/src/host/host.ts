@@ -53,7 +53,7 @@ import { adoptForSessionDirectory } from '../session/adopt.js';
 import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
-import { listProjectDirectory, readProjectFile, searchProjectFiles } from './project-files.js';
+import { listProjectDirectory, readProjectFile, saveProjectFile, searchProjectFiles } from './project-files.js';
 import { branchSessionId, exportImageUrl, exportMarkdown, exportRecordOf, MAX_EXPORT_ASSETS, writeExport, type ExportAsset, type ExportRecord } from './export.js';
 import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
 export { compactionLimitsOf } from './runtime-limits.js';
@@ -125,7 +125,7 @@ import type { ReviewFacts } from '../kernel/reviewer.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
 import { runAcceptanceScope, runReceiptView, withinRunWindows } from './run-records.js';
 import { checkedToolResultSpillReference, decodeToolResultCursor, encodeToolResultCursor, readVerifiedToolResultSpillPage } from '../session/tool-result.js';
-import { checkedFileChangeFact } from '../session/file-changes.js';
+import { checkedFileChangeFact, createFileChangeStore, type FileChangeFact, type FileChangeStore } from '../session/file-changes.js';
 import { checkedCheckDeclaration, type CheckDeclaration } from '../session/checks.js';
 import { runEvidenceReferences } from '../session/run-evidence.js';
 import { checkEventOf, sampleCheckScope } from './checks.js';
@@ -303,6 +303,7 @@ interface HostSessionBase {
   sessionPolicyRules: PolicyRule[];
   readonly environment: ProjectEnvironment;
   readonly managedProcesses: ManagedProcessRegistry;
+  readonly fileChanges: FileChangeStore;
   readonly managedGrantId?: string;
   permission: PermissionContext;
   readonly screenCapture: { enabled: boolean; source: 'none' | 'startup' | 'trusted-ui' | 'grant'; controller: AbortController };
@@ -1162,7 +1163,8 @@ export function createHost({
           && ['exited', 'cancelled', 'failed'].includes(String(event.state)));
         if (accepted === undefined || terminalEvent === undefined) return;
         const scoped = new Set(declaration.scope);
-        const knownScopedChange = events.some((event) => event.kind === 'tool' && event.seq > accepted.seq && event.seq < terminalEvent.seq
+        const knownScopedChange = events.some((event) => (event.kind === 'tool' || event.kind === 'workspaceFileChange')
+          && event.seq > accepted.seq && event.seq < terminalEvent.seq
           && Array.isArray(event.fileChanges) && event.fileChanges.some((change) => isRecord(change)
             && typeof change.path === 'string' && scoped.has(change.path) && change.outcome !== 'unchanged'));
         const current = context.currentPermission();
@@ -1828,6 +1830,7 @@ export function createHost({
       event.kind === 'tool' && isRecord(event.result) && event.result.images !== undefined
         ? checkedImageReferences(event.result.images) : []) : [];
     const media = createMediaStore({ ...config, workspaceRoot: env.projectRoot }, id, inheritedImages);
+    const fileChanges = createFileChangeStore(session);
     // 新会话继承项目当前有效的生成设置。配置写入后，初始快照可能已过期，优先读取环境的最新设置。
     const workspaceTrusted = await isTrusted(env.projectRoot);
     const basePermission = recover ? permission : initial?.permission?.context ?? permission;
@@ -1868,6 +1871,7 @@ export function createHost({
       pending: undefined,
       environment: env,
       managedProcesses,
+      fileChanges,
       ...(agentControl === undefined ? {} : { managedGrantId: agentControl.grantId }),
       permission: sessionPermission,
       screenCapture: { enabled: false, source: 'none', controller: new AbortController() },
@@ -2352,7 +2356,7 @@ export function createHost({
         },
       };
     };
-    const kernel = createKernel({ config, policy: chain, session, logger,
+    const kernel = createKernel({ config, policy: chain, session, logger, fileChangeStore: state.fileChanges,
       fileWriteQueue,
       permissionForCall: () => state.permission,
       policyOverrideForSession: () => state.policyOverride,
@@ -3387,11 +3391,14 @@ export function createHost({
       const runScopes = runScopesOf(controlTrust, bridge, controllerScope);
       const requireProjectFileAccess = async (state: HostSessionState, writing = false): Promise<void> => {
         if (controlTrust.permissionControl) return;
-        if (!bridge || grant === undefined) throw new KernelError('project_files_control_unavailable');
-        await assertDelegationProject(grant, state.environment.projectRoot);
-        assertGrantSessionScope(grant, state);
-        assertDelegationPermission(grant, state.permission.profile, state.permission.network);
-        if (writing && !grant.allowOperator) throw new KernelError('agent_control_operator_required');
+        const activeGrant = await activeDelegation();
+        if (!bridge || activeGrant === undefined || state.managedGrantId !== activeGrant.id) {
+          throw new KernelError('project_files_control_unavailable');
+        }
+        await assertDelegationProject(activeGrant, state.environment.projectRoot);
+        assertGrantSessionScope(activeGrant, state);
+        assertDelegationPermission(activeGrant, state.permission.profile, state.permission.network);
+        if (writing && !activeGrant.allowOperator) throw new KernelError('agent_control_operator_required');
       };
       const requireSubrunParent = async (state: HostSessionState, parentRunId: string): Promise<void> => {
         const events = await state.session.read();
@@ -3629,6 +3636,49 @@ export function createHost({
           if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
           return await readProjectFile(state.environment.config, state.id, message.params.path, message.params.offsetBytes,
             message.params.limitBytes);
+        }
+        case 'project.file.save': {
+          return await serializeSessionConfiguration(sessionId, async () => {
+            const state = open(sessionId);
+            await requireProjectFileAccess(state, true);
+            if (state.permissionChanging) throw new KernelError('permission_change_in_progress');
+            const denied = permissionDenial(state.permission, 'write');
+            if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+            const result = await saveProjectFile(state.environment.config, state.id, message.params.path,
+              message.params.expectedVersion, message.params.text, fileWriteQueue, async () => {
+                const current = open(sessionId);
+                if (current !== state) throw new KernelError('project_file_session_changed');
+                await requireProjectFileAccess(current, true);
+                if (current.permissionChanging) throw new KernelError('permission_change_in_progress');
+                const currentDenial = permissionDenial(current.permission, 'write');
+                if (currentDenial !== undefined) throw new KernelError(currentDenial.code, { detail: currentDenial.reason });
+              }, async mutation => {
+                const path = relative(boundaryOf(state.environment.config), mutation.target).split(sep).join('/');
+                const fileChanges: FileChangeFact[] = [];
+                await state.fileChanges.forCall(fileChanges).record({
+                  path,
+                  target: mutation.target,
+                  operation: 'write',
+                  outcome: mutation.outcome,
+                  beforeExists: true,
+                  beforeBytes: mutation.beforeBytes,
+                  expectedAfterExists: true,
+                  expectedAfterBytes: mutation.expectedAfterBytes,
+                  allowReadback: true,
+                });
+                if (fileChanges.length !== 1) return false;
+                await state.session.append({ kind: 'workspaceFileChange', ignorable: true, source: 'desktop', fileChanges });
+                return true;
+              });
+            return {
+              saved: result.saved,
+              changed: result.changed,
+              version: result.version,
+              recorded: result.recorded,
+              outcome: result.outcome,
+              ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
+            };
+          });
         }
         case 'session.read': {
           // 返回已持久化记录，让客户端重连后可以恢复会话内容。
@@ -4372,7 +4422,15 @@ export function createHost({
             return runReceiptView(receipt, live);
           }
           const result = await readRunResult(env.directory, workspace, sessionId, receipt);
-          return { runId: receipt.runId, ...runResultPage(result, message.params.offset ?? 0) };
+          const currentEvidence = runEvidenceReferences(events, receipt.runId);
+          const checksByCall = new Map(currentEvidence.checks.map(check => [check.callId, check]));
+          const projectedResult = result.checks === undefined ? result : {
+            ...result,
+            checks: result.checks.map(check => checksByCall.get(check.callId)?.scopeStatus === 'stale'
+              ? { ...check, scopeStatus: 'stale' as const }
+              : check),
+          };
+          return { runId: receipt.runId, ...runResultPage(projectedResult, message.params.offset ?? 0) };
         }
         case 'run.cancel': {
           const state = open(sessionId);

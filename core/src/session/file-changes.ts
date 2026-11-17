@@ -52,6 +52,10 @@ export interface ToolFileChangeRecorder {
   record(mutation: FileChangeMutation): Promise<void>;
 }
 
+export interface FileChangeStore {
+  forCall(records: FileChangeFact[]): ToolFileChangeRecorder;
+}
+
 interface Baseline {
   readonly status: FileChangeFact['baselineStatus'];
   readonly reason?: string;
@@ -216,9 +220,7 @@ async function observeExistence(path: string): Promise<{
   }
 }
 
-export function createFileChangeStore(session: FileChangeSession): {
-  forCall(records: FileChangeFact[]): ToolFileChangeRecorder;
-} {
+export function createFileChangeStore(session: FileChangeSession): FileChangeStore {
   const sessionPrefix = `change-${createHash('sha256').update(session.id ?? 'unowned-session').digest('hex').slice(0, 16)}-`;
   const baselines = new Map<string, Baseline>();
   let loaded = false;
@@ -238,7 +240,7 @@ export function createFileChangeStore(session: FileChangeSession): {
     const references = new Map<string, { path: string; reference: FileChangeSnapshotReference; version: string | null }>();
     try {
       for (const event of await session.read?.() ?? []) {
-        if (event.kind !== 'tool' || !Array.isArray(event.fileChanges)) continue;
+        if ((event.kind !== 'tool' && event.kind !== 'workspaceFileChange') || !Array.isArray(event.fileChanges)) continue;
         for (const value of event.fileChanges) {
           if (!isRecord(value) || typeof value.path !== 'string' || baselines.has(value.path)) continue;
           const reference = checkedReference(value.baselineRef);

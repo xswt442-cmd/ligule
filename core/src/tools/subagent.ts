@@ -340,7 +340,8 @@ function requiredCheckFailures(events: readonly SessionEvent[], runId: string, r
     const check = recorded?.check;
     const checkSeq = recorded?.event.seq;
     const knownChangeAfter = check !== undefined && checkSeq !== undefined && events.some(event =>
-      event.kind === 'tool' && event.runId === runId && event.seq > checkSeq && Array.isArray(event.fileChanges)
+      (event.kind === 'tool' && event.runId === runId || event.kind === 'workspaceFileChange' && event.source === 'desktop')
+      && event.seq > checkSeq && Array.isArray(event.fileChanges)
       && event.fileChanges.some(value => {
         const change = checkedFileChangeFact(value);
         return change !== undefined && check.declaration.scope.includes(change.path) && change.outcome !== 'unchanged';
