@@ -22,6 +22,7 @@ const MAX_SESSION_LOG_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_HOST_LOG_FILE_BYTES = 128 * 1024 * 1024;
 
 export type FiniteCommandState = 'starting' | 'running' | 'stopping' | 'exited' | 'cancelled' | 'failed' | 'unknown';
+export type FiniteCommandTerminalState = Exclude<FiniteCommandState, 'starting' | 'running' | 'stopping'>;
 export type FiniteCommandStopReason = 'user_cancel' | 'run_cancel' | 'run_failed' | 'session_close'
   | 'host_close' | 'workspace_revoked' | 'grant_revoked' | 'timeout' | 'record_failed';
 
@@ -148,7 +149,7 @@ export interface FiniteCommandRegistryOptions {
   readonly onTerminal?: (entry: {
     readonly executionId: string;
     readonly owner: FiniteCommandOwner;
-    readonly state: FiniteCommandState;
+    readonly state: FiniteCommandTerminalState;
     readonly exitCode?: number;
     readonly errorCode?: string;
     readonly logs?: ExecLogSnapshot;
@@ -169,6 +170,10 @@ function isActive(entry: Entry): boolean {
   if (entry.state === 'unknown') return false;
   return entry.state === 'starting' || entry.state === 'running' || entry.state === 'stopping'
     || entry.terminationPending || entry.cleanupPending;
+}
+
+function isTerminalState(state: FiniteCommandState): state is FiniteCommandTerminalState {
+  return state === 'exited' || state === 'cancelled' || state === 'failed' || state === 'unknown';
 }
 
 function codeOf(error: unknown): string | undefined {
@@ -514,7 +519,7 @@ export function createFiniteCommandRegistry(options: FiniteCommandRegistryOption
       }
       throw error;
     } finally {
-      if (terminalRecorded && options.onTerminal !== undefined && entry.owner.check !== undefined) {
+      if (terminalRecorded && options.onTerminal !== undefined && isTerminalState(entry.state)) {
         await options.onTerminal({ executionId: entry.executionId, owner: entry.owner, state: entry.state,
           ...(entry.exitCode === undefined ? {} : { exitCode: entry.exitCode }),
           ...(entry.errorCode === undefined ? {} : { errorCode: entry.errorCode }),
@@ -846,7 +851,7 @@ export function createFiniteCommandRegistry(options: FiniteCommandRegistryOption
         terminalRecorded = true;
       }
       finally {
-        if (terminalRecorded && options.onTerminal !== undefined && entry.owner.check !== undefined) {
+        if (terminalRecorded && options.onTerminal !== undefined && isTerminalState(entry.state)) {
           await options.onTerminal({ executionId: entry.executionId, owner: entry.owner, state: entry.state,
             ...(entry.errorCode === undefined ? {} : { errorCode: entry.errorCode }),
           }).catch(() => undefined);

@@ -510,6 +510,14 @@ export const METHODS = Object.freeze({
       sessionId: SESSION_ID, runId: { type: 'string', minLength: 1, maxLength: 160 }, executionId: { type: 'string', minLength: 1, maxLength: 160 },
     }, required: ['sessionId', 'runId', 'executionId'] },
   },
+  'operation.start': {
+    description: 'Start one explicit Desktop command as a Host-owned Operation Session using the source Session permissions and existing Kernel exec path; it does not start an Agent Run.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID,
+      command: { type: 'string', minLength: 1, maxLength: 32_768 },
+      cwd: { type: 'string', minLength: 1, maxLength: 8192 },
+    }, required: ['sessionId', 'command'] },
+  },
   'run.steer': {
     description: 'Persist one bounded input for the expected active Run; the Host derives the source from the trusted connection and applies it at the next safe model or tool-group boundary',
     parameters: { type: 'object', properties: {

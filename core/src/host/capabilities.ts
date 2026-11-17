@@ -24,7 +24,8 @@ export type TrustedUiCapability =
   | 'storage'
   | 'artifact-native'
   | 'session-export'
-  | 'request-diagnostics';
+  | 'request-diagnostics'
+  | 'operation-run';
 
 const TRUSTED_UI_DENIAL: Record<TrustedUiCapability, string> = {
   'agent-control': 'agent_control_trusted_ui_required',
@@ -38,6 +39,7 @@ const TRUSTED_UI_DENIAL: Record<TrustedUiCapability, string> = {
   'artifact-native': 'artifact_native_control_required',
   'session-export': 'session_export_trusted_ui_required',
   'request-diagnostics': 'request_diagnostics_trusted_ui_required',
+  'operation-run': 'operation_run_trusted_ui_required',
 };
 
 /** 仅可信本地 UI 可用的能力：普通 MCP 客户端与桥连接一律拒绝。 */

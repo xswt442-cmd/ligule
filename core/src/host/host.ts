@@ -7,7 +7,7 @@ import { access, lstat, opendir, readFile, realpath, stat } from 'node:fs/promis
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import { SETTLE_GRACE_MS, settleWithin } from '../kernel/settle.js';
-import { createTaskBudget, type TaskBudget } from '../kernel/task-budget.js';
+import { createTaskBudget, type TaskBudget, type TaskWork } from '../kernel/task-budget.js';
 import { currentKernelExecutionContext, withKernelExecutionContext, withoutKernelExecutionContext } from '../kernel/execution-context.js';
 import { rememberRunSummary } from '../kernel/run-summary.js';
 import {
@@ -235,6 +235,8 @@ interface SessionGeneration {
 interface InitialSessionSettings {
   readonly mode?: string;
   readonly policy?: Exclude<PolicyMode, 'default'>;
+  readonly sessionPolicyRules?: readonly PolicyRule[];
+  readonly operation?: { readonly operationId: string; readonly sourceSessionId: string };
   readonly permission?: {
     readonly context: PermissionContext;
     readonly confirmedFullAccess: boolean;
@@ -302,6 +304,11 @@ interface HostSessionBase {
   readonly requestDiagnostics: RequestDiagnosticStore;
   readonly mcpTrust: Map<string, { readonly source: 'trusted-ui'; readonly trusted: boolean; readonly updatedAt: string }>;
   sessionPolicyRules: PolicyRule[];
+  operationOnly?: boolean;
+  operationId?: string;
+  operationSourceSessionId?: string;
+  operationRevoked?: boolean;
+  operationFinished?: boolean;
   readonly environment: ProjectEnvironment;
   readonly managedProcesses: ManagedProcessRegistry;
   readonly fileChanges: FileChangeStore;
@@ -344,6 +351,8 @@ interface HostRunProgress {
   readonly toolCalls: number;
   readonly outputTokens: number | null;
 }
+
+type OperationTerminalState = 'exited' | 'failed' | 'cancelled' | 'unknown';
 
 type HostProgressSnapshot = HostRunProgress & { readonly task?: ReturnType<TaskBudget['snapshot']> };
 
@@ -1139,6 +1148,22 @@ export function createHost({
   const pendingApprovalDetails = new Map<string, { sessionId: string; args: Record<string, unknown>; argumentSha256: string }>();
   const building = new Set<Promise<unknown>>();
   let closing: Promise<void> | undefined;
+  async function recordOperationFinished(state: HostSessionState, terminal: {
+    readonly state: OperationTerminalState;
+    readonly exitCode?: number;
+    readonly errorCode?: string;
+  }): Promise<void> {
+    if (state.operationOnly !== true || state.operationId === undefined || state.operationFinished === true) return;
+    state.operationFinished = true;
+    try {
+      await state.session.append({ kind: 'operationFinished', ignorable: true, operationId: state.operationId,
+        state: terminal.state, ...(terminal.exitCode === undefined ? {} : { exitCode: terminal.exitCode }),
+        ...(terminal.errorCode === undefined ? {} : { errorCode: terminal.errorCode }), finishedAt: new Date().toISOString() });
+    } catch (error) {
+      state.operationFinished = false;
+      throw error;
+    }
+  }
   const finiteCommands = createFiniteCommandRegistry({
     validateOwner: async (owner) => {
       if (owner.grantId !== undefined) {
@@ -1150,6 +1175,21 @@ export function createHost({
       }
     },
     onTerminal: async (terminal) => {
+      const operationState = sessions.get(terminal.owner.sessionId);
+      if (operationState?.operationOnly === true && operationState.operationId === terminal.owner.runId) {
+        try {
+          await recordOperationFinished(operationState, {
+            state: ['exited', 'failed', 'cancelled', 'unknown'].includes(terminal.state) ? terminal.state : 'unknown',
+            ...(terminal.exitCode === undefined ? {} : { exitCode: terminal.exitCode }),
+            ...(terminal.errorCode === undefined ? {} : { errorCode: terminal.errorCode }),
+          });
+        } catch (error) {
+          logger?.log?.('operation result could not be recorded', {
+            code: errorCode(error) ?? 'operation_record_failed', sessionId: operationState.id,
+            operationId: operationState.operationId,
+          });
+        }
+      }
       const declaration = terminal.owner.check;
       if (declaration === undefined) return;
       const context = finiteCheckContexts.get(terminal.executionId);
@@ -1820,6 +1860,7 @@ export function createHost({
     });
     await finiteCommands.accountDirectory(directory);
     const existingEvents = await session.read();
+    const existingOperation = existingEvents.find((event) => event.kind === 'operationStarted');
     await finiteCommands.restoreSession({
       sessionId: id,
       projectIdentity: workspaceIdentity(env.projectRoot),
@@ -1866,7 +1907,14 @@ export function createHost({
       asksByRun,
       requestDiagnostics,
       mcpTrust: new Map(),
-      sessionPolicyRules: [],
+      sessionPolicyRules: [...(initial?.sessionPolicyRules ?? [])],
+      operationOnly: initial?.operation !== undefined || existingOperation !== undefined,
+      ...(initial?.operation === undefined && existingOperation === undefined ? {} : {
+        operationId: initial?.operation?.operationId ?? String(existingOperation?.operationId),
+        operationSourceSessionId: initial?.operation?.sourceSessionId ?? String(existingOperation?.sourceSessionId),
+      }),
+      operationRevoked: false,
+      operationFinished: existingEvents.some((event) => event.kind === 'operationFinished'),
       running: undefined,
       mode: modeState,
       pending: undefined,
@@ -2208,6 +2256,7 @@ export function createHost({
               projectRoot: env.projectRoot,
               rememberable: rememberScopes.length > 0,
               rememberScopes,
+              ...(state.operationSourceSessionId === undefined ? {} : { sourceSessionId: state.operationSourceSessionId }),
               ...(scriptBinding === undefined ? {} : { scriptBinding }),
             }).then(async (value) => {
               if (!approvalActive || requestSteeringRevision !== runInputRevisionOf(state, interactionRunId)) {
@@ -2332,7 +2381,27 @@ export function createHost({
             session: commandSession,
             timeoutMs: limitsOf(config).execTimeoutMs,
             signal: context.signal,
-            startWork: () => budget.startWork(),
+            startWork: () => {
+              const work = budget.startWork();
+              if (state.operationOnly !== true || state.taskBudget !== budget) return work;
+              let disposed = false;
+              const dispose = () => {
+                if (disposed) return;
+                disposed = true;
+                work.dispose();
+                if (state.taskBudget === budget) {
+                  state.lastTask = budget.snapshot();
+                  state.taskBudget = undefined;
+                  budget.dispose();
+                }
+              };
+              const tracked: TaskWork = {
+                suspend: () => work.suspend(),
+                resume: () => work.resume(),
+                dispose,
+              };
+              return tracked;
+            },
           });
           if (owner.check !== undefined) finiteCheckContexts.set(reservation.executionId, {
             session: commandSession, config: context.config, permissionAtStart: context.permission, currentPermission: () => state.permission,
@@ -3230,6 +3299,7 @@ export function createHost({
     confirmWorkspaceTrust: unknown,
     bridge: boolean,
   ): Promise<Record<string, unknown>> {
+    if (state.operationOnly === true) throw new KernelError('operation_session_control_unavailable');
     const grant = await activeDelegation();
     // 权限变更是可信 UI、经过认证的桥连接或 Grant operator 的能力；普通 MCP 客户端不接受。
     if (!maySetPermission(controlTrust, bridge)) {
@@ -3316,6 +3386,12 @@ export function createHost({
       });
       state.permission = next;
       await state.managedProcesses.stopAll();
+      await Promise.all([...sessions.values()].filter((candidate) => candidate.operationSourceSessionId === state.id)
+        .map(async (operation) => {
+          operation.operationRevoked = true;
+          operation.running?.abort(new KernelError('operation_source_permission_changed'));
+          await finiteCommands.stopSession(operation.id);
+        }));
       if (permissionDenial(next, 'external') !== undefined) await revokeSessionMcp(state, BROWSER_SERVER);
       return { sessionId: state.id, permission: sessionPermissionView(state, mayChangePermission(bridge)), applies: 'now' };
     } finally {
@@ -3334,6 +3410,34 @@ export function createHost({
       generation: { model: state.generation.model, options: state.generation.options },
       loopIterations: state.loopIterations,
       budget,
+    };
+  }
+
+  async function operationSessionSettings(source: HostSessionState, operationId: string): Promise<{
+    readonly initial: InitialSessionSettings;
+    readonly workspaceOrigin?: 'explicit' | 'default';
+  }> {
+    const [events, header] = await Promise.all([source.session.read(), source.session.header()]);
+    const savedPermission = events.filter((event) => event.kind === 'sessionPermission').at(-1);
+    return {
+      initial: {
+        ...(source.mode.file === undefined ? {} : { mode: source.mode.file.name }),
+        ...(source.policyOverride === null ? {} : { policy: source.policyOverride }),
+        sessionPolicyRules: [...source.sessionPolicyRules],
+        permission: {
+          context: source.permission,
+          confirmedFullAccess: savedPermission?.confirmedFullAccess === true,
+          confirmedNetwork: savedPermission?.confirmedNetwork === true,
+          confirmedPartialWorkspaceWrite: source.permission.partialWorkspaceWriteConfirmed
+            || savedPermission?.confirmedPartialWorkspaceWrite === true,
+        },
+        loopIterations: source.loopIterations,
+        persistLoopIterations: false,
+        generation: source.generation,
+        persistGeneration: false,
+        operation: { operationId, sourceSessionId: source.id },
+      },
+      ...(header?.workspaceOrigin === undefined ? {} : { workspaceOrigin: header.workspaceOrigin }),
     };
   }
 
@@ -4016,6 +4120,7 @@ export function createHost({
         case 'run.start': {
           const started = await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
+            if (state.operationOnly === true) throw new KernelError('operation_session_model_run_unavailable');
             const origin = runOriginOf(message.params.origin, 'human', mayRecordHumanRun(controlTrust, bridge));
             const scope = origin === 'controller' ? controllerScope : 'human';
             if (grant !== undefined) assertGrantSessionScope(grant, state);
@@ -4294,6 +4399,7 @@ export function createHost({
         case 'run.submit': {
           const submission = await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
+            if (state.operationOnly === true) throw new KernelError('operation_session_model_run_unavailable');
             const origin = runOriginOf(message.params.origin, 'controller', mayRecordHumanRun(controlTrust, bridge));
             const scope = origin === 'controller' ? controllerScope : 'human';
             if (grant !== undefined) assertGrantSessionScope(grant, state);
@@ -4449,12 +4555,84 @@ export function createHost({
         }
         case 'run.cancel': {
           const state = open(sessionId);
+          if (state.operationOnly === true) throw new KernelError('operation_session_run_cancel_unavailable');
           if (state.running === undefined) throw new KernelError('run_not_running', { detail: sessionId });
           // 通过当前循环处理取消，让工具和模型请求收到同一个取消信号。
           state.running.abort();
           if (state.activeRunId !== undefined) await finiteCommands.stopRun(state.id, state.activeRunId, 'run_cancel');
           await state.managedProcesses.stopAll();
           return { cancelled: true };
+        }
+        case 'operation.start': {
+          requireTrustedUi('operation-run', controlTrust);
+          const command = requiredString(message.params.command, 'command');
+          const cwd = message.params.cwd === undefined ? undefined : requiredString(message.params.cwd, 'cwd');
+          const operationId = randomUUID();
+          const operationSessionId = randomUUID();
+          const callId = randomUUID();
+          const prepared = await serializeSessionConfiguration(sessionId, async () => {
+            const source = open(sessionId);
+            if (source.operationOnly === true) throw new KernelError('operation_session_start_unavailable');
+            if (source.permissionChanging) throw new KernelError('permission_change_in_progress');
+            const denied = permissionDenial(source.permission, 'exec');
+            if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+            if (!source.kernel.manifest().some((tool) => tool.name === 'exec')) {
+              throw new KernelError('exec_tool_unavailable', { detail: 'the current Session mode does not expose exec' });
+            }
+            const { initial, workspaceOrigin } = await operationSessionSettings(source, operationId);
+            await buildSession(operationSessionId, connection, false, undefined, source.environment, workspaceOrigin, initial);
+            const operation = open(operationSessionId);
+            if (source.mode.file !== undefined) await operation.adopt(source.mode.file);
+            operation.chain.restore(source.chain.snapshot());
+            await operation.session.append({ kind: 'operationStarted', ignorable: true, source: 'desktop',
+              sourceSessionId: source.id, operationId, startedAt: new Date().toISOString() });
+            await operation.session.append({ kind: 'label', name: `Command · ${operationId.slice(0, 8)}` });
+            const execution = execute(operation, async (signal) => {
+              const budget = createTaskBudget(taskLimitsOf(operation.environment.config, operation.loopModelCalls), signal);
+              operation.taskBudget = budget;
+              const executionContext = { signal: budget.signal, sessionId: operationSessionId,
+                runId: operationId, callId, source: 'human' as const, scope: { active: true } };
+              try {
+                return await budget.runWork(() => withKernelExecutionContext(executionContext, () => operation.kernel.call('exec', {
+                  command, ...(cwd === undefined ? {} : { cwd }), waitMs: 0,
+                }, { signal: budget.signal, sessionId: operationSessionId, runId: operationId, callId, source: 'human' })));
+              } catch (error) {
+                if (operation.taskBudget === budget) {
+                  operation.lastTask = budget.snapshot();
+                  operation.taskBudget = undefined;
+                  budget.dispose();
+                }
+                throw error;
+              } finally {
+                executionContext.scope.active = false;
+              }
+            }, connection, 'tool_execution');
+            return { operation, execution };
+          });
+          const operation = prepared.operation;
+          let result: unknown;
+          try {
+            result = await prepared.execution;
+          } catch (error) {
+            const revoked = operation.operationRevoked === true;
+            const code = errorCode(error) ?? (revoked ? 'operation_source_permission_changed' : 'operation_start_failed');
+            const terminalState = revoked || code === 'operation_source_permission_changed' ? 'cancelled' : 'failed';
+            await recordOperationFinished(operation, { state: terminalState, errorCode: code }).catch((recordError) => {
+              logger?.log?.('operation start failure could not be recorded', {
+                code: errorCode(recordError) ?? 'operation_record_failed', sessionId: operationSessionId, operationId,
+              });
+            });
+            return { operationSessionId, operationId, runId: operationId, callId, state: terminalState, errorCode: code };
+          }
+          if (!isRecord(result) || typeof result.executionId !== 'string' || typeof result.state !== 'string') {
+            await recordOperationFinished(operation, { state: 'failed', errorCode: 'operation_execution_handle_unavailable' });
+            return { operationSessionId, operationId, runId: operationId, callId, state: 'failed',
+              errorCode: 'operation_execution_handle_unavailable' };
+          }
+          return { operationSessionId, operationId, runId: operationId, callId,
+            executionId: result.executionId, state: result.state,
+            ...(Number.isSafeInteger(result.exitCode) ? { exitCode: result.exitCode } : {}),
+            ...(typeof result.errorCode === 'string' ? { errorCode: result.errorCode } : {}) };
         }
         case 'execution.status':
         case 'execution.wait':
@@ -4463,8 +4641,15 @@ export function createHost({
           const state = open(sessionId);
           const runId = requiredString(message.params.runId, 'runId');
           const executionId = requiredString(message.params.executionId, 'executionId');
-          const scope = runAcceptanceScope(await state.session.read(), sessionId, runId);
-          if (scope === undefined || (runScopes !== undefined && !runScopes.includes(scope))) {
+          const events = await state.session.read();
+          const scope = runAcceptanceScope(events, sessionId, runId);
+          if (scope === undefined) {
+            const operation = events.find((event) => event.kind === 'operationStarted' && event.operationId === runId);
+            if (operation === undefined || state.operationOnly !== true || state.operationId !== runId) {
+              throw new KernelError('run_not_found');
+            }
+            requireTrustedUi('operation-run', controlTrust);
+          } else if (runScopes !== undefined && !runScopes.includes(scope)) {
             throw new KernelError('run_not_found');
           }
           if (grant !== undefined) assertGrantSessionScope(grant, state);
@@ -4696,6 +4881,11 @@ export function createHost({
             sessionId,
             running: state.running !== undefined,
             activeRunId: state.activeRunId ?? null,
+            operation: state.operationOnly === true ? {
+              operationId: state.operationId,
+              sourceSessionId: state.operationSourceSessionId,
+              finished: state.operationFinished === true,
+            } : null,
             progress: progressSnapshotOf(state),
             // 只返回当前模式可用的工具，不返回全部已登记工具。
             tools: state.kernel.manifest().map((entry) => entry.name),

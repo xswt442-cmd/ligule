@@ -54,6 +54,7 @@ export function projectModelView(
   events: readonly SessionEvent[],
   blocks: readonly Pick<CompactionBlock, 'fromSeq' | 'toSeq' | 'text'>[] = [],
 ): unknown[] {
+  if (events.some((event) => event.kind === 'operationStarted')) return [];
   const view = [];
   const acceptedRunInputs = new Map<string, string>();
   const parentRunCalls = new Set(events.flatMap((event) => {

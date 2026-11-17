@@ -152,6 +152,30 @@ test('a desktop-started child is a validated Session fact and stays out of model
   });
 });
 
+test('an Operation Session keeps its real exec record out of model context', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'operation-session', meta: { projectRoot: '/repo' } });
+    const operationId = '123e4567-e89b-42d3-a456-426614174000';
+    await session.append({ kind: 'operationStarted', ignorable: true, source: 'desktop',
+      sourceSessionId: 'source-session', operationId, startedAt: '2026-11-18T00:00:00.000Z' });
+    await session.append({ kind: 'tool', tool: 'exec', runId: operationId, callId: 'operation-call',
+      args: { command: 'node operation-probe.mjs' }, result: { content: { executionId: 'operation-execution' }, failed: false } });
+    await session.append({ kind: 'operationFinished', ignorable: true, operationId, state: 'exited', exitCode: 7,
+      finishedAt: '2026-11-18T00:00:01.000Z' });
+
+    const events = await session.read();
+    assert.deepEqual(events.map(event => event.kind), ['operationStarted', 'tool', 'operationFinished']);
+    assert.deepEqual(await session.modelView(), [], 'a manual command result is not a Provider tool reply');
+    assert.throws(() => parseSessionEvents([
+      { kind: 'session', formatVersion: 5, sessionId: 'operation-session', projectRoot: '/repo' },
+      { seq: 0, kind: 'operationStarted', ignorable: true, source: 'desktop', sourceSessionId: 'source-session',
+        operationId, startedAt: '2026-11-18T00:00:00.000Z' },
+      { seq: 1, kind: 'operationFinished', ignorable: true, operationId, state: 'completed',
+        finishedAt: '2026-11-18T00:00:01.000Z' },
+    ] as unknown as SessionEvent[]), { code: 'session_operation_finished_event_invalid' });
+  });
+});
+
 test('compaction events are ignorable and carry the block identity, range and reason', () => {
   const header = { kind: 'session', formatVersion: 2, sessionId: 'compaction', projectRoot: '' };
   const written = { seq: 0, kind: 'compaction', ignorable: true, reason: 'auto', blockId: 1, fromSeq: 0, toSeq: 8, tokensBefore: 3000, tokensAfter: 900 };

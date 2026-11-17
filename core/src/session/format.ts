@@ -99,7 +99,7 @@ const WRITTEN_KINDS = [
   'session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection',
   'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule',
   'compaction', 'todoWrite', 'image', 'screenCapture', 'policyReview', 'runInput', 'execution', 'workspaceFileChange',
-  'toolActivity', 'check', 'subrunStarted',
+  'toolActivity', 'check', 'subrunStarted', 'operationStarted', 'operationFinished',
 ];
 
 // 会话里保存的审批档位。返回 `unknown` 表示值无法解释，调用方必须拒绝该记录。
@@ -153,6 +153,8 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
   const executionOwners = new Map<string, { readonly sessionId: string; readonly runId: string; readonly callId: string; state: string;
     exitCode: number | null; check?: string }>();
   const checkExecutions = new Set<string>();
+  let operationId: string | undefined;
+  let operationFinished = false;
   const events: SessionEvent[] = [];
   for (const [index, event] of objects.entries()) {
     const kind = typeof event.kind === 'string' ? event.kind : '';
@@ -325,6 +327,33 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         || typeof event.startedAt !== 'string' || !Number.isFinite(Date.parse(event.startedAt))) {
         throw new KernelRuntimeError('session_subrun_started_event_invalid');
       }
+    }
+    if (kind === 'operationStarted') {
+      const validId = (value: unknown) => typeof value === 'string'
+        && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(value);
+      if (event.ignorable !== true
+        || Object.keys(event).some(key => !['seq', 'kind', 'ignorable', 'source', 'sourceSessionId', 'operationId', 'startedAt'].includes(key))
+        || event.source !== 'desktop' || !validId(event.sourceSessionId)
+        || header?.sessionId === undefined || event.sourceSessionId === header.sessionId
+        || typeof event.operationId !== 'string'
+        || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(event.operationId)
+        || operationId !== undefined
+        || typeof event.startedAt !== 'string' || !Number.isFinite(Date.parse(event.startedAt))) {
+        throw new KernelRuntimeError('session_operation_started_event_invalid');
+      }
+      operationId = event.operationId;
+    }
+    if (kind === 'operationFinished') {
+      if (event.ignorable !== true
+        || Object.keys(event).some(key => !['seq', 'kind', 'ignorable', 'operationId', 'state', 'exitCode', 'errorCode', 'finishedAt'].includes(key))
+        || operationId === undefined || event.operationId !== operationId || operationFinished
+        || !['exited', 'failed', 'cancelled', 'unknown'].includes(String(event.state))
+        || (event.exitCode !== undefined && !Number.isSafeInteger(event.exitCode))
+        || (event.errorCode !== undefined && (typeof event.errorCode !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/u.test(event.errorCode)))
+        || typeof event.finishedAt !== 'string' || !Number.isFinite(Date.parse(event.finishedAt))) {
+        throw new KernelRuntimeError('session_operation_finished_event_invalid');
+      }
+      operationFinished = true;
     }
     if (kind === 'toolActivity') {
       const safeText = (value: unknown, max: number): value is string => typeof value === 'string'
