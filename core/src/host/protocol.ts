@@ -50,6 +50,7 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly outputSchema?: Record<string, unknown>;
   readonly artifactKey?: string;
   readonly offset?: number;
+  readonly offsetBytes?: number;
   readonly directory?: string;
   readonly text?: string;
   readonly provider?: string;
@@ -244,6 +245,34 @@ export const METHODS = Object.freeze({
         limit: { type: 'integer', description: 'stop after this many paths', minimum: 1, maximum: 50 },
       },
     },
+  },
+  'project.files.list': {
+    description: 'List one bounded directory from the open Session’s project boundary. The Host resolves all paths and does not create a Run or read file contents.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID,
+      path: { type: 'string', maxLength: 4096, description: 'directory path relative to the project root; omitted means the Session’s authorized boundary' },
+      offset: { type: 'integer', minimum: 0, maximum: 5000 },
+      limit: { type: 'integer', minimum: 1, maximum: 200 },
+    }, required: ['sessionId'] },
+  },
+  'project.files.search': {
+    description: 'Search file names below one authorized project directory using bounded Host-side traversal; the result reports when scanning stopped early.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID,
+      query: { type: 'string', minLength: 1, maxLength: 128 },
+      path: { type: 'string', maxLength: 4096, description: 'search root relative to the project root; omitted means the Session’s authorized boundary' },
+      offset: { type: 'integer', minimum: 0, maximum: 4000 },
+      limit: { type: 'integer', minimum: 1, maximum: 200 },
+    }, required: ['sessionId', 'query'] },
+  },
+  'project.file.read': {
+    description: 'Read a bounded UTF-8 page from one regular file inside the Session’s authorized project boundary; reports byte version and explicitly identifies binary or oversized files.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID,
+      path: { type: 'string', minLength: 1, maxLength: 4096 },
+      offsetBytes: { type: 'integer', minimum: 0 },
+      limitBytes: { type: 'integer', minimum: 4, maximum: 64000 },
+    }, required: ['sessionId', 'path'] },
   },
   'session.read': {
     description: 'Read events from an open session. Use `limit` and `before` for a history page, or `at` to read exactly one event by sequence number; `at` and `before` cannot be combined',

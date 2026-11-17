@@ -53,6 +53,7 @@ import { adoptForSessionDirectory } from '../session/adopt.js';
 import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
+import { listProjectDirectory, readProjectFile, searchProjectFiles } from './project-files.js';
 import { branchSessionId, exportImageUrl, exportMarkdown, exportRecordOf, MAX_EXPORT_ASSETS, writeExport, type ExportAsset, type ExportRecord } from './export.js';
 import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
 export { compactionLimitsOf } from './runtime-limits.js';
@@ -3384,6 +3385,14 @@ export function createHost({
       const bridge = connection !== undefined && connection[TRUSTED_AGENT_CONTROL_ORIGIN] === true;
       const controllerScope = controllerScopeOf(grant?.id);
       const runScopes = runScopesOf(controlTrust, bridge, controllerScope);
+      const requireProjectFileAccess = async (state: HostSessionState, writing = false): Promise<void> => {
+        if (controlTrust.permissionControl) return;
+        if (!bridge || grant === undefined) throw new KernelError('project_files_control_unavailable');
+        await assertDelegationProject(grant, state.environment.projectRoot);
+        assertGrantSessionScope(grant, state);
+        assertDelegationPermission(grant, state.permission.profile, state.permission.network);
+        if (writing && !grant.allowOperator) throw new KernelError('agent_control_operator_required');
+      };
       const requireSubrunParent = async (state: HostSessionState, parentRunId: string): Promise<void> => {
         const events = await state.session.read();
         const scope = runAcceptanceScope(events, sessionId, parentRunId);
@@ -3597,6 +3606,29 @@ export function createHost({
           const { projectRoot, query, limit } = message.params;
           const env = await environmentFor(projectRoot);
           return await listProjectFiles(env.projectRoot, typeof query === 'string' ? query : '', limit);
+        }
+        case 'project.files.list': {
+          const state = open(sessionId);
+          await requireProjectFileAccess(state);
+          const denied = permissionDenial(state.permission, 'read');
+          if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+          return await listProjectDirectory(state.environment.config, message.params.path, message.params.offset, message.params.limit);
+        }
+        case 'project.files.search': {
+          const state = open(sessionId);
+          await requireProjectFileAccess(state);
+          const denied = permissionDenial(state.permission, 'read');
+          if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+          return await searchProjectFiles(state.environment.config, message.params.query, message.params.path,
+            message.params.offset, message.params.limit);
+        }
+        case 'project.file.read': {
+          const state = open(sessionId);
+          await requireProjectFileAccess(state);
+          const denied = permissionDenial(state.permission, 'read');
+          if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+          return await readProjectFile(state.environment.config, state.id, message.params.path, message.params.offsetBytes,
+            message.params.limitBytes);
         }
         case 'session.read': {
           // 返回已持久化记录，让客户端重连后可以恢复会话内容。
