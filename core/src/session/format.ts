@@ -292,8 +292,9 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
     if (kind === 'toolActivity') {
       const safeText = (value: unknown, max: number): value is string => typeof value === 'string'
         && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
+      const inherited = header?.branchOf !== undefined && event.sessionId === header.branchOf && event.seq <= header.branchAt!;
       if (event.ignorable !== true
-        || header?.sessionId === undefined || event.sessionId !== header.sessionId
+        || header?.sessionId === undefined || (event.sessionId !== header.sessionId && !inherited)
         || !safeText(event.runId, 256) || !safeText(event.callId, 256) || !safeText(event.tool, 128)
         || !['started', 'awaiting_approval', 'awaiting_user'].includes(String(event.phase))
         || typeof event.at !== 'string' || !Number.isFinite(Date.parse(event.at))

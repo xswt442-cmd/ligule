@@ -329,6 +329,25 @@ test('tool activity events validate their Session, Run, call, and live interacti
   });
 });
 
+test('branch records accept inherited tool activity only inside the parent prefix', () => {
+  const header = {
+    kind: 'session', formatVersion: 4, sessionId: 'branch-session', projectRoot: '/repo',
+    branchOf: 'parent-session', branchAt: 0,
+  };
+  const inherited = {
+    seq: 0, kind: 'toolActivity', ignorable: true, sessionId: 'parent-session',
+    runId: '00000000-0000-4000-8000-000000000001', callId: 'call-1', tool: 'read_image',
+    phase: 'started', at: '2026-11-17T00:00:00.000Z',
+  };
+  assert.deepEqual(parseSessionEvents([header, inherited] as unknown as SessionEvent[]).events.map((event) => event.kind), ['toolActivity']);
+  assert.throws(() => parseSessionEvents([header, { ...inherited, sessionId: 'other-parent' }] as unknown as SessionEvent[]), {
+    code: 'session_tool_activity_invalid',
+  });
+  assert.throws(() => parseSessionEvents([header, { ...inherited, seq: 1 }] as unknown as SessionEvent[]), {
+    code: 'session_tool_activity_invalid',
+  });
+});
+
 test('direct file change facts are bounded, portable, and tied to a tool result', () => {
   const header = { kind: 'session', formatVersion: 4, sessionId: 'file-change-session', projectRoot: '/repo' };
   const change = {
