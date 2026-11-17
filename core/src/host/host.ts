@@ -54,6 +54,7 @@ import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
 import { listProjectDirectory, readProjectFile, saveProjectFile, searchProjectFiles } from './project-files.js';
+import { readProjectGitDiff, readProjectGitStatus } from './project-git.js';
 import { branchSessionId, exportImageUrl, exportMarkdown, exportRecordOf, MAX_EXPORT_ASSETS, writeExport, type ExportAsset, type ExportRecord } from './export.js';
 import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
 export { compactionLimitsOf } from './runtime-limits.js';
@@ -3679,6 +3680,20 @@ export function createHost({
               ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
             };
           });
+        }
+        case 'project.git.status': {
+          const state = open(sessionId);
+          await requireProjectFileAccess(state);
+          const denied = permissionDenial(state.permission, 'read');
+          if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+          return await readProjectGitStatus(state.environment.projectRoot);
+        }
+        case 'project.git.diff': {
+          const state = open(sessionId);
+          await requireProjectFileAccess(state);
+          const denied = permissionDenial(state.permission, 'read');
+          if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+          return await readProjectGitDiff(state.environment.projectRoot, message.params.path);
         }
         case 'session.read': {
           // 返回已持久化记录，让客户端重连后可以恢复会话内容。

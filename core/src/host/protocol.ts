@@ -284,6 +284,17 @@ export const METHODS = Object.freeze({
       text: { type: 'string', maxLength: 262144 },
     }, required: ['sessionId', 'path', 'expectedVersion', 'text'] },
   },
+  'project.git.status': {
+    description: 'Read bounded Git status for an open project Session. The Host fixes the executable, environment, and read-only command.',
+    parameters: { type: 'object', additionalProperties: false, properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
+  },
+  'project.git.diff': {
+    description: 'Read a bounded staged and unstaged text diff for a changed project file. The Host disables external diff and text conversion.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID,
+      path: { type: 'string', minLength: 1, maxLength: 2048 },
+    }, required: ['sessionId', 'path'] },
+  },
   'session.read': {
     description: 'Read events from an open session. Use `limit` and `before` for a history page, or `at` to read exactly one event by sequence number; `at` and `before` cannot be combined',
     parameters: { type: 'object', properties: {
