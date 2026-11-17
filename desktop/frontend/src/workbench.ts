@@ -78,13 +78,17 @@ function hash(value: unknown): string | undefined {
   return typeof value === 'string' && /^[a-f0-9]{64}$/iu.test(value) ? value.toLowerCase() : undefined;
 }
 
+function fileVersion(value: unknown): string | undefined {
+  return typeof value === 'string' && /^(?:[a-f0-9]{16}|[a-f0-9]{64})$/iu.test(value) ? value.toLowerCase() : undefined;
+}
+
 function resourceFrom(value: unknown): WorkbenchResource | undefined {
   if (!object(value)) return undefined;
   switch (value.kind) {
     case 'file': {
       const projectRoot = absoluteRoot(value.projectRoot);
       const path = relativePath(value.path);
-      const version = value.version === undefined ? undefined : hash(value.version);
+      const version = value.version === undefined ? undefined : fileVersion(value.version);
       if (projectRoot === undefined || path === undefined || value.version !== undefined && version === undefined
         || value.line !== undefined && (!Number.isSafeInteger(value.line) || (value.line as number) < 1)) return undefined;
       return { kind: 'file', projectRoot, path,
@@ -100,8 +104,8 @@ function resourceFrom(value: unknown): WorkbenchResource | undefined {
     case 'diff': {
       const projectRoot = absoluteRoot(value.projectRoot);
       const path = relativePath(value.path);
-      const beforeVersion = hash(value.beforeVersion);
-      const afterVersion = hash(value.afterVersion);
+      const beforeVersion = fileVersion(value.beforeVersion);
+      const afterVersion = fileVersion(value.afterVersion);
       if (projectRoot === undefined || path === undefined || beforeVersion === undefined || afterVersion === undefined) return undefined;
       return { kind: 'diff', projectRoot, path, beforeVersion, afterVersion };
     }

@@ -43,6 +43,27 @@ test('resource identity separates projects, immutable diffs, executions, and chi
   assert.equal(new Set(childB.tabs.map(tab => tab.key)).size, childB.tabs.length);
 });
 
+test('file and diff resources accept Session file versions while artifact IDs remain full digests', () => {
+  const before = 'a'.repeat(16);
+  const after = 'b'.repeat(16);
+  const file = openWorkbenchResource(DEFAULT_WORKBENCH_STATE,
+    { kind: 'file', projectRoot: 'C:/repo', path: 'src/app.ts', version: after }, 'app.ts');
+  const diff = openWorkbenchResource(file,
+    { kind: 'diff', projectRoot: 'C:/repo', path: 'src/app.ts', beforeVersion: before, afterVersion: after }, 'app.ts diff');
+  const artifact = openWorkbenchResource(diff,
+    { kind: 'artifact', projectRoot: 'C:/repo', sessionId: 'session-a', artifactKey: 'c'.repeat(64) }, 'delivery');
+  const invalidArtifact = workbenchStateFrom({
+    version: 1,
+    tabs: [{ resource: { kind: 'artifact', projectRoot: 'C:/repo', sessionId: 'session-a', artifactKey: after }, title: 'invalid' }],
+  });
+
+  assert.equal(file.tabs.length, 1);
+  assert.equal(diff.tabs.length, 2);
+  assert.equal(diff.tabs[1].resource.kind, 'diff');
+  assert.equal(artifact.tabs.length, 3);
+  assert.equal(invalidArtifact.tabs.length, 0);
+});
+
 test('workbench accepts filesystem roots while keeping the file target relative', () => {
   const unixRoot = openWorkbenchResource(DEFAULT_WORKBENCH_STATE,
     { kind: 'file', projectRoot: '/', path: 'etc/config.toml' }, 'config.toml');

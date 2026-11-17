@@ -8,6 +8,8 @@ import { Icon } from './components/Icon';
 import { SettingsDialog, type SettingsSectionId } from './components/Settings';
 import { BranchPanel } from './components/BranchPanel';
 import { WorkbenchDock } from './components/WorkbenchDock';
+import { ProjectFilesPanel } from './components/ProjectFilesPanel';
+import { ProjectFileView } from './components/ProjectFileView';
 import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
 import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
@@ -51,6 +53,17 @@ import type { PermissionConfirmations, PermissionTarget } from './permission-con
 const LIVE_REASONING: Row = { id: -2, kind: 'reasoning', text: '' };
 const LIVE_ANSWER: Row = { id: -1, kind: 'answer', text: '' };
 type PolicySelection = 'always' | 'ask' | 'auto' | 'never';
+
+function sameProjectRoot(left: string, right: string): boolean {
+  const normalize = (value: string) => {
+    const path = value.replaceAll('\\', '/').replace(/\/+$/u, '');
+    return /^[a-z]:$/iu.test(path) ? `${path}/` : path;
+  };
+  const first = normalize(left);
+  const second = normalize(right);
+  const insensitive = /^[a-z]:\//iu.test(first) || first.startsWith('//');
+  return insensitive ? first.toLowerCase() === second.toLowerCase() : first === second;
+}
 
 // 每次向前读取一页事件；打开会话时先取最近页，再按游标读取更早记录。
 const RENDER_WINDOW = 400;
@@ -475,6 +488,32 @@ export function App({ transport }: { transport: Transport }) {
       }
     });
   }, [applyWorkbenchState, leaveDock, panelTitle, projectRoot, sessionId]);
+  const openProjectDirectory = useCallback((root: string, path: string) => {
+    if (sessionId === null || projectRoot === '' || !sameProjectRoot(root, projectRoot)) {
+      setWorkbenchError('project_files_session_required');
+      return;
+    }
+    leaveDock(() => {
+      const title = path === '.' ? t('项目文件', 'Files') : path.split('/').at(-1) ?? path;
+      try {
+        applyWorkbenchState(openWorkbenchResource(workbenchRef.current, { kind: 'directory', projectRoot: root, path }, title));
+        setWorkbenchError(null);
+      } catch (error) { setWorkbenchError(code(error)); }
+    });
+  }, [applyWorkbenchState, leaveDock, projectRoot, sessionId, t]);
+  const openProjectFile = useCallback((root: string, path: string) => {
+    if (sessionId === null || projectRoot === '' || !sameProjectRoot(root, projectRoot)) {
+      setWorkbenchError('project_files_session_required');
+      return;
+    }
+    leaveDock(() => {
+      const title = path.split('/').at(-1) ?? path;
+      try {
+        applyWorkbenchState(openWorkbenchResource(workbenchRef.current, { kind: 'file', projectRoot: root, path }, title));
+        setWorkbenchError(null);
+      } catch (error) { setWorkbenchError(code(error)); }
+    });
+  }, [applyWorkbenchState, leaveDock, projectRoot, sessionId]);
   const selectWorkbench = useCallback((key: string) => {
     leaveDock(() => applyWorkbenchState(selectWorkbenchTab(workbenchRef.current, key)));
   }, [applyWorkbenchState, leaveDock]);
@@ -1813,6 +1852,8 @@ export function App({ transport }: { transport: Transport }) {
     patch,
   };
   const activePanelResource = activeWorkbenchTab?.resource.kind === 'panel' ? activeWorkbenchTab.resource : undefined;
+  const activeDirectoryResource = activeWorkbenchTab?.resource.kind === 'directory' ? activeWorkbenchTab.resource : undefined;
+  const activeFileResource = activeWorkbenchTab?.resource.kind === 'file' ? activeWorkbenchTab.resource : undefined;
   const inactivePanelScope = activePanelResource !== undefined && activePanelResource.panelId !== 'panel.help'
     && activePanelResource.sessionId !== sessionId;
   const dockPanelProps: PanelProps = activePanelResource === undefined || activePanelResource.panelId === 'panel.help'
@@ -2130,12 +2171,26 @@ export function App({ transport }: { transport: Transport }) {
         : activeWorkbenchTab === null
           ? <section className="workbench-home">
             <h2>{t('工作台', 'Workbench')}</h2>
-            <p>{t('打开子任务、交付或诊断；它们会保留在各自的标签中。', 'Open subtasks, deliveries, or diagnostics; each stays in its own tab.')}</p>
+            <p>{t('浏览当前工作区文件，或打开子任务、交付和诊断。', 'Browse project files or open subtasks, deliveries, and diagnostics.')}</p>
             <div className="workbench-home-actions">
+              <button type="button" disabled={sessionId === null || projectRoot === ''}
+                onClick={() => openProjectDirectory(projectRoot, '.')}>{t('项目文件', 'Browse files')}</button>
               {menuPanels.filter(item => item.id !== 'panel.help').map(item => <button type="button" key={item.id}
                 onClick={() => openPanel(item)}>{panelTitle(item)}</button>)}
             </div>
           </section>
+          : activeDirectoryResource !== undefined
+            ? sessionId === null || projectRoot === '' || !sameProjectRoot(activeDirectoryResource.projectRoot, projectRoot)
+              ? <p className="stub" role="status">{t('请切换到这个工作区的会话后再浏览文件。', 'Select a session in this project to browse its files.')}</p>
+              : <ProjectFilesPanel key={`${sessionId}:${activeDirectoryResource.projectRoot}:${activeDirectoryResource.path}`}
+                client={client} sessionId={sessionId} path={activeDirectoryResource.path}
+                onOpenFile={path => openProjectFile(activeDirectoryResource.projectRoot, path)}
+                onOpenDirectory={path => openProjectDirectory(activeDirectoryResource.projectRoot, path)} />
+            : activeFileResource !== undefined
+              ? sessionId === null || projectRoot === '' || !sameProjectRoot(activeFileResource.projectRoot, projectRoot)
+                ? <p className="stub" role="status">{t('请切换到这个工作区的会话后再查看文件。', 'Select a session in this project to view the file.')}</p>
+                : <ProjectFileView key={`${sessionId}:${activeFileResource.projectRoot}:${activeFileResource.path}`}
+                  client={client} sessionId={sessionId} path={activeFileResource.path} expectedVersion={activeFileResource.version} />
           : <p className="stub" role="status">{t('这个资源暂时无法显示。', 'This resource is not available to display.')}</p>}
     </WorkbenchDock>}
 

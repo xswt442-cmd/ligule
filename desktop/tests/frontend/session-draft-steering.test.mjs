@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createRequire } from 'node:module';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createPermissionContext } from '../../../core/dist/kernel/permission.js';
@@ -37,9 +38,18 @@ test('background steering and new conversations preserve session-owned drafts', 
   let reportProviderStarted;
   const providerGate = new Promise((resolve) => { releaseProvider = resolve; });
   const providerStarted = new Promise((resolve) => { reportProviderStarted = resolve; });
-  let providerRequests = 0;
+  let providerRequestCount = 0;
   const preferenceWrites = [];
-  await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+  await withTuiHost(async ({ client, sessionId, projectDirectory, providerRequests, requests }) => {
+    await mkdir(join(projectDirectory, 'src'), { recursive: true });
+    const requireCore = createRequire(join(repositoryRoot, 'core', 'package.json'));
+    const sharp = requireCore('sharp');
+    await writeFile(join(projectDirectory, 'src', 'app.ts'), 'export const answer = 42;\r\n');
+    await writeFile(join(projectDirectory, 'README.md'), '# Safe heading\n\n<script>window.__filePreviewExecuted = true</script>\n');
+    await writeFile(join(projectDirectory, 'unsafe.html'), '<script>window.__htmlPreviewExecuted = true</script>');
+    await writeFile(join(projectDirectory, 'pixel.png'), await sharp({
+      create: { width: 1, height: 1, channels: 3, background: '#4269ed' },
+    }).png().toBuffer());
     const second = await client.request('session.create', { projectRoot: projectDirectory, workspaceOrigin: 'explicit' });
     await client.request('workspace.trust', {
       projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
@@ -157,6 +167,46 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
       });
 
       await page.getByRole('button', { name: 'Workbench' }).click();
+      const beforeFileBrowse = await client.request('session.read', { sessionId });
+      const providerRequestsBeforeFileBrowse = providerRequests.length;
+      await page.getByRole('button', { name: 'Browse files', exact: true }).click();
+      const fileSearch = page.getByRole('searchbox', { name: 'Search file names' });
+      await page.getByRole('button', { name: 'src', exact: true }).click();
+      await page.getByRole('button', { name: 'app.ts', exact: true }).click();
+      await page.locator('[data-file-preview]').getByText('export const answer = 42;').waitFor();
+      assert.ok(requests.some(request => request.method === 'project.files.list' && request.params.path === 'src'),
+        'the tree loads nested folders only when expanded');
+      await page.getByRole('button', { name: 'Close app.ts' }).click();
+
+      await fileSearch.fill('README.md');
+      await page.getByRole('button', { name: /README\.md/u }).click();
+      await page.getByRole('heading', { name: 'Safe heading' }).waitFor();
+      assert.equal(await page.evaluate(() => window.__filePreviewExecuted === true), false,
+        'Markdown source is parsed into safe React elements');
+      await page.getByRole('button', { name: 'Close README.md' }).click();
+
+      await fileSearch.fill('unsafe.html');
+      await page.getByRole('button', { name: /unsafe\.html/u }).click();
+      await page.locator('[data-file-preview]').getByText('window.__htmlPreviewExecuted = true').waitFor();
+      assert.equal(await page.evaluate(() => window.__htmlPreviewExecuted === true), false,
+        'HTML files are shown as source rather than executed');
+      await page.getByRole('button', { name: 'Close unsafe.html' }).click();
+
+      await fileSearch.fill('pixel.png');
+      await page.getByRole('button', { name: /pixel\.png/u }).click();
+      await page.getByRole('img', { name: 'pixel.png' }).waitFor();
+      await page.getByRole('button', { name: 'Close pixel.png' }).click();
+      await page.getByRole('button', { name: 'Close Files' }).click();
+      await page.getByRole('button', { name: 'Workbench' }).click();
+      const afterFileBrowse = await client.request('session.read', { sessionId });
+      assert.equal(afterFileBrowse.events.length, beforeFileBrowse.events.length,
+        'opening and reading project files does not add Session events');
+      assert.equal(providerRequests.length, providerRequestsBeforeFileBrowse,
+        'project file browsing does not call the model');
+      assert.ok(requests.some(request => request.method === 'project.files.list'));
+      assert.ok(requests.some(request => request.method === 'project.files.search'));
+      assert.ok(requests.some(request => request.method === 'project.file.read'));
+
       await page.getByRole('button', { name: 'Subtasks', exact: true }).click();
       await page.getByRole('button', { name: 'Help', exact: true }).click();
       await page.getByRole('menuitem', { name: 'Diagnostics', exact: true }).click();
@@ -323,8 +373,8 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
     }
   }, {
     beforeResponse: async () => {
-      providerRequests += 1;
-      if (providerRequests === 1) {
+      providerRequestCount += 1;
+      if (providerRequestCount === 1) {
         reportProviderStarted();
         await providerGate;
       }
