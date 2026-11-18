@@ -28,6 +28,8 @@ const suppliedGrantName = optionValue('--grant-name');
 const suppliedGrantProfile = optionValue('--grant-profile') ?? 'workspace-write';
 const localInterruption = process.argv.includes('--local-request-interruption');
 const realInterruption = process.argv.includes('--real-request-interruption');
+// System clipboard writes require an explicit opt-in because they replace user clipboard contents.
+const includeSystemClipboardWrite = process.argv.includes('--include-system-clipboard-write');
 const interruptionMode = localInterruption ? 'local' : realInterruption ? 'real' : undefined;
 if (localInterruption && realInterruption) throw new Error('packaged_interruption_modes_conflict');
 const modelApiKeyName = 'LIGULE_PLAN2_OTHERS_API_KEY';
@@ -1620,7 +1622,7 @@ async function runChecks() {
     }
   });
 
-  if (interruptionMode === undefined) {
+  if (interruptionMode === undefined && includeSystemClipboardWrite) {
     await check('clipboard write permission from the packaged secure page', async () => {
       await devTools.call('Page.bringToFront');
       await waitUntil(async () => await devTools.evaluate('document.hasFocus()'), 5_000, 'packaged_window_focus');
@@ -1634,7 +1636,8 @@ async function runChecks() {
       return 'navigator.clipboard.writeText 接受测试文本；没有读取系统剪贴板';
     });
   } else {
-    record('clipboard write permission from the packaged secure page', '未执行', '请求中断验收不触碰系统剪贴板');
+    record('clipboard write permission from the packaged secure page', '未执行',
+      includeSystemClipboardWrite ? '请求中断验收不触碰系统剪贴板' : '默认不写入系统剪贴板；该项只在获得明确授权后执行');
   }
 
   if (interruptionMode === undefined) {
