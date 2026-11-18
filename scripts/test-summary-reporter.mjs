@@ -24,6 +24,31 @@ function relativeFile(file) {
   return typeof file === 'string' ? relative(repository, file) || basename(file) : '(unknown test file)';
 }
 
+function nestedCauseDiagnostics(error) {
+  const diagnostics = [];
+  const seen = new Set([error]);
+  let current = error;
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (current === null || typeof current !== 'object' || !('cause' in current)) break;
+    const cause = current.cause;
+    if (cause === null || typeof cause !== 'object' || seen.has(cause)) break;
+    seen.add(cause);
+    current = cause;
+    // The first cause stack is printed separately. Deeper causes contribute only bounded,
+    // non-path diagnostics so filesystem errors remain useful without echoing local paths.
+    if (depth === 0) continue;
+    const fields = [];
+    if (typeof cause.code === 'string') fields.push(`code=${cause.code.slice(0, 80)}`);
+    if (Number.isSafeInteger(cause.errno)) fields.push(`errno=${cause.errno}`);
+    if (typeof cause.syscall === 'string') fields.push(`syscall=${cause.syscall.slice(0, 80)}`);
+    if (fields.length > 0) {
+      const name = typeof cause.name === 'string' ? cause.name.slice(0, 80) : 'Error';
+      diagnostics.push(`nested cause: ${name} ${fields.join(' ')}`);
+    }
+  }
+  return diagnostics;
+}
+
 function failureText(failure) {
   const data = failure.data;
   const details = data.details ?? {};
@@ -34,6 +59,8 @@ function failureText(failure) {
     : typeof error.message === 'string' ? error.message : String(error);
   const causeStack = cause !== undefined && typeof cause.stack === 'string' && !stack.includes(cause.stack)
     ? `\nCaused by:\n${cause.stack}` : '';
+  const nestedCauses = nestedCauseDiagnostics(error);
+  const nestedCauseText = nestedCauses.length === 0 ? '' : `\n${nestedCauses.join('\n')}`;
   const diagnostics = [error, cause].flatMap((entry) => {
     if (entry === undefined || entry === null || typeof entry !== 'object') return [];
     const fields = [];
@@ -42,7 +69,7 @@ function failureText(failure) {
     }
     return fields;
   });
-  return `✖ ${data.name ?? '(unnamed test)'} (${location})\n${stack}${causeStack}${diagnostics.length === 0 ? '' : `\n${diagnostics.join('\n')}`}`;
+  return `✖ ${data.name ?? '(unnamed test)'} (${location})\n${stack}${causeStack}${nestedCauseText}${diagnostics.length === 0 ? '' : `\n${diagnostics.join('\n')}`}`;
 }
 
 export default new Transform({

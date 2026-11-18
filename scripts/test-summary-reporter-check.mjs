@@ -40,7 +40,17 @@ try {
   const failingStdout = 'runId=reporter-run sessionId=reporter-session input=reporter-input';
   const failingStderr = 'failing-file stderr retained';
   await writeFile(passingFile, `import test from 'node:test';\ntest('passing fixture', () => { console.error(${JSON.stringify(passingStderr)}); });\n`);
-  await writeFile(failingFile, `import test from 'node:test';\ntest('failing fixture', () => { console.log(${JSON.stringify(failingStdout)}); console.error(${JSON.stringify(failingStderr)}); throw new Error('reporter fixture failure'); });\n`);
+  await writeFile(failingFile, `import test from 'node:test';\ntest('failing fixture', () => {
+    console.log(${JSON.stringify(failingStdout)});
+    console.error(${JSON.stringify(failingStderr)});
+    const operatingSystemCause = Object.assign(new Error('private low-level message'), {
+      code: 'EACCES', errno: -4048, syscall: 'link', path: 'private-cause-path',
+    });
+    const publishCause = Object.assign(new Error('publish wrapper'), { code: 'run_result_write_failed', cause: operatingSystemCause });
+    const loopCause = Object.assign(new Error('loop wrapper'), { code: 'run_result_write_failed', cause: publishCause });
+    throw new Error('reporter fixture failure', { cause: loopCause });
+  });
+`);
 
   const passed = run([passingFile]);
   assert.equal(passed.status, 0, passed.stderr);
@@ -59,14 +69,17 @@ try {
   assert.match(failed.stdout, new RegExp(failingStderr));
   assert.match(failed.stdout, new RegExp(passingStderr));
   assert.match(failed.stdout, /Caused by:\nError: reporter fixture failure\n\s+at TestContext\.<anonymous>.*failing\.test\.mjs:/u);
+  assert.match(failed.stdout, /nested cause: .*code=EACCES.*errno=-4048.*syscall=link/u);
+  assert.doesNotMatch(failed.stdout, /private low-level message|private-cause-path/u);
   assert.equal(failed.stderr, '');
 
   assert.ok(artifactLine, 'failure output names its report artifact');
   assert.ok(isWithin(reportRoot, artifact), 'only the reporter-owned artifact path is read');
   const report = await readFile(artifact, 'utf8');
-  for (const expected of [failingStdout, failingStderr, passingStderr, 'reporter fixture failure']) {
+  for (const expected of [failingStdout, failingStderr, passingStderr, 'reporter fixture failure', 'nested cause: Error code=EACCES errno=-4048 syscall=link']) {
     assert.ok(report.includes(expected), `failure artifact includes ${expected}`);
   }
+  assert.doesNotMatch(report, /private low-level message|private-cause-path/u);
   process.stdout.write('test summary reporter contract passed\n');
 } finally {
   if (artifact !== undefined && isWithin(reportRoot, artifact)) await rm(artifact, { force: true });
