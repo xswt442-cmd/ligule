@@ -1305,7 +1305,33 @@ async function runP15NativeWorkbench() {
       providerResult: { status: 'sent', opened: false, read: false, includedFile: false },
       providerRequests: 3,
     };
-    return '真实 Electron 窗口创建只读侧 Session 且未调用 Provider；原 Run 保持活动。随后经一次审批显示文件请求，用户点击后才打开；模型仅收到 sent/opened=false/read=false，Host 记录 opened。';
+    const viewportBeforeResize = await page.evaluate(() => {
+      window.__p15WindowResizeEvents = [];
+      window.addEventListener('resize', () => window.__p15WindowResizeEvents.push({ width: window.innerWidth, height: window.innerHeight }));
+      return { width: window.innerWidth, height: window.innerHeight };
+    });
+    const resizeReport = JSON.parse(execFileSync('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-File', join(scriptDirectory, 'window-bounds.ps1'),
+      '-RootProcessId', String(processIds.main),
+    ], { encoding: 'utf8', windowsHide: true, timeout: 10_000 }));
+    const viewportAfterResize = await page.evaluate(() => ({
+      current: { width: window.innerWidth, height: window.innerHeight },
+      events: window.__p15WindowResizeEvents,
+    }));
+    const viewportResizeObserved = viewportAfterResize.events.some(event =>
+      event.width > viewportBeforeResize.width && event.height > viewportBeforeResize.height);
+    if (resizeReport.rootProcessId !== processIds.main || resizeReport.restored !== true
+      || resizeReport.visibleDuringResize !== true || resizeReport.visibilityRestored !== true
+      || !viewportResizeObserved
+      || viewportAfterResize.current.width !== viewportBeforeResize.width
+      || viewportAfterResize.current.height !== viewportBeforeResize.height) {
+      throw new Error('p15_native_window_resize_invalid');
+    }
+    p15NativeCases.windowResize = {
+      ...resizeReport,
+      viewport: { before: viewportBeforeResize, resizeObserved: viewportResizeObserved, afterRestore: viewportAfterResize.current },
+    };
+    return `真实 Electron 窗口创建只读侧 Session 且未调用 Provider；原 Run 保持活动。随后经一次审批显示文件请求，用户点击后才打开；模型仅收到 sent/opened=false/read=false，Host 记录 opened。原生 BrowserWindow 外框由 ${resizeReport.before.width}×${resizeReport.before.height} 调至 ${resizeReport.resized.width}×${resizeReport.resized.height}，页面观察到对应 resize 事件；随后恢复原尺寸与隐藏状态。`;
   } finally {
     providerGate.releaseSource();
   }
