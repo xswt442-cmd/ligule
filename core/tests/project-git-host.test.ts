@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
@@ -85,13 +86,16 @@ test('Git diff separates staged and working changes and identifies untracked and
     await writeFile(join(projectDirectory, 'untracked.txt'), 'new file\n');
 
     const result = await client.request('project.git.diff', { sessionId, path: 'tracked.txt' }) as {
-      state: string; path: string; staged: string | null; unstaged: string | null;
+      state: string; path: string; staged: string | null; unstaged: string | null; version?: string;
     };
     assert.equal(result.state, 'ready');
     assert.equal(result.path, 'tracked.txt');
     assert.match(result.staged ?? '', /\+staged revision/u);
     assert.match(result.unstaged ?? '', /\+working revision/u);
     assert.match(result.unstaged ?? '', /-staged revision/u);
+    assert.equal(result.version, createHash('sha256').update(JSON.stringify([
+      result.path, result.staged, result.unstaged,
+    ])).digest('hex'));
 
     assert.deepEqual(await client.request('project.git.diff', { sessionId, path: 'untracked.txt' }), {
       state: 'untracked', path: 'untracked.txt', staged: null, unstaged: null,

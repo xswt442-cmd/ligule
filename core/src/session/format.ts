@@ -99,7 +99,8 @@ const WRITTEN_KINDS = [
   'session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection',
   'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule',
   'compaction', 'todoWrite', 'image', 'screenCapture', 'policyReview', 'runInput', 'execution', 'workspaceFileChange',
-  'toolActivity', 'check', 'subrunStarted', 'operationStarted', 'operationFinished',
+  'toolActivity', 'check', 'subrunStarted', 'operationStarted', 'operationFinished', 'sideSessionStarted', 'sideSessionOrigin',
+  'viewRequest', 'viewRequestDelivered', 'viewRequestUnavailable', 'viewRequestOpened', 'viewRequestDismissed',
 ];
 
 // 会话里保存的审批档位。返回 `unknown` 表示值无法解释，调用方必须拒绝该记录。
@@ -155,6 +156,9 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
   const checkExecutions = new Set<string>();
   let operationId: string | undefined;
   let operationFinished = false;
+  const sideSessionIds = new Set<string>();
+  let sideSessionOrigin: string | undefined;
+  const viewRequests = new Map<string, { readonly runId: string; state: 'requested' | 'delivered' | 'unavailable' | 'opened' | 'dismissed' }>();
   const events: SessionEvent[] = [];
   for (const [index, event] of objects.entries()) {
     const kind = typeof event.kind === 'string' ? event.kind : '';
@@ -354,6 +358,86 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         throw new KernelRuntimeError('session_operation_finished_event_invalid');
       }
       operationFinished = true;
+    }
+    if (kind === 'sideSessionStarted' || kind === 'sideSessionOrigin') {
+      const uuid = (value: unknown) => typeof value === 'string'
+        && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu.test(value);
+      const safeRelativePath = (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 4096
+        && !/[\u0000-\u001f\u007f]/u.test(value) && !value.startsWith('/') && !value.startsWith('\\')
+        && !/^[a-z]:/iu.test(value) && !value.replaceAll('\\', '/').split('/').includes('..');
+      const sourceKind = event.sourceKind;
+      const eventReference = Number.isSafeInteger(event.sourceEventSeq) && Number(event.sourceEventSeq) >= 0;
+      const eventExists = eventReference && events.some(prior => prior.seq === event.sourceEventSeq);
+      const fileReference = safeRelativePath(event.sourcePath) && typeof event.sourceVersion === 'string'
+        && /^[a-f0-9]{16}$/iu.test(event.sourceVersion);
+      const diffReference = safeRelativePath(event.sourcePath) && typeof event.sourceVersion === 'string'
+        && /^[a-f0-9]{64}$/iu.test(event.sourceVersion);
+      const commonValid = event.ignorable === true
+        && event.source === 'desktop'
+        && (sourceKind === 'event' ? eventReference && event.sourcePath === undefined && event.sourceVersion === undefined
+          : sourceKind === 'file' ? fileReference && event.sourceEventSeq === undefined
+            : sourceKind === 'diff' ? diffReference && event.sourceEventSeq === undefined : false)
+        && Number.isSafeInteger(event.selectionBytes) && Number(event.selectionBytes) > 0 && Number(event.selectionBytes) <= 8192
+        && typeof event.selectionSha256 === 'string' && /^[a-f0-9]{64}$/iu.test(event.selectionSha256)
+        && (event.sourceRunId === undefined || uuid(event.sourceRunId));
+      if (kind === 'sideSessionStarted') {
+        const sideId = event.sideSessionId;
+        const sourceId = event.sourceSessionId;
+        if (Object.keys(event).some(key => !['seq', 'kind', 'ignorable', 'source', 'sourceSessionId', 'sideSessionId',
+          'sourceRunId', 'sourceKind', 'sourceEventSeq', 'sourcePath', 'sourceVersion', 'selectionBytes', 'selectionSha256', 'createdAt'].includes(key))
+          || !commonValid || sourceKind === 'event' && !eventExists
+          || !uuid(sourceId) || !uuid(sideId) || sideId === sourceId || header?.sessionId !== sourceId
+          || sideSessionIds.has(sideId as string)
+          || typeof event.createdAt !== 'string' || !Number.isFinite(Date.parse(event.createdAt))) {
+          throw new KernelRuntimeError('session_side_started_event_invalid');
+        }
+        sideSessionIds.add(sideId as string);
+      } else {
+        const originId = event.originSessionId;
+        if (Object.keys(event).some(key => !['seq', 'kind', 'ignorable', 'source', 'originSessionId', 'originRunId',
+          'sourceKind', 'sourceEventSeq', 'sourcePath', 'sourceVersion', 'selectionBytes', 'selectionSha256', 'createdAt'].includes(key))
+          || !commonValid || !uuid(originId) || header?.sessionId === undefined || originId === header.sessionId
+          || sideSessionOrigin !== undefined || event.sourceRunId !== undefined
+          || (event.originRunId !== undefined && !uuid(event.originRunId))
+          || typeof event.createdAt !== 'string' || !Number.isFinite(Date.parse(event.createdAt))) {
+          throw new KernelRuntimeError('session_side_origin_event_invalid');
+        }
+        sideSessionOrigin = originId as string;
+      }
+    }
+    if (kind === 'viewRequest' || kind === 'viewRequestDelivered' || kind === 'viewRequestUnavailable'
+      || kind === 'viewRequestOpened' || kind === 'viewRequestDismissed') {
+      const uuid = (value: unknown) => typeof value === 'string'
+        && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu.test(value);
+      const requestId = event.requestId;
+      const runId = event.runId;
+      const createdAt = typeof event.createdAt === 'string' && Number.isFinite(Date.parse(event.createdAt));
+      const common = event.ignorable === true && event.source === 'desktop' && uuid(requestId)
+        && uuid(runId) && createdAt && header?.sessionId !== undefined;
+      if (kind === 'viewRequest') {
+        if (Object.keys(event).some(key => !['seq', 'kind', 'ignorable', 'source', 'requestId', 'runId', 'targetKind', 'createdAt'].includes(key))
+          || !common || header?.sessionId === undefined || viewRequests.has(requestId as string)
+          || !['file', 'directory', 'diff', 'command', 'subrun'].includes(String(event.targetKind))) {
+          throw new KernelRuntimeError('session_view_request_event_invalid');
+        }
+        viewRequests.set(requestId as string, { runId: runId as string, state: 'requested' });
+      } else {
+        if (Object.keys(event).some(key => !['seq', 'kind', 'ignorable', 'source', 'requestId', 'runId', 'createdAt'].includes(key))
+          || !common) throw new KernelRuntimeError('session_view_request_event_invalid');
+        const prior = viewRequests.get(requestId as string);
+        const transition = kind === 'viewRequestDelivered' || kind === 'viewRequestUnavailable'
+          ? prior?.state === 'requested'
+          : prior?.state === 'delivered';
+        const resolved = kind === 'viewRequestOpened' || kind === 'viewRequestDismissed';
+        if (prior === undefined || prior.runId !== runId || !transition
+          || (resolved && (prior.state === 'opened' || prior.state === 'dismissed'))) {
+          throw new KernelRuntimeError('session_view_request_event_invalid');
+        }
+        const state = kind === 'viewRequestDelivered' ? 'delivered'
+          : kind === 'viewRequestUnavailable' ? 'unavailable'
+            : kind === 'viewRequestOpened' ? 'opened' : 'dismissed';
+        viewRequests.set(requestId as string, { runId: runId as string, state });
+      }
     }
     if (kind === 'toolActivity') {
       const safeText = (value: unknown, max: number): value is string => typeof value === 'string'

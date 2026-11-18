@@ -54,7 +54,7 @@ import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
 import { listProjectDirectory, readProjectFile, saveProjectFile, searchProjectFiles } from './project-files.js';
-import { readProjectGitDiff, readProjectGitStatus } from './project-git.js';
+import { projectGitDiffVersion, readProjectGitDiff, readProjectGitStatus } from './project-git.js';
 import { branchSessionId, exportImageUrl, exportMarkdown, exportRecordOf, MAX_EXPORT_ASSETS, writeExport, type ExportAsset, type ExportRecord } from './export.js';
 import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
 export { compactionLimitsOf } from './runtime-limits.js';
@@ -85,7 +85,7 @@ import { networkPlugin } from '../tools/network.js';
 import { createTodoWritePlugin } from '../tools/todo-write.js';
 import { createReadImagePlugin } from '../tools/read-image.js';
 import { createReadDocumentPlugin } from '../tools/read-document.js';
-import { createPresentPlugin } from '../tools/present.js';
+import { createPresentPlugin, type ViewRequestArguments, type ViewRequestResult } from '../tools/present.js';
 import { confirmedFileArtifacts } from '../session/artifact.js';
 import { readFileArtifact, previewFileArtifact } from '../capability/artifact.js';
 import { createSearchSupport, type SearchStatus } from './search.js';
@@ -108,7 +108,7 @@ import { apiRoot } from '../model/http.js';
 import { thinkingCapabilityOf } from '../model/thinking.js';
 import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
-import { APPROVAL_METHOD, QUESTION_METHOD, validateCall, type HostMethodParams } from './protocol.js';
+import { APPROVAL_METHOD, QUESTION_METHOD, VIEW_REQUEST_METHOD, validateCall, type HostMethodParams } from './protocol.js';
 import { createConfig, mergePolicyRules, type ConfigSnapshot } from '../kernel/config.js';
 import { dataRoot, loadConfigLayers } from '../kernel/config-file.js';
 import type { LoggerBackend } from '../kernel/log.js';
@@ -2605,11 +2605,101 @@ export function createHost({
       loopLimits: sessionLoopLimits(state),
       parentSession: session,
     });
+    const requestView = permissionControl ? async (args: ViewRequestArguments, context: import('../kernel/kernel.js').ToolContext): Promise<ViewRequestResult> => {
+      const unavailable: ViewRequestResult = { status: 'view_unavailable', opened: false, read: false };
+      const runId = context.runId;
+      if (context.sessionId !== id || runId === undefined || state.activeRunId !== runId || state.operationOnly === true) {
+        throw new KernelError('view_request_scope_invalid');
+      }
+      context.signal?.throwIfAborted();
+      const denied = permissionDenial(state.permission, 'read');
+      if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+
+      let target: Record<string, unknown>;
+      if (args.kind === 'file') {
+        if (args.path === undefined || args.executionId !== undefined || args.subrunId !== undefined) {
+          throw new KernelError('view_request_arguments_invalid');
+        }
+        const file = await readProjectFile(env.config, id, args.path, 0, 64_000);
+        if (file.encoding !== 'utf8' || typeof file.version !== 'string') throw new KernelError('view_resource_unavailable');
+        target = { kind: 'file', projectRoot: env.projectRoot, path: file.path, version: file.version };
+      } else if (args.kind === 'directory') {
+        if (args.path === undefined || args.executionId !== undefined || args.subrunId !== undefined) {
+          throw new KernelError('view_request_arguments_invalid');
+        }
+        const directory = await listProjectDirectory(env.config, args.path, 0, 1);
+        target = { kind: 'directory', projectRoot: env.projectRoot, path: directory.path };
+      } else if (args.kind === 'diff') {
+        if (args.path === undefined || args.executionId !== undefined || args.subrunId !== undefined) {
+          throw new KernelError('view_request_arguments_invalid');
+        }
+        const diff = await readProjectGitDiff(env.projectRoot, args.path);
+        const version = projectGitDiffVersion(diff);
+        if (version === undefined) throw new KernelError('view_resource_unavailable');
+        target = { kind: 'git', projectRoot: env.projectRoot, path: diff.path, version };
+      } else if (args.kind === 'command') {
+        if (args.path !== undefined || args.executionId === undefined || args.subrunId !== undefined) {
+          throw new KernelError('view_request_arguments_invalid');
+        }
+        let reference: Record<string, string> | undefined;
+        for (const candidate of sessions.values()) {
+          if (candidate.operationOnly !== true || candidate.operationId === undefined) continue;
+          const events = await candidate.session.read();
+          const operation = events.find(event => event.kind === 'operationStarted'
+            && event.sourceSessionId === id && event.operationId === candidate.operationId);
+          if (operation === undefined) continue;
+          finiteCommands.status({ projectIdentity: workspaceIdentity(env.projectRoot),
+            sessionId: candidate.id, runId: candidate.operationId }, args.executionId);
+          reference = { sourceSessionId: id, operationSessionId: candidate.id,
+            operationId: candidate.operationId, executionId: args.executionId };
+          break;
+        }
+        if (reference === undefined) throw new KernelError('view_resource_unavailable');
+        target = { kind: 'command', reference };
+      } else {
+        if (args.path !== undefined || args.executionId !== undefined || args.subrunId === undefined) {
+          throw new KernelError('view_request_arguments_invalid');
+        }
+        const subrun = await state.subagents?.status(args.subrunId, runId);
+        if (subrun === undefined) throw new KernelError('view_resource_unavailable');
+        if (subrun.parentRunId !== runId || subrun.runId === undefined) throw new KernelError('view_resource_unavailable');
+        target = { kind: 'subrun', sessionId: id, parentRunId: runId, subrunId: subrun.subrunId,
+          childSessionId: subrun.sessionId, childRunId: subrun.runId };
+      }
+
+      const requestId = randomUUID();
+      const createdAt = new Date().toISOString();
+      await state.session.append({ kind: 'viewRequest', ignorable: true, source: 'desktop', requestId,
+        runId, targetKind: args.kind, createdAt });
+      let response: unknown;
+      try {
+        response = await connection.request(VIEW_REQUEST_METHOD, { sessionId: id, runId, requestId, target });
+      } catch (error) {
+        const failure = errorCode(error);
+        if (['connection_closed', 'protocol_method_unknown', 'connection_handler_failed'].includes(failure ?? '')) {
+          await state.session.append({ kind: 'viewRequestUnavailable', ignorable: true, source: 'desktop',
+            requestId, runId, createdAt: new Date().toISOString() });
+          return unavailable;
+        }
+        throw error;
+      }
+      context.signal?.throwIfAborted();
+      if (!isRecord(response) || response.status !== 'sent') {
+        await state.session.append({ kind: 'viewRequestUnavailable', ignorable: true, source: 'desktop',
+          requestId, runId, createdAt: new Date().toISOString() });
+        return unavailable;
+      }
+      await state.session.append({ kind: 'viewRequestDelivered', ignorable: true, source: 'desktop',
+        requestId, runId, createdAt: new Date().toISOString() });
+      connection.notify({ notify: 'view.ready', sessionId: id, requestId });
+      return { status: 'sent', opened: false, read: false };
+    } : undefined;
     const assembly = loadAssembly(kernel, [...basePlugins, createMcpPlugin(mcp, mcpAuthorization, { media,
       sourceFor: server => server === BROWSER_SERVER ? 'browser' : undefined }), createTodoWritePlugin({ session }),
       createReadImagePlugin({ media, supportsImages: () => live.imageInput === true }),
       createReadDocumentPlugin({ media, supportsImages: () => live.imageInput === true }),
-      createPresentPlugin({ sessionId: id, workspaceRoot: env.projectRoot, session }),
+      createPresentPlugin({ sessionId: id, workspaceRoot: env.projectRoot, session,
+        ...(requestView === undefined ? {} : { requestView }) }),
       createScreenshotPlugin({ media, supportsImages: () => live.imageInput === true, authorize: authorizeScreenCapture }),
       managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
       // 压缩实例随所选模型重建；工具经取值函数读取当前实例。派生子会话不注册此工具，
@@ -3554,6 +3644,142 @@ export function createHost({
             || message.params.initialLoopIterations !== undefined;
           return hasInitialSettings ? { ...created, settingsApplied: true } : created;
         }
+        case 'session.side.create': {
+          requireTrustedUi('side-session', controlTrust);
+          const source = open(sessionId);
+          if (source.operationOnly === true) throw new KernelError('side_session_source_invalid');
+          if (source.permissionChanging) throw new KernelError('permission_change_in_progress');
+          const selection = requiredString(message.params.selection, 'selection');
+          const selectionBytes = Buffer.byteLength(selection, 'utf8');
+          if (selectionBytes > 8192 || selection.includes('\u0000')) throw new KernelError('side_context_limit_exceeded');
+          const sourceKind = message.params.sourceKind;
+          if (sourceKind !== 'event' && sourceKind !== 'file' && sourceKind !== 'diff') {
+            throw new KernelError('side_context_source_kind_invalid');
+          }
+          const readDenied = permissionDenial(source.permission, 'read');
+          if (readDenied !== undefined) throw new KernelError(readDenied.code, { detail: readDenied.reason });
+
+          const sourceEvents = await source.session.read();
+          let sourceEvent: Record<string, unknown> | undefined;
+          let sourceEventSeq: number | undefined;
+          let sourcePath: string | undefined;
+          let sourceVersion: string | undefined;
+          if (sourceKind === 'event') {
+            if (!Number.isSafeInteger(message.params.sourceEventSeq) || Number(message.params.sourceEventSeq) < 0
+              || message.params.sourcePath !== undefined || message.params.sourceVersion !== undefined) {
+              throw new KernelError('side_context_reference_invalid');
+            }
+            sourceEventSeq = Number(message.params.sourceEventSeq);
+            const selectedRecord = await readRecord(source.id, { at: sourceEventSeq, fullResults: true }) as { events?: Record<string, unknown>[] };
+            sourceEvent = selectedRecord.events?.[0];
+            if (sourceEvent === undefined) throw new KernelError('side_context_event_not_found');
+            const visibleText: string[] = [];
+            for (const key of ['text', 'raw', 'reason']) if (typeof sourceEvent[key] === 'string') visibleText.push(sourceEvent[key] as string);
+            if (isRecord(sourceEvent.args)) visibleText.push(JSON.stringify(sourceEvent.args));
+            if (isRecord(sourceEvent.result)) {
+              const result = sourceEvent.result;
+              if (typeof result.reason === 'string') visibleText.push(result.reason);
+              if (typeof result.content === 'string') visibleText.push(result.content);
+              if (isRecord(result.content)) {
+                for (const key of ['text', 'summary']) if (typeof result.content[key] === 'string') visibleText.push(result.content[key] as string);
+              }
+            }
+            if (sourceEvent.kind === 'check' && isRecord(sourceEvent.declaration)) {
+              const declaration = sourceEvent.declaration;
+              visibleText.push(`检查结果：${String(declaration.name ?? 'unknown')} · 命令 ${String(sourceEvent.commandStatus ?? 'unknown')}`
+                + ` · 报告 ${String(sourceEvent.reportStatus ?? 'unknown')} · 范围 ${String(sourceEvent.scopeStatus ?? 'unknown')}`);
+            }
+            if (!visibleText.some(text => text.includes(selection))) throw new KernelError('side_context_unverified');
+          } else {
+            sourcePath = requiredString(message.params.sourcePath, 'sourcePath');
+            if (message.params.sourceEventSeq !== undefined) throw new KernelError('side_context_reference_invalid');
+            await requireProjectFileAccess(source);
+            if (sourceKind === 'file') {
+              sourceVersion = requiredString(message.params.sourceVersion, 'sourceVersion');
+              if (!/^[a-f0-9]{16}$/iu.test(sourceVersion)) throw new KernelError('side_context_reference_invalid');
+              const page = await readProjectFile(source.environment.config, source.id, sourcePath, 0, 64_000);
+              if (page.version !== sourceVersion) throw new KernelError('side_context_version_stale');
+              if (page.encoding !== 'utf8' || typeof page.text !== 'string' || !page.text.includes(selection)) {
+                throw new KernelError('side_context_unverified');
+              }
+            } else {
+              if (message.params.sourceVersion !== undefined) throw new KernelError('side_context_reference_invalid');
+              const diff = await readProjectGitDiff(source.environment.projectRoot, sourcePath);
+              const diffText = diff.state === 'ready' ? [diff.staged, diff.unstaged].filter((value): value is string => value !== null).join('\n') : '';
+              if (diffText === '' || !diffText.includes(selection)) throw new KernelError('side_context_unverified');
+              sourceVersion = createHash('sha256').update(JSON.stringify([diff.path, diff.staged, diff.unstaged])).digest('hex');
+            }
+          }
+
+          const eventRun = sourceEvent !== undefined && isRecord(sourceEvent.run) && typeof sourceEvent.run.runId === 'string'
+            ? sourceEvent.run.runId : sourceEvent !== undefined && typeof sourceEvent.runId === 'string' ? sourceEvent.runId : undefined;
+          const sourceRunId = message.params.sourceRunId === undefined
+            ? sourceKind === 'event' ? eventRun : source.activeRunId
+            : requiredString(message.params.sourceRunId, 'sourceRunId');
+          if (message.params.sourceRunId !== undefined && eventRun !== undefined && sourceRunId !== eventRun) {
+            throw new KernelError('side_context_run_mismatch');
+          }
+          if (sourceRunId !== undefined && runAcceptanceScope(sourceEvents, source.id, sourceRunId) === undefined) {
+            throw new KernelError('side_context_run_not_found');
+          }
+
+          const sideSessionId = randomUUID();
+          const sidePermission = createPermissionContext('read-only', 'disabled', {
+            filesystemRead: source.permission.capabilities.filesystemRead,
+            filesystemWrite: 'unavailable', network: 'unavailable', process: 'unavailable',
+          }, permissionOptionsOf(source.permission, false, source.permission.workspaceTrusted));
+          const sourceHeader = await source.session.header();
+          const sideInitial: InitialSessionSettings = {
+            ...(source.mode.file === undefined ? {} : { mode: source.mode.file.name }),
+            ...(source.policyOverride === null ? {} : { policy: source.policyOverride }),
+            permission: { context: sidePermission, confirmedFullAccess: false, confirmedNetwork: false,
+              confirmedPartialWorkspaceWrite: false },
+            loopIterations: source.loopIterations,
+            persistLoopIterations: true,
+            generation: source.generation,
+            persistGeneration: true,
+          };
+          if (grant !== undefined) assertDelegationPermission(grant, 'read-only', 'disabled');
+          await buildSession(sideSessionId, connection, false, undefined, source.environment,
+            sourceHeader?.workspaceOrigin ?? 'explicit', sideInitial);
+          const side = open(sideSessionId);
+          const createdAt = new Date().toISOString();
+          const selectionSha256 = createHash('sha256').update(selection, 'utf8').digest('hex');
+          const context = {
+            sourceKind, ...(sourceEventSeq === undefined ? {} : { sourceEventSeq }),
+            ...(sourcePath === undefined ? {} : { sourcePath }), ...(sourceVersion === undefined ? {} : { sourceVersion }),
+            selectionBytes, selectionSha256,
+          };
+          await side.session.append({ kind: 'sideSessionOrigin', ignorable: true, source: 'desktop',
+            originSessionId: source.id, ...(sourceRunId === undefined ? {} : { originRunId: sourceRunId }), ...context, createdAt });
+          await side.session.append({ kind: 'label', name: 'Side chat' });
+          await source.session.append({ kind: 'sideSessionStarted', ignorable: true, source: 'desktop',
+            sourceSessionId: source.id, sideSessionId, ...(sourceRunId === undefined ? {} : { sourceRunId }), ...context, createdAt });
+          await noteWorkspace(source.environment);
+          return { sessionId: sideSessionId, sourceSessionId: source.id,
+            ...(sourceRunId === undefined ? {} : { sourceRunId }), ...context, createdAt };
+        }
+        case 'view.request.ack': {
+          requireTrustedUi('view-request', controlTrust);
+          const source = open(sessionId);
+          if (source.operationOnly === true) throw new KernelError('view_request_scope_invalid');
+          const runId = requiredString(message.params.runId, 'runId');
+          const requestId = requiredString(message.params.requestId, 'requestId');
+          const action = message.params.action;
+          if (action !== 'opened' && action !== 'dismissed') throw new KernelError('view_request_action_invalid');
+          const events = await source.session.read();
+          const requested = events.find(event => event.kind === 'viewRequest' && event.requestId === requestId);
+          if (requested === undefined || requested.runId !== runId) throw new KernelError('view_request_not_found');
+          if (!events.some(event => event.kind === 'viewRequestDelivered' && event.requestId === requestId && event.runId === runId)) {
+            throw new KernelError('view_request_not_delivered');
+          }
+          if (events.some(event => ['viewRequestOpened', 'viewRequestDismissed'].includes(String(event.kind))
+            && event.requestId === requestId)) throw new KernelError('view_request_already_resolved');
+          const kind = action === 'opened' ? 'viewRequestOpened' : 'viewRequestDismissed';
+          await source.session.append({ kind, ignorable: true, source: 'desktop', requestId, runId,
+            createdAt: new Date().toISOString() });
+          return { requestId, action, recorded: true };
+        }
         case 'session.open': {
           // 按会话所属项目定位已打开的会话，与 `session.read` 使用相同规则。
           // 未指定项目根目录时，可能会在错误目录中查找其他项目创建的会话。
@@ -3797,7 +4023,9 @@ export function createHost({
           await requireProjectFileAccess(state);
           const denied = permissionDenial(state.permission, 'read');
           if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
-          return await readProjectGitDiff(state.environment.projectRoot, message.params.path);
+          const diff = await readProjectGitDiff(state.environment.projectRoot, message.params.path);
+          const version = projectGitDiffVersion(diff);
+          return { ...diff, ...(version === undefined ? {} : { version }) };
         }
         case 'session.read': {
           // 返回已持久化记录，让客户端重连后可以恢复会话内容。

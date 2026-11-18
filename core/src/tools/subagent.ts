@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import type { ExecController } from '../capability/exec.js';
 import type { FiniteCommandRegistry } from '../capability/finite-command.js';
+import { createManagedProcessRegistry, managedProcessPlugin } from '../capability/managed-process.js';
 import type { FileWriteQueue } from '../kernel/file-write-queue.js';
 import { createLoop, DEFAULT_LOOP_LIMITS, type LoopLimits, type LoopProgressEvent } from '../kernel/loop.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
@@ -24,6 +25,7 @@ import { createRunSteeringInbox, type RunSteeringInbox } from '../kernel/run-ste
 import { currentKernelExecutionContext } from '../kernel/execution-context.js';
 import type { RequestDiagnostic } from '../kernel/request-diagnostics.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
+import { isTrusted } from '../kernel/workspace-trust.js';
 import { completeExtensionRun, prepareExtensionRequest, type ExtensionHookRegistry } from '../kernel/extensions.js';
 import {
   assertDelegationCompletion, completedRunResult, createOutputSchemaContract, DELEGATION_RESULT_TOOL, failedRunResult,
@@ -402,7 +404,13 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
       const outputContract = args.outputSchema === undefined ? undefined : createOutputSchemaContract(args.outputSchema);
       const limits = childLimits(args, parentLimits);
       const provider = childProvider(args, deps.provider);
-      const resolvedMode = await resolveModeSelection(args.mode, deps.modePaths, deps.modeFile?.());
+      let resolvedMode = await resolveModeSelection(args.mode, deps.modePaths, deps.modeFile?.());
+      if (args.mode === undefined && resolvedMode !== undefined && parentKernel !== undefined
+        && resolvedMode.application.tools !== '*') {
+        const parentTools = new Set(parentKernel.manifest().map(tool => tool.name));
+        resolvedMode = { ...resolvedMode, application: { ...resolvedMode.application,
+          tools: resolvedMode.application.tools.filter(name => parentTools.has(name)) } };
+      }
       return { args, provider, limits, ...(outputContract === undefined ? {} : { outputContract }),
         permission: context.permission, resolvedMode };
     }
@@ -1099,6 +1107,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
           let childRunResult: RunResult | undefined;
             let disposeAssembly: (() => void) | undefined;
             let closeMcp: (() => Promise<void>) | undefined;
+            let closeManagedProcesses: (() => Promise<void>) | undefined;
             let disposeResultTool: (() => void) | undefined;
             let undoMode = () => {};
             let undoParentRestrictions = () => {};
@@ -1135,13 +1144,26 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
               };
               const mcp = deps.createMcp === undefined ? undefined : await deps.createMcp(id, media);
               closeMcp = mcp === undefined ? undefined : () => mcp.close();
+              const childRoot = typeof deps.config.workspaceRoot === 'string'
+                ? deps.config.workspaceRoot : boundaryOf(deps.config);
+              const managedProcesses = parentTools.has('managed_process')
+                ? createManagedProcessRegistry({
+                  validateWorkspaceTrust: async () => {
+                    if (childPermission.workspaceTrusted && !(await isTrusted(childRoot))) {
+                      throw new KernelError('exec_workspace_untrusted', { detail: 'workspace trust was revoked while a child process was running' });
+                    }
+                  },
+                })
+                : undefined;
+              closeManagedProcesses = managedProcesses === undefined ? undefined : () => managedProcesses.close();
               const assembly = loadAssembly(child, [
                 ...deps.plugins,
                 ...(mcp === undefined ? [] : [mcp.plugin]),
+                ...(managedProcesses === undefined ? [] : [managedProcessPlugin(managedProcesses)]),
                 ...(parentTools.has('todo_write') ? [createTodoWritePlugin({ session })] : []),
                 ...(parentTools.has('read_image') ? [createReadImagePlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
                 ...(parentTools.has('read_document') ? [createReadDocumentPlugin({ media, supportsImages: () => provider.imageInput === true })] : []),
-                ...(parentTools.has('present') ? [createPresentPlugin({ sessionId: id,
+                ...(parentTools.has('present') || parentTools.has('open_resource') ? [createPresentPlugin({ sessionId: id,
                   workspaceRoot: typeof deps.config.workspaceRoot === 'string' ? deps.config.workspaceRoot : boundaryOf(deps.config), session })] : []),
                 ...(parentTools.has('screenshot') ? [createScreenshotPlugin({ media,
                   supportsImages: () => provider.imageInput === true,
@@ -1421,8 +1443,11 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
                       finally {
                         try { disposeAssembly?.(); }
                         finally {
-                          try { await deps.finiteCommands?.finishRun(id, acceptance.runId); }
-                          finally { try { await closeMcp?.(); } finally { await session.close(); } }
+                          try { await closeManagedProcesses?.(); }
+                          finally {
+                            try { await deps.finiteCommands?.finishRun(id, acceptance.runId); }
+                            finally { try { await closeMcp?.(); } finally { await session.close(); } }
+                          }
                         }
                       }
                     }

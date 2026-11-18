@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { isUtf8 } from 'node:buffer';
 import { constants } from 'node:fs';
 import { accessSync, realpathSync, statSync } from 'node:fs';
@@ -35,6 +36,11 @@ export type ProjectGitDiffResult = {
   readonly staged: string | null;
   readonly unstaged: string | null;
 };
+
+export function projectGitDiffVersion(diff: ProjectGitDiffResult): string | undefined {
+  if (diff.state !== 'ready') return undefined;
+  return createHash('sha256').update(JSON.stringify([diff.path, diff.staged, diff.unstaged])).digest('hex');
+}
 
 type GitProcessResult =
   | { readonly kind: 'exit'; readonly code: number; readonly stdout: Buffer }

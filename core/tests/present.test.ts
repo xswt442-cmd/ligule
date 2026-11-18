@@ -63,7 +63,7 @@ test('present is classified as a filesystem read tool in the Kernel', async () =
     await writeFile(join(root, 'x.txt'), 'x');
     const readOnly = createKernel({ config: createConfig({ user: { workspaceRoot: root, boundary: '.' } }), session });
     createPresentPlugin({ sessionId: 'present-test', workspaceRoot: root, session }).setup(readOnly);
-    assert.deepEqual(readOnly.selectable(), ['present']);
+    assert.deepEqual(readOnly.selectable(), ['open_resource', 'present']);
   });
 });
 

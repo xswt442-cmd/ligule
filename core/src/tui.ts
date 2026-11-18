@@ -27,6 +27,7 @@ export {
 } from './kernel/policy.js';
 export type { PolicyRule } from './kernel/config-edit.js';
 export { createConnection, type Connection, type HostRequest } from './host/connection.js';
+export { VIEW_REQUEST_METHOD } from './host/protocol.js';
 export { type SessionEvent, type SessionHeader } from './session/format.js';
 export type { AskAnswer, AskQuestion } from './tools/ask-user.js';
 export type { PathListing } from './host/paths.js';

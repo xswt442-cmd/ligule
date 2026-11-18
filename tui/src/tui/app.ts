@@ -26,7 +26,7 @@ import { TUI_COLORS } from './ui-style.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
 import { CURRENT, ENGLISH_LABELS, ENGLISH_VIEWS, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
 import { activeRunBudgetSegment, buildStatusLine, contextSegment } from './status-line.js';
-import { controlPresets, textOf as chooseText, type Locale } from '@ligule/core/tui.js';
+import { controlPresets, textOf as chooseText, VIEW_REQUEST_METHOD, type Locale } from '@ligule/core/tui.js';
 import type { TerminalAction } from './keymap.js';
 import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type ControlWizardValues } from './control-wizard.js';
 import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionHeader, SessionSummary, UsageBucket, UsageSummary } from '@ligule/core/tui.js';
@@ -1058,6 +1058,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         setSearch(null);
         setExpanded(false);
         setQuery({ id: message.id, questions: asked.questions, at: 0, picked: {} });
+        return;
+      }
+      if (message.method === VIEW_REQUEST_METHOD) {
+        client.reply(message.id, { status: 'view_unavailable', opened: false, read: false });
         return;
       }
       if (message.method !== 'approval.request' || params.sessionId !== sessionId || typeof params.tool !== 'string') return;

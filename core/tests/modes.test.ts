@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
   applyMode, createConfig, createConnection, createKernel, createMemoryConnectionPair, createSkillPlugin, DEFAULT_MODE,
-  loadAssembly, loadMode, MESSAGES_CAPABILITIES, minimalPlugin, modeDirectories, serveHost, createSessionLog,
+  createPresentPlugin, loadAssembly, loadMode, MESSAGES_CAPABILITIES, minimalPlugin, modeDirectories, serveHost, createSessionLog,
 } from '../dist/index.js';
 import { createHost, type Host } from '../dist/host/host.js';
 import { resolveModeSelection } from '../dist/kernel/modes.js';
@@ -21,7 +21,7 @@ import type { PolicyMode } from '../dist/kernel/policy.js';
 import { testHostProvider } from './helpers/provider.ts';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
-const MINIMAL = ['create', 'delete', 'edit', 'exec', 'exec_control', 'find', 'read', 'search', 'write'];
+const MINIMAL = ['create', 'delete', 'edit', 'exec', 'exec_control', 'find', 'open_resource', 'read', 'search', 'write'];
 const HOST_MINIMAL = [...MINIMAL, 'managed_process'];
 
 type ModeLayout = {
@@ -166,7 +166,7 @@ test('the prompt field keeps the names it was written with, selection happens at
 
 function kernelWithMinimal() {
   const kernel = createKernel({ config: createConfig({ user: { boundary: process.cwd() } }) });
-  loadAssembly(kernel, [minimalPlugin]);
+  loadAssembly(kernel, [minimalPlugin, createPresentPlugin()]);
   return kernel;
 }
 
@@ -208,9 +208,9 @@ test('applying a mode narrows what the model is offered, and "*" offers everythi
     applyMode(kernel, await loadMode('readonly', directories));
     assert.deepEqual(kernel.manifest().map((entry) => entry.name), ['find', 'read', 'search']);
     // 隐藏工具仍保留在注册表中，但不会提供给模型或接受直接调用。
-    assert.equal(kernel.list().length, MINIMAL.length);
+    assert.equal(kernel.list().length, MINIMAL.length + 1, 'the always-registered delivery tool remains hidden by minimal mode');
     const shipped = modeDirectories(projectRoot, shippedModes, userHome);
-    assert.deepEqual(applyMode(kernelWithMinimal(), await loadMode('full', shipped)).tools, MINIMAL);
+    assert.deepEqual(applyMode(kernelWithMinimal(), await loadMode('full', shipped)).tools, [...MINIMAL, 'present'].sort());
   });
 });
 

@@ -176,6 +176,88 @@ test('an Operation Session keeps its real exec record out of model context', asy
   });
 });
 
+test('side Session links are ignorable facts with bounded text references and no content payload', () => {
+  const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+  const sideSessionId = '123e4567-e89b-42d3-a456-426614174001';
+  const sourceRunId = '123e4567-e89b-42d3-a456-426614174002';
+  const header = { kind: 'session', formatVersion: 5, sessionId: sourceSessionId, projectRoot: '/repo' };
+  const prior = { seq: 0, kind: 'label', name: 'source' };
+  const started = {
+    seq: 1, kind: 'sideSessionStarted', ignorable: true, source: 'desktop', sourceSessionId, sideSessionId,
+    sourceRunId, sourceKind: 'event', sourceEventSeq: 0, selectionBytes: 12, selectionSha256: 'a'.repeat(64),
+    createdAt: '2026-11-18T00:00:00.000Z',
+  };
+  assert.deepEqual(parseSessionEvents([header, prior, started] as unknown as SessionEvent[]).events.map(event => event.kind),
+    ['label', 'sideSessionStarted']);
+  for (const broken of [
+    { ...started, ignorable: false },
+    { ...started, sideSessionId: sourceSessionId },
+    { ...started, sourceEventSeq: 9 },
+    { ...started, selectionBytes: 8193 },
+    { ...started, selectionText: 'selected source text' },
+  ]) {
+    assert.throws(() => parseSessionEvents([header, prior, broken] as unknown as SessionEvent[]), {
+      code: 'session_side_started_event_invalid',
+    });
+  }
+
+  const origin = {
+    seq: 0, kind: 'sideSessionOrigin', ignorable: true, source: 'desktop', originSessionId: sourceSessionId,
+    originRunId: sourceRunId, sourceKind: 'file', sourcePath: 'src/current.ts', sourceVersion: 'b'.repeat(16),
+    selectionBytes: 12, selectionSha256: 'a'.repeat(64), createdAt: '2026-11-18T00:00:00.000Z',
+  };
+  const childHeader = { kind: 'session', formatVersion: 5, sessionId: sideSessionId, projectRoot: '/repo' };
+  assert.equal(parseSessionEvents([childHeader, origin] as unknown as SessionEvent[]).events[0]?.kind, 'sideSessionOrigin');
+  assert.throws(() => parseSessionEvents([childHeader, { ...origin, sourcePath: '../outside.txt' }] as unknown as SessionEvent[]), {
+    code: 'session_side_origin_event_invalid',
+  });
+});
+
+test('model view request outcomes are ordered ignorable facts and never imply the user read a resource', () => {
+  const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+  const run = createRunAcceptance(sessionId, 'open a file', null, 'human');
+  const requestId = '123e4567-e89b-42d3-a456-426614174001';
+  const header = { kind: 'session', formatVersion: 5, sessionId, projectRoot: '/repo' };
+  const user = { seq: 0, kind: 'user', text: 'open a file', run };
+  const requested = { seq: 1, kind: 'viewRequest', ignorable: true, source: 'desktop', requestId,
+    runId: run.runId, targetKind: 'file', createdAt: '2026-11-18T00:00:00.000Z' };
+  const delivered = { seq: 2, kind: 'viewRequestDelivered', ignorable: true, source: 'desktop', requestId,
+    runId: run.runId, createdAt: '2026-11-18T00:00:01.000Z' };
+  const opened = { seq: 3, kind: 'viewRequestOpened', ignorable: true, source: 'desktop', requestId,
+    runId: run.runId, createdAt: '2026-11-18T00:00:02.000Z' };
+  const record = parseSessionEvents([header, user, requested, delivered, opened] as unknown as SessionEvent[]);
+  assert.deepEqual(record.events.slice(1).map(event => event.kind),
+    ['viewRequest', 'viewRequestDelivered', 'viewRequestOpened']);
+  assert.equal(record.events.slice(1).every(event => event.ignorable === true), true);
+
+  assert.throws(() => parseSessionEvents([header, user, requested, opened] as unknown as SessionEvent[]), {
+    code: 'session_view_request_event_invalid',
+  });
+  assert.throws(() => parseSessionEvents([header, user, requested, delivered, delivered] as unknown as SessionEvent[]), {
+    code: 'session_view_request_event_invalid',
+  });
+  assert.throws(() => parseSessionEvents([header, user, { ...requested, targetKind: 'url' }] as unknown as SessionEvent[]), {
+    code: 'session_view_request_event_invalid',
+  });
+});
+
+test('view request facts stay out of model context', async () => {
+  await withDirectory(async directory => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174010';
+    const run = createRunAcceptance(sessionId, 'open a file', null, 'human');
+    const requestId = '123e4567-e89b-42d3-a456-426614174011';
+    const session = createSessionLog({ directory, id: sessionId, meta: { projectRoot: '/repo' } });
+    await session.append({ kind: 'user', text: 'open a file', run });
+    await session.append({ kind: 'viewRequest', ignorable: true, source: 'desktop', requestId, runId: run.runId,
+      targetKind: 'file', createdAt: '2026-11-18T00:00:00.000Z' });
+    await session.append({ kind: 'viewRequestDelivered', ignorable: true, source: 'desktop', requestId, runId: run.runId,
+      createdAt: '2026-11-18T00:00:01.000Z' });
+    await session.append({ kind: 'viewRequestOpened', ignorable: true, source: 'desktop', requestId, runId: run.runId,
+      createdAt: '2026-11-18T00:00:02.000Z' });
+    assert.equal(JSON.stringify(await session.modelView()).includes('viewRequest'), false);
+  });
+});
+
 test('compaction events are ignorable and carry the block identity, range and reason', () => {
   const header = { kind: 'session', formatVersion: 2, sessionId: 'compaction', projectRoot: '' };
   const written = { seq: 0, kind: 'compaction', ignorable: true, reason: 'auto', blockId: 1, fromSeq: 0, toSeq: 8, tokensBefore: 3000, tokensAfter: 900 };

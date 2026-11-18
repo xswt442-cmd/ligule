@@ -35,6 +35,14 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly origin?: 'human' | 'controller';
   readonly delegation?: DelegationSpec;
   readonly requestKey?: string;
+  readonly sourceRunId?: string;
+  readonly requestId?: string;
+  readonly action?: 'opened' | 'dismissed';
+  readonly sourceKind?: 'event' | 'file' | 'diff';
+  readonly sourceEventSeq?: number;
+  readonly sourcePath?: string;
+  readonly sourceVersion?: string;
+  readonly selection?: string;
   readonly runId?: string;
   readonly callId?: string;
   readonly executionId?: string;
@@ -154,6 +162,27 @@ export const METHODS = Object.freeze({
       },
       description: 'a session starts on the project the Host was launched on; naming another project is optional',
     },
+  },
+  'session.side.create': {
+    description: 'Create an ordinary, read-only side conversation from text the user selected in this Session; source and file-version claims are verified by the Host, and no Run is started.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID,
+      sourceRunId: SESSION_ID,
+      sourceKind: { type: 'string', enum: ['event', 'file', 'diff'] },
+      sourceEventSeq: { type: 'integer', minimum: 0 },
+      sourcePath: { type: 'string', minLength: 1, maxLength: 4096 },
+      sourceVersion: { type: 'string', minLength: 16, maxLength: 16 },
+      selection: { type: 'string', minLength: 1, maxLength: 16384 },
+    }, required: ['sessionId', 'sourceKind', 'selection'] },
+  },
+  'view.request.ack': {
+    description: 'Record that the trusted Desktop opened or dismissed a previously delivered model view request; reading is never inferred.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      sessionId: SESSION_ID,
+      runId: SESSION_ID,
+      requestId: { type: 'string', minLength: 36, maxLength: 36 },
+      action: { type: 'string', enum: ['opened', 'dismissed'] },
+    }, required: ['sessionId', 'runId', 'requestId', 'action'] },
   },
   'session.open': {
     description: 'Resume a session whose record is already on disk; without a mode the Host takes the one last in force in that record',
@@ -892,8 +921,11 @@ export const APPROVAL_METHOD = 'approval.request' as const;
 // 答复中的 `answers` 为每个问题提供一项结果；工具负责校验答案内容，协议只定义字段结构。
 export const QUESTION_METHOD = 'question.request' as const;
 
+/** Host-to-Desktop request for displaying a resource already authorized by the current Run. */
+export const VIEW_REQUEST_METHOD = 'view.request' as const;
+
 // Host 发出的通知类型：`delta` 是流式片段，`event` 是刚写入记录的事件，`progress` 是会话活动状态，`fault` 是连接错误。
-export const NOTIFICATIONS = Object.freeze(['delta', 'event', 'fault', 'progress'] as const);
+export const NOTIFICATIONS = Object.freeze(['delta', 'event', 'fault', 'progress', 'view.ready'] as const);
 
 for (const [name, method] of Object.entries(METHODS)) {
   // 此表会发送给客户端；不支持的参数构造在注册时立即报错。
