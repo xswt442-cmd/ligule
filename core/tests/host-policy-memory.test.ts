@@ -15,6 +15,7 @@ import { createConfig } from '../dist/kernel/config.js';
 import { MESSAGES_CAPABILITIES } from '../dist/index.js';
 import { createPermissionContext } from '../dist/kernel/permission.js';
 import type { PermissionContext } from '../dist/kernel/permission.js';
+import { checkedFileChangeFact } from '../dist/session/file-changes.js';
 import { testHostProvider } from './helpers/provider.ts';
 
 type ToolCallFixture = { name: string; args: Record<string, unknown> };
@@ -171,6 +172,112 @@ async function runRead(host: Host, client: TestClient, sessionId: string, input 
   return host.handle({ method: 'run.start', params: { sessionId, input } }, client);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasErrorCode(error: unknown, expected: string): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  for (let depth = 0; depth < 8 && isRecord(current) && !seen.has(current); depth += 1) {
+    if (current.code === expected) return true;
+    seen.add(current);
+    current = current.cause;
+  }
+  return false;
+}
+
+function pathShape(value: unknown): string {
+  if (typeof value !== 'string') return 'not-string';
+  if (value.length === 0) return 'empty';
+  if (value.startsWith('/') || /^[A-Za-z]:/u.test(value)) return 'absolute';
+  if (value.includes('\\')) return 'backslash';
+  if (value.split('/').some(segment => segment === '..')) return 'parent-segment';
+  if (value.split('/').some(segment => segment === '' || segment === '.')) return 'non-canonical-segment';
+  return 'relative-posix';
+}
+
+function versionShape(value: unknown): string {
+  if (value === null) return 'null';
+  return typeof value === 'string' && /^[a-f0-9]{16}$/u.test(value) ? 'hex16' : 'invalid';
+}
+
+async function sessionFileChangeDiagnostic(projectRoot: string, sessionId: string): Promise<string> {
+  const path = join(projectRoot, '.ligule', 'sessions', `${sessionId}.jsonl`);
+  const raw = await readFile(path, 'utf8');
+  const events: unknown[] = [];
+  let invalidJsonLines = 0;
+  for (const line of raw.split(/\r?\n/u)) {
+    if (line === '') continue;
+    try { events.push(JSON.parse(line)); }
+    catch { invalidJsonLines += 1; }
+  }
+  const toolEvents = events.filter((value): value is Record<string, unknown> => isRecord(value)
+    && value.kind === 'tool' && value.fileChanges !== undefined).map(event => {
+    const facts = Array.isArray(event.fileChanges) ? event.fileChanges : [];
+    return {
+      seq: Number.isSafeInteger(event.seq) ? event.seq : null,
+      tool: typeof event.tool === 'string' ? event.tool : 'not-string',
+      callIdPresent: typeof event.callId === 'string' && event.callId !== '',
+      runIdPresent: typeof event.runId === 'string' && event.runId !== '',
+      fileChangesArray: Array.isArray(event.fileChanges),
+      facts: facts.map(value => {
+        const fact = isRecord(value) ? value : undefined;
+        const reference = isRecord(fact?.baselineRef) ? fact.baselineRef : undefined;
+        const beforeObject = isRecord(fact?.beforeObject) ? fact.beforeObject : undefined;
+        return {
+          valid: checkedFileChangeFact(value) !== undefined,
+          keys: fact === undefined ? [] : Object.keys(fact).sort(),
+          pathShape: pathShape(fact?.path),
+          operation: typeof fact?.operation === 'string' ? fact.operation : 'not-string',
+          operationMatchesTool: fact?.operation === event.tool,
+          outcomeValid: ['written', 'unchanged', 'unknown'].includes(String(fact?.outcome)),
+          observedAtValid: typeof fact?.observedAt === 'string' && Number.isFinite(Date.parse(fact.observedAt)),
+          versions: Object.fromEntries(['beforeVersion', 'expectedAfterVersion', 'observedAfterVersion', 'baselineVersion']
+            .map(key => [key, versionShape(fact?.[key])])),
+          baselineStatus: typeof fact?.baselineStatus === 'string' ? fact.baselineStatus : 'not-string',
+          baselineExists: typeof fact?.baselineExists === 'boolean' || fact?.baselineExists === null ? fact.baselineExists : 'invalid',
+          baselineReasonValid: fact?.baselineReason === undefined
+            || (typeof fact.baselineReason === 'string' && /^[a-z][a-z0-9_]{0,79}$/u.test(fact.baselineReason)),
+          observedStatus: typeof fact?.observedStatus === 'string' ? fact.observedStatus : 'not-string',
+          observedExists: typeof fact?.observedExists === 'boolean' || fact?.observedExists === null ? fact.observedExists : 'invalid',
+          observedReasonValid: fact?.observedReason === undefined
+            || (typeof fact.observedReason === 'string' && /^[a-z][a-z0-9_]{0,79}$/u.test(fact.observedReason)),
+          comparisonFlagsValid: ['expectedMatchesObserved', 'changedFromBaseline'].every(key =>
+            fact?.[key] === null || typeof fact?.[key] === 'boolean'),
+          baselineRef: fact?.baselineRef === undefined ? 'absent' : reference === undefined ? 'not-object' : {
+            nameValid: typeof reference.name === 'string' && /^change-[a-f0-9]{16}-[0-9a-f-]{36}\.snapshot$/u.test(reference.name),
+            bytesValid: Number.isSafeInteger(reference.bytes) && Number(reference.bytes) >= 0 && Number(reference.bytes) <= 256 * 1024,
+            digestValid: typeof reference.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(reference.sha256),
+          },
+          beforeObject: fact?.beforeObject === undefined ? 'absent' : beforeObject === undefined ? 'not-object' : {
+            keys: Object.keys(beforeObject).sort(),
+            nameValid: typeof beforeObject.name === 'string' && beforeObject.name.length <= 2048,
+            metadataValid: ['dev', 'ino', 'mode', 'nlink', 'size', 'mtimeMs', 'ctimeMs'].every(key =>
+              beforeObject[key] === undefined || (typeof beforeObject[key] === 'number' && Number.isFinite(beforeObject[key]))),
+          },
+        };
+      }),
+    };
+  });
+  return JSON.stringify({ invalidJsonLines, toolEventCount: toolEvents.length, toolEvents });
+}
+
+async function runStartWithFileChangeDiagnostics(host: Host, client: TestClient, projectRoot: string,
+  sessionId: string, input: string) {
+  try { return await host.handle({ method: 'run.start', params: { sessionId, input } }, client); }
+  catch (error) {
+    if (!hasErrorCode(error, 'run_result_write_failed') && !hasErrorCode(error, 'session_file_change_invalid')) throw error;
+    let diagnostic: string;
+    try { diagnostic = await sessionFileChangeDiagnostic(projectRoot, sessionId); }
+    catch (diagnosticError) {
+      const code = isRecord(diagnosticError) && typeof diagnosticError.code === 'string' ? diagnosticError.code : 'unavailable';
+      diagnostic = JSON.stringify({ rawSession: 'unavailable', code });
+    }
+    throw new Error(`run_start_session_file_change_diagnostic=${diagnostic}`, { cause: error });
+  }
+}
+
 test('session-scoped approval memory survives closing and reopening that session', async () => {
   await withPolicyHost(async ({ host, projectA }) => {
     const requests: ApprovalParams[] = [];
@@ -277,7 +384,7 @@ test('remembering create is file-scoped by default and does not create a tool-wi
     const requests: ApprovalParams[] = [];
     const client = connection('project', requests, 'file');
     const first = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client) as { sessionId: string };
-    await host.handle({ method: 'run.start', params: { sessionId: first.sessionId, input: 'create a note' } }, client);
+    await runStartWithFileChangeDiagnostics(host, client, projectA, first.sessionId, 'create a note');
     assert.equal(requests.length, 1);
     const saved = await readFile(join(projectA, '.ligule', 'config.local.toml'), 'utf8');
     assert.match(saved, /tool = "create"/u);
@@ -285,11 +392,11 @@ test('remembering create is file-scoped by default and does not create a tool-wi
     assert.match(saved, /path = .*app\.js/u);
 
     const samePath = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client) as { sessionId: string };
-    await host.handle({ method: 'run.start', params: { sessionId: samePath.sessionId, input: 'create that file again' } }, client);
+    await runStartWithFileChangeDiagnostics(host, client, projectA, samePath.sessionId, 'create that file again');
     assert.equal(requests.length, 1, 'the same target skips the approval even if the create tool reports that it already exists');
 
     const otherPath = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client) as { sessionId: string };
-    await host.handle({ method: 'run.start', params: { sessionId: otherPath.sessionId, input: 'create another file' } }, client);
+    await runStartWithFileChangeDiagnostics(host, client, projectA, otherPath.sessionId, 'create another file');
     assert.equal(requests.length, 2, 'a different file still requires approval');
   }, {
     permission,
@@ -305,7 +412,7 @@ test('remembered workspace scope applies only to the selected write operation cl
     const requests: ApprovalParams[] = [];
     const client = connection('project', requests, 'workspace');
     const first = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client) as { sessionId: string };
-    await host.handle({ method: 'run.start', params: { sessionId: first.sessionId, input: 'create a note' } }, client);
+    await runStartWithFileChangeDiagnostics(host, client, projectA, first.sessionId, 'create a note');
     assert.equal(requests.length, 1);
     const saved = await readFile(join(projectA, '.ligule', 'config.local.toml'), 'utf8');
     const savedConfig = parse(saved) as SavedRules;
@@ -314,7 +421,7 @@ test('remembered workspace scope applies only to the selected write operation cl
     assert.equal(workspaceRule.path, await realpath(projectA));
 
     const next = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client) as { sessionId: string };
-    await host.handle({ method: 'run.start', params: { sessionId: next.sessionId, input: 'create another note' } }, client);
+    await runStartWithFileChangeDiagnostics(host, client, projectA, next.sessionId, 'create another note');
     assert.equal(requests.length, 1);
     assert.ok((await readFile(join(projectA, 'other.js'), 'utf8')).includes('saved'));
   }, {
@@ -344,7 +451,7 @@ test('20 KB and 100 KB file approvals send only a bounded summary and retrieve t
         },
       };
       const { sessionId } = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client) as { sessionId: string };
-      await host.handle({ method: 'run.start', params: { sessionId, input: `create ${size} bytes` } }, client);
+      await runStartWithFileChangeDiagnostics(host, client, projectA, sessionId, `create ${size} bytes`);
 
       const digest = createHash('sha256').update(content, 'utf8').digest('hex');
       assert.equal(summary.contentBytes, size);
@@ -375,7 +482,7 @@ test('sensitive approval content fails closed with its own code and never appear
       async request(_method, params) { requests.push(params); return { decision: 'allow' }; },
     };
     const { sessionId } = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client) as { sessionId: string };
-    await host.handle({ method: 'run.start', params: { sessionId, input: 'create a sensitive file' } }, client);
+    await runStartWithFileChangeDiagnostics(host, client, projectA, sessionId, 'create a sensitive file');
     assert.equal(requests.length, 0);
     const records = await host.handle({ method: 'session.read', params: { sessionId } }, client) as SessionReadView;
     const tool = records.events.filter((event) => event.kind === 'tool').at(-1)!;
@@ -397,13 +504,13 @@ test('one trusted human approval resets forced-to-ask and both denial counters t
     const client = connection(undefined, requests);
     const { sessionId } = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client) as { sessionId: string };
     for (let index = 0; index < 3; index += 1) {
-      await host.handle({ method: 'run.start', params: { sessionId, input: `denied read ${index}` } }, client);
+      await runStartWithFileChangeDiagnostics(host, client, projectA, sessionId, `denied read ${index}`);
     }
     const restricted = await host.handle({ method: 'status.get', params: { sessionId } }, client) as PolicyStatus;
     assert.deepEqual(restricted.denials, { consecutive: 3, total: 3 });
     assert.equal(restricted.policy, 'ask', 'the automatic session is now forced to ask');
 
-    await host.handle({ method: 'run.start', params: { sessionId, input: 'create after the human decision' } }, client);
+    await runStartWithFileChangeDiagnostics(host, client, projectA, sessionId, 'create after the human decision');
     assert.equal(requests.length, 1);
     assert.equal(requests[0].policyForced, true);
     assert.equal(requests[0].policy, 'ask');
@@ -443,10 +550,10 @@ test('an external operator approval releases forced asking and remains effective
     } };
     const { sessionId } = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client) as { sessionId: string };
     for (let index = 0; index < 3; index += 1) {
-      await host.handle({ method: 'run.start', params: { sessionId, input: `denied read ${index}` } }, client);
+      await runStartWithFileChangeDiagnostics(host, client, projectA, sessionId, `denied read ${index}`);
     }
     assert.equal((await host.handle({ method: 'status.get', params: { sessionId } }, client) as PolicyStatus).policy, 'ask');
-    await host.handle({ method: 'run.start', params: { sessionId, input: 'operator approves the create' } }, client);
+    await runStartWithFileChangeDiagnostics(host, client, projectA, sessionId, 'operator approves the create');
     assert.equal(requests.length, 1);
     assert.equal(requests[0].policyForced, true);
     const after = await host.handle({ method: 'status.get', params: { sessionId } }, client) as PolicyStatus;
@@ -457,7 +564,7 @@ test('an external operator approval releases forced asking and remains effective
     const reopened = await host.handle({ method: 'status.get', params: { sessionId } }, client) as PolicyStatus;
     assert.equal(reopened.policy, 'auto');
     assert.deepEqual(reopened.denials, { consecutive: 0, total: 0 });
-    await host.handle({ method: 'run.start', params: { sessionId, input: 'create again after reopening' } }, client);
+    await runStartWithFileChangeDiagnostics(host, client, projectA, sessionId, 'create again after reopening');
     assert.equal(requests.length, 1);
     assert.equal(await readFile(join(projectA, 'after-reopen.js'), 'utf8'), 'allowed');
   }, {
