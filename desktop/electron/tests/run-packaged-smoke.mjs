@@ -1328,6 +1328,60 @@ async function runP15NativeWorkbench() {
       permissionScope: filePermission };
     await captureEvidence('p15-native-file-saved.png');
 
+    if (process.platform === 'linux') {
+      const command = 'node --version';
+      const sourceBeforeCommand = await hostCall('session.read', { sessionId: sourceSessionId, fullResults: true });
+      const sourceEventCount = sourceBeforeCommand.result?.events?.length;
+      if (!Number.isSafeInteger(sourceEventCount)) throw new Error('p15_native_source_record_unavailable');
+      const commandWorkbenchTabs = page.locator('.workbench-tablist [role="tab"]');
+      while (await commandWorkbenchTabs.count() > 0) {
+        const count = await commandWorkbenchTabs.count();
+        await page.locator('.workbench-tab-close').click();
+        await page.waitForFunction(expected => document.querySelectorAll('.workbench-tablist [role="tab"]').length < expected,
+          count, { timeout: 5_000 });
+      }
+      const commandStatus = await hostCall('status.get', { sessionId: sourceSessionId });
+      p15NativeCases.commandPreflight = {
+        mode: commandStatus.result?.mode,
+        tools: commandStatus.result?.tools,
+        permission: commandStatus.result?.permission,
+      };
+      if (!commandStatus.result?.tools?.includes('exec')) throw new Error('p15_native_command_exec_not_in_session_mode');
+      const commandToggle = page.locator('button[aria-label="命令工作区"], button[aria-label="Command workspace"]');
+      await commandToggle.waitFor({ state: 'visible', timeout: 5_000 });
+      if (await commandToggle.getAttribute('aria-expanded') !== 'true') await commandToggle.click();
+      const commandPanel = page.locator('.command-workspace');
+      await commandPanel.waitFor({ state: 'visible', timeout: 10_000 });
+      await commandPanel.getByRole('textbox', { name: /Command|命令/u }).fill(command);
+      await commandPanel.getByRole('textbox', { name: /Working directory|工作目录/u }).fill('.');
+      const startCommand = commandPanel.getByRole('button', { name: /Run command|运行命令/u });
+      if (!(await startCommand.isEnabled())) throw new Error('p15_native_command_start_disabled');
+      await startCommand.click({ timeout: 5_000 });
+      const commandApproval = page.locator('.approval').filter({ hasText: command }).last();
+      await commandApproval.waitFor({ state: 'visible', timeout: 15_000 });
+      const approvalText = await commandApproval.innerText();
+      if (!approvalText.includes(command)) throw new Error('p15_native_command_approval_target_invalid');
+      await commandApproval.locator('button[data-tone="allow"]').click();
+      const commandTab = commandPanel.locator('.command-workspace-tabs [role="tab"]').filter({ hasText: command }).last();
+      await commandTab.waitFor({ state: 'visible', timeout: 15_000 });
+      await commandPanel.locator('.command-workspace-log-event').filter({ hasText: 'v24.21.0' })
+        .waitFor({ state: 'visible', timeout: 15_000 });
+      const commandState = commandPanel.locator('.command-workspace-output-head [data-state]');
+      await waitUntil(async () => await commandState.getAttribute('data-state') === 'exited', 15_000,
+        'p15_native_command_exit');
+      if (!/\b0\b/u.test(await commandState.textContent() ?? '')) throw new Error('p15_native_command_exit_code_invalid');
+      const sourceAfterCommand = await hostCall('session.read', { sessionId: sourceSessionId, fullResults: true });
+      if (sourceAfterCommand.result?.events?.length !== sourceEventCount) {
+        throw new Error('p15_native_command_mutated_source_session');
+      }
+      p15NativeCases.commandRun = { command, state: 'exited', exitCode: 0, output: 'v24.21.0',
+        sourceSessionUnchanged: true, approvedOnce: true };
+      await captureEvidence('p15-native-command-exited.png');
+      if (await commandToggle.getAttribute('aria-expanded') === 'true') await commandToggle.click();
+    } else {
+      p15NativeCases.commandRun = { status: 'NOT_RUN', reason: 'Windows command execution requires its separate OS isolation acceptance' };
+    }
+
     const workbenchTabs = page.locator('.workbench-tablist [role="tab"]');
     while (await workbenchTabs.count() > 0) {
       const count = await workbenchTabs.count();
@@ -1391,9 +1445,13 @@ async function runP15NativeWorkbench() {
     } else {
       p15NativeCases.windowResize = { status: 'NOT_RUN', reason: 'the native window bounds fixture uses Win32 APIs' };
     }
-    return `真实 Electron 窗口创建只读侧 Session 且未调用 Provider；原 Run 保持活动。随后经一次审批显示文件请求，用户点击后才打开；模型仅收到 sent/opened=false/read=false，Host 记录 opened。${process.platform === 'win32'
+    const commandSummary = process.platform === 'linux'
+      ? '通过手动命令工作区运行 node --version；一次审批后退出码为 0，输出 v24.21.0，源 Session 未变化。'
+      : 'Workbench 手动命令未执行，保留 Windows OS 隔离验收边界。';
+    const resizeSummary = process.platform === 'win32'
       ? `原生 BrowserWindow 外框由 ${p15NativeCases.windowResize.before.width}×${p15NativeCases.windowResize.before.height} 调至 ${p15NativeCases.windowResize.resized.width}×${p15NativeCases.windowResize.resized.height}，页面观察到对应 resize 事件；随后恢复原尺寸与隐藏状态。`
-      : 'Linux 外框 resize 未执行；本次验证侧聊、资源查看、文件保存和 Delivery 面板。'}`;
+      : 'Linux 外框 resize 未执行。';
+    return `真实 Electron 窗口创建只读侧 Session 且未调用 Provider；原 Run 保持活动。随后经一次审批显示文件请求，用户点击后才打开；模型仅收到 sent/opened=false/read=false，Host 记录 opened。${commandSummary}${resizeSummary}`;
   } finally {
     providerGate.releaseSource();
   }
