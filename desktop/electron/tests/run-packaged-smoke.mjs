@@ -5,7 +5,7 @@ import { finished } from 'node:stream/promises';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { sessionDirectory } from '../../../core/dist/session/list.js';
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -28,10 +28,14 @@ const suppliedGrantName = optionValue('--grant-name');
 const suppliedGrantProfile = optionValue('--grant-profile') ?? 'workspace-write';
 const localInterruption = process.argv.includes('--local-request-interruption');
 const realInterruption = process.argv.includes('--real-request-interruption');
+const p15NativeWorkbench = process.argv.includes('--p15-native-workbench');
 // System clipboard writes require an explicit opt-in because they replace user clipboard contents.
 const includeSystemClipboardWrite = process.argv.includes('--include-system-clipboard-write');
 const interruptionMode = localInterruption ? 'local' : realInterruption ? 'real' : undefined;
 if (localInterruption && realInterruption) throw new Error('packaged_interruption_modes_conflict');
+if (p15NativeWorkbench && (interruptionMode !== undefined || process.platform !== 'win32')) {
+  throw new Error('p15_native_workbench_requires_windows_without_interruption_mode');
+}
 const modelApiKeyName = 'LIGULE_PLAN2_OTHERS_API_KEY';
 let modelApiKey = process.env[modelApiKeyName];
 delete process.env[modelApiKeyName];
@@ -81,9 +85,9 @@ const workspace = suppliedWorkspace === undefined ? join(temporaryRoot, 'workspa
 process.env.LIGULE_HOME = liguleHome;
 const exportDirectory = join(temporaryRoot, 'exports');
 const exportPath = join(exportDirectory, 'session.md');
-const providerGate = interruptionMode === undefined
-  ? undefined
-  : await startProviderGate(interruptionMode, modelApiKey);
+const providerGate = interruptionMode !== undefined
+  ? await startProviderGate(interruptionMode, modelApiKey)
+  : p15NativeWorkbench ? await startProviderGate('p15', undefined) : undefined;
 await Promise.all([
   mkdir(userDataDirectory, { recursive: true }),
   mkdir(liguleHome, { recursive: true }),
@@ -93,7 +97,7 @@ await Promise.all([
 ]);
 const sessionRecordDirectory = sessionDirectory({ boundary: workspace, workspaceRoot: workspace });
 
-if (interruptionMode !== undefined) {
+if (interruptionMode !== undefined || p15NativeWorkbench) {
   const config = [
     'boundary = "."',
     '',
@@ -121,6 +125,10 @@ if (interruptionMode !== undefined) {
   ].join('\n');
   await writeFile(join(liguleHome, 'config.toml'), config, { flag: 'wx', mode: 0o600 });
 }
+if (p15NativeWorkbench) {
+  await mkdir(join(workspace, 'src'), { recursive: true });
+  await writeFile(join(workspace, 'src', 'p15-view.txt'), 'P15 native resource preview\n', { flag: 'wx', mode: 0o600 });
+}
 
 const environment = { ...process.env };
 for (const key of ['NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE', 'LIGULE_API_KEY']) delete environment[key];
@@ -128,12 +136,13 @@ for (const key of Object.keys(environment)) {
   if (/(?:_API_KEY|_ACCESS_TOKEN|_SECRET|_PASSWORD)$/iu.test(key)) delete environment[key];
 }
 environment.LIGULE_HOME = liguleHome;
-if (interruptionMode !== undefined) {
+if (interruptionMode !== undefined || p15NativeWorkbench) {
   environment[modelApiKeyName] = interruptionMode === 'real' ? modelApiKey : 'synthetic-local-provider-key';
 }
 
 const results = [];
 const processIds = {};
+const p15NativeCases = {};
 let applicationProcess;
 let devTools;
 let exitCode = 0;
@@ -171,10 +180,15 @@ async function startProviderGate(mode, apiKey) {
     held: false,
     failure: undefined,
     clientClosed: false,
+    viewResultStatus: undefined,
+    viewResultOpened: undefined,
+    viewResultRead: undefined,
+    viewResultIncludedFile: undefined,
   };
   let upstreamResponse;
   let upstreamController;
   let upstreamTimer;
+  let p15SourceResponse;
   const server = createServer((request, response) => {
     if (request.method === 'GET' && request.url === '/__state') {
       response.writeHead(200, { 'content-type': 'application/json' });
@@ -194,7 +208,7 @@ async function startProviderGate(mode, apiKey) {
         void upstreamResponse.body.cancel().catch(() => {});
       }
     });
-    if (state.requests > (mode === 'local' ? 5 : 1)) {
+    if (state.requests > (mode === 'local' ? 5 : mode === 'p15' ? 3 : 1)) {
       state.failure = 'duplicate_provider_request';
       response.writeHead(409);
       response.end();
@@ -216,6 +230,79 @@ async function startProviderGate(mode, apiKey) {
       state.stream = body.stream === true;
       if (body.model !== 'deepseek-flash' || body.max_tokens !== 1024 || body.stream !== true) {
         state.failure = 'provider_request_metadata_invalid';
+        return;
+      }
+      if (mode === 'p15') {
+        const messages = Array.isArray(body.messages) ? body.messages : [];
+        const lastUserIndex = messages.findLastIndex(item => item?.role === 'user');
+        const prompt = lastUserIndex < 0 || typeof messages[lastUserIndex]?.content !== 'string'
+          ? '' : messages[lastUserIndex].content;
+        if (prompt.includes('P15_NATIVE_SOURCE_RUN')) {
+          if (p15SourceResponse !== undefined) {
+            state.failure = 'p15_source_request_duplicated';
+            response.writeHead(409);
+            response.end();
+            return;
+          }
+          response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+          response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'Source Run is active.' }, finish_reason: null }] })}\n\n`);
+          state.localActions.push('p15_source_run_held');
+          state.held = true;
+          p15SourceResponse = response;
+          return;
+        }
+        if (prompt.includes('P15_NATIVE_VIEW')) {
+          const hasToolResult = lastUserIndex >= 0 && messages.slice(lastUserIndex + 1).some(item => item?.role === 'tool');
+          if (!hasToolResult) {
+            const offered = Array.isArray(body.tools)
+              && body.tools.some(item => item?.function?.name === 'open_resource');
+            state.openResourceToolOffered = offered;
+            if (!offered) {
+              state.failure = 'p15_open_resource_tool_missing';
+              response.writeHead(409);
+              response.end();
+              return;
+            }
+            state.localActions.push('p15_open_resource_requested');
+            const events = [
+              { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'p15-open-resource', type: 'function', function: {
+                name: 'open_resource', arguments: JSON.stringify({ kind: 'file', path: 'src/p15-view.txt' }),
+              } }] }, finish_reason: null }] },
+              { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
+              '[DONE]',
+            ];
+            response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+            response.end(events.map(event => `data: ${typeof event === 'string' ? event : JSON.stringify(event)}\n\n`).join(''));
+            return;
+          }
+          const tool = [...messages].reverse().find(item => item?.role === 'tool');
+          const content = typeof tool?.content === 'string' ? tool.content : '';
+          let result;
+          try { result = JSON.parse(content); } catch { result = undefined; }
+          state.viewResultStatus = result?.status;
+          state.viewResultOpened = result?.opened;
+          state.viewResultRead = result?.read;
+          state.viewResultIncludedFile = content.includes('P15 native resource preview');
+          if (state.viewResultStatus !== 'sent' || state.viewResultOpened !== false
+            || state.viewResultRead !== false || state.viewResultIncludedFile) {
+            state.failure = 'p15_open_resource_result_invalid';
+            response.writeHead(409);
+            response.end();
+            return;
+          }
+          state.localActions.push('p15_view_result_received_without_file_contents');
+          const events = [
+            { choices: [{ index: 0, delta: { content: 'Resource request was delivered.' }, finish_reason: null }] },
+            { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+            '[DONE]',
+          ];
+          response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+          response.end(events.map(event => `data: ${typeof event === 'string' ? event : JSON.stringify(event)}\n\n`).join(''));
+          return;
+        }
+        state.failure = 'p15_provider_prompt_unrecognized';
+        response.writeHead(409);
+        response.end();
         return;
       }
       if (mode === 'local') {
@@ -301,6 +388,17 @@ async function startProviderGate(mode, apiKey) {
     state,
     containsCredential(text) {
       return typeof apiKey === 'string' && apiKey.length > 0 && text.includes(apiKey);
+    },
+    releaseSource() {
+      const sourceResponse = p15SourceResponse;
+      p15SourceResponse = undefined;
+      if (sourceResponse === undefined || sourceResponse.destroyed) return false;
+      sourceResponse.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'Source Run completed.' }, finish_reason: null }] })}\n\n`);
+      sourceResponse.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+      sourceResponse.end('data: [DONE]\n\n');
+      state.held = false;
+      state.localActions.push('p15_source_run_completed');
+      return true;
     },
     async close() {
       clearTimeout(upstreamTimer);
@@ -1078,6 +1176,142 @@ async function runLocalApproval(sessionId, decision, alreadyStarted = false) {
     : '通过 packaged 审批卡允许后，真实 create 工具写入目标文件且内容正确';
 }
 
+async function runP15NativeWorkbench() {
+  if (providerGate === undefined || providerGate.state.mode !== 'p15') throw new Error('p15_native_provider_missing');
+  const playwrightModule = process.env.LIGULE_PLAYWRIGHT_MODULE;
+  if (typeof playwrightModule !== 'string' || !isAbsolute(playwrightModule)) throw new Error('p15_native_playwright_module_missing');
+  const { chromium } = await import(pathToFileURL(playwrightModule).href);
+  const debugPort = Number((await readFile(join(userDataDirectory, 'DevToolsActivePort'), 'utf8')).split(/\r?\n/u)[0]);
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`);
+  const page = browser.contexts().flatMap(context => context.pages())
+    .find(candidate => candidate.url() === 'app://ligule/index.html');
+  if (page === undefined) throw new Error('p15_native_playwright_page_missing');
+  await page.bringToFront();
+  let sourceSessionId;
+  let sourceRunId;
+  let sideSessionId;
+  try {
+    const sourceInput = 'P15_NATIVE_SOURCE_RUN: selectable side-chat context';
+    sourceSessionId = await startUiSession(sourceInput);
+    await waitUntil(async () => {
+      const current = await providerGateState();
+      return current.requests === 1 && current.held && current.failure === undefined;
+    }, 30_000, 'p15_native_source_run_waiting');
+    const sourceStatus = await hostCall('status.get', { sessionId: sourceSessionId });
+    sourceRunId = sourceStatus.result?.activeRunId;
+    if (sourceStatus.result?.running !== true || typeof sourceRunId !== 'string') {
+      throw new Error('p15_native_source_run_not_active');
+    }
+
+    await page.locator('[data-side-chat-kind="event"]').filter({ hasText: sourceInput }).last()
+      .selectText({ timeout: 5_000 });
+    p15NativeCases.selectionDiagnostics = await page.evaluate(() => ({
+      text: window.getSelection()?.toString() ?? '',
+      actionCount: document.querySelectorAll('.side-chat-selection-action').length,
+    }));
+    await page.getByRole('button', { name: /Ask about selection|侧面询问/u }).click({ timeout: 5_000 });
+    const sideDialog = page.locator('.side-chat-dialog');
+    await sideDialog.waitFor({ state: 'visible', timeout: 5_000 });
+    await sideDialog.locator('textarea').fill('Check this selected native context.');
+    await sideDialog.getByRole('button', { name: /Create side chat|创建侧聊/u }).click();
+    await page.getByRole('region', { name: /Side chat source|侧聊来源/u }).waitFor({ timeout: 15_000 });
+    const linked = await hostCall('session.read', { sessionId: sourceSessionId, fullResults: true });
+    const sideLink = linked.result?.events?.find(event => event.kind === 'sideSessionStarted'
+      && event.sourceRunId === sourceRunId);
+    sideSessionId = sideLink?.sideSessionId;
+    if (typeof sideSessionId !== 'string') throw new Error('p15_native_side_link_missing');
+    const sideStatus = await hostCall('status.get', { sessionId: sideSessionId });
+    if (sideStatus.result?.permission?.profile !== 'read-only'
+      || sideStatus.result?.permission?.network !== 'disabled'
+      || sideStatus.result?.activeRunId !== null) throw new Error('p15_native_side_permission_invalid');
+    const stillActive = await hostCall('status.get', { sessionId: sourceSessionId });
+    if (stillActive.result?.activeRunId !== sourceRunId || stillActive.result?.running !== true) {
+      throw new Error('p15_native_source_run_changed_during_side_create');
+    }
+    const beforeSideCreate = await providerGateState();
+    if (beforeSideCreate.requests !== 1) throw new Error('p15_native_side_create_called_provider');
+    p15NativeCases.sideChat = {
+      sourceSessionId, sourceRunId, sideSessionId,
+      providerRequestsBefore: 1, providerRequestsAfterCreate: beforeSideCreate.requests,
+      sidePermission: sideStatus.result.permission,
+    };
+
+    await page.getByRole('button', { name: /Open source Session|返回来源会话/u }).click();
+    await page.waitForFunction((id) => document.querySelector('.session-item.active')?.title.includes(id) === true,
+      sourceSessionId, { timeout: 15_000 });
+    if (!providerGate.releaseSource()) throw new Error('p15_native_source_provider_release_failed');
+    await waitUntil(async () => (await hostCall('status.get', { sessionId: sourceSessionId })).result?.running === false,
+      20_000, 'p15_native_source_run_complete');
+
+    const viewInput = 'P15_NATIVE_VIEW: request an authorized file view';
+    const viewSessionId = await startUiSession(viewInput);
+    if (viewSessionId !== sourceSessionId) throw new Error('p15_native_view_session_changed');
+    await waitUntil(async () => {
+      const current = await providerGateState();
+      return current.requests === 2 && current.localActions.includes('p15_open_resource_requested')
+        && current.failure === undefined;
+    }, 30_000, 'p15_native_view_tool_request');
+    await page.locator('.approval-actions button[data-tone="allow"]').waitFor({ state: 'visible', timeout: 30_000 });
+    await page.locator('.approval-actions button[data-tone="allow"]').click();
+    const viewNotice = page.locator('.model-view-request');
+    await viewNotice.waitFor({ state: 'visible', timeout: 20_000 });
+    const beforeOpen = await page.evaluate(() => ({
+      openedAutomatically: document.querySelector('.project-file-view') !== null,
+      ready: document.querySelector('.model-view-request button')?.disabled === false,
+      label: document.querySelector('.model-view-request span')?.textContent?.trim() ?? '',
+      buttonRect: (() => {
+        const bounds = document.querySelector('.model-view-request button')?.getBoundingClientRect();
+        return bounds === undefined ? null : { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom, width: bounds.width, height: bounds.height };
+      })(),
+      dockRect: (() => {
+        const bounds = document.querySelector('.workbench-dock')?.getBoundingClientRect();
+        return bounds === undefined ? null : { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom };
+      })(),
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      buttonHit: (() => {
+        const button = document.querySelector('.model-view-request button');
+        if (button === null) return null;
+        const bounds = button.getBoundingClientRect();
+        const hit = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+        return { tag: hit?.tagName ?? null, className: hit instanceof HTMLElement ? hit.className : '',
+          text: hit?.textContent?.trim().slice(0, 80) ?? '', ownsHit: hit === button || (hit !== null && button.contains(hit)) };
+      })(),
+    }));
+    p15NativeCases.modelViewNotice = beforeOpen;
+    if (beforeOpen.openedAutomatically || !beforeOpen.ready || !beforeOpen.label.includes('src/p15-view.txt')
+      || beforeOpen.buttonHit?.ownsHit !== true) {
+      throw new Error('p15_native_view_notice_invalid');
+    }
+    await viewNotice.getByRole('button', { name: /Open requested resource|打开资源/u }).click();
+    await page.locator('[data-file-preview]').filter({ hasText: 'P15 native resource preview' }).waitFor({ timeout: 15_000 });
+    await waitUntil(async () => {
+      const current = await providerGateState();
+      return current.requests === 3 && current.viewResultStatus === 'sent'
+        && current.viewResultOpened === false && current.viewResultRead === false
+        && current.viewResultIncludedFile === false && current.failure === undefined;
+    }, 30_000, 'p15_native_view_result');
+    await waitUntil(async () => (await hostCall('status.get', { sessionId: sourceSessionId })).result?.running === false,
+      20_000, 'p15_native_view_run_complete');
+    const viewRecord = await hostCall('session.read', { sessionId: sourceSessionId, fullResults: true });
+    const viewEvents = viewRecord.result?.events ?? [];
+    if (viewEvents.filter(event => event.kind === 'viewRequest').length !== 1
+      || viewEvents.filter(event => event.kind === 'viewRequestDelivered').length !== 1
+      || viewEvents.filter(event => event.kind === 'viewRequestOpened').length !== 1) {
+      throw new Error('p15_native_view_events_invalid');
+    }
+    p15NativeCases.modelView = {
+      openedAutomatically: beforeOpen.openedAutomatically,
+      label: beforeOpen.label,
+      hostEvents: { requested: 1, delivered: 1, opened: 1 },
+      providerResult: { status: 'sent', opened: false, read: false, includedFile: false },
+      providerRequests: 3,
+    };
+    return '真实 Electron 窗口创建只读侧 Session 且未调用 Provider；原 Run 保持活动。随后经一次审批显示文件请求，用户点击后才打开；模型仅收到 sent/opened=false/read=false，Host 记录 opened。';
+  } finally {
+    providerGate.releaseSource();
+  }
+}
+
 async function startApplication() {
   const stdout = interruptionMode === undefined ? createWriteStream(join(evidenceRoot, 'stdout.log')) : undefined;
   const stderr = interruptionMode === undefined ? createWriteStream(join(evidenceRoot, 'stderr.log')) : undefined;
@@ -1110,6 +1344,7 @@ async function recordReport() {
     hostNodeVersion: execFileSync(hostNode, ['--version'], { encoding: 'utf8', windowsHide: true }).trim(),
     applicationPage: 'app://ligule/index.html',
     processIds,
+    ...(p15NativeWorkbench ? { p15NativeWorkbench: p15NativeCases } : {}),
     providerGate: providerGate === undefined ? undefined : {
       mode: providerGate.state.mode,
       requests: providerGate.state.requests,
@@ -1445,6 +1680,19 @@ async function runChecks() {
   });
 
   let sessionId;
+  if (p15NativeWorkbench) {
+    record('clipboard write permission from the packaged secure page', '未执行',
+      '默认不写入系统剪贴板；该项只在获得明确授权后执行');
+    record('unanswered Host promise across restart', '未执行',
+      'P15 原生侧聊与资源展示只使用本地确定性 Provider；未执行无响应模型请求的 Host 重启场景');
+    await check('P15 native side chat and model resource view', runP15NativeWorkbench);
+    await check('capture packaged window evidence', async () => {
+      await captureEvidence();
+      return '保存实际 packaged BrowserWindow 截图';
+    });
+    return;
+  }
+
   await check('reconnect the packaged Host with no selected session', async () => {
     return await runNoSessionReconnect();
   });
@@ -1644,7 +1892,9 @@ async function runChecks() {
     record(
       'unanswered Host promise across restart',
       '未执行',
-      '隔离环境没有真实模型服务，无法建立可复现的未答 run.start；没有伪造模型或 Host 响应',
+      p15NativeWorkbench
+        ? 'P15 原生侧聊与资源展示只使用本地确定性 Provider；未执行无响应模型请求的 Host 重启场景'
+        : '隔离环境没有模型服务，无法建立可复现的未答 run.start；没有伪造模型或 Host 响应',
     );
   } else {
     if (interruptionMode === 'local') {
@@ -1671,6 +1921,10 @@ async function runChecks() {
       if (sessionId === undefined) throw new Error('session_not_created');
       return await runInterruptedRequest(sessionId, interruptionMode === 'real');
     });
+  }
+
+  if (p15NativeWorkbench) {
+    await check('P15 native side chat and model resource view', runP15NativeWorkbench);
   }
 
   await check('capture packaged window evidence', async () => {
