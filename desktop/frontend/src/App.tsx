@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { DropdownMenu } from 'radix-ui';
 import { type FlatIndexLocationWithAlign, type VirtuosoHandle } from 'react-virtuoso';
 import { code, createClient, type Client, type Transport } from './protocol';
@@ -2426,7 +2426,10 @@ export function App({ transport }: { transport: Transport }) {
     await client.call(request.method, request.params, 15_000);
     await refreshStatus(sessionId);
   }, [client, refreshStatus, sessionId]);
-  return <LocaleProvider language={settings.language}><div className="frame" data-collapsed={collapsed ? 'true' : undefined} data-mobile-sidebar={narrow && mobileSidebar ? 'true' : undefined} data-dock={settings.dock}>
+  return <LocaleProvider language={settings.language}><div className="frame" data-collapsed={collapsed ? 'true' : undefined}
+    data-mobile-sidebar={narrow && mobileSidebar ? 'true' : undefined} data-dock={settings.dock}
+    data-workbench-open={settings.workbench.rightOpen ? 'true' : undefined}
+    style={{ '--workbench-width': `min(${settings.workbench.rightWidth}px, 100vw)` } as CSSProperties}>
     <aside className="sidebar">
       <div className="brand"><img src="/icon.png" alt="" width="23" height="23" /><span>ligule</span><button type="button" className="icon-button" aria-label={t('收起侧栏', 'Hide sidebar')} onClick={() => patch({ collapsed: true })}><Icon name="sidebar" /></button></div>
       <button className="new-run" type="button" onClick={() => void newSession()}><Icon name="plus" size={17} /><span>{t('新建会话', 'New conversation')}</span></button>

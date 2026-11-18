@@ -500,6 +500,10 @@
     inset-inline-end: 0;
     z-index: 15;
   }
+
+  .frame[data-workbench-open="true"] .model-view-request {
+    margin-inline-end: calc(var(--workbench-width) + var(--space-4));
+  }
 }
 
 /* 阅读位置不在底部时，在转录区和输入框之间显示“跳回最新”按钮。 */

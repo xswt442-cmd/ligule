@@ -590,6 +590,7 @@ window.pushHostFrame = frame => deliver(JSON.stringify(frame));
         'a stale Run result is added after the existing source draft for review');
 
       const draftBeforeViewRequest = await input.inputValue();
+      await page.setViewportSize({ width: 1066, height: 723 });
       const viewRun = client.request('run.start', { sessionId, input: 'request a view of src/app.ts' });
       await within(viewProviderStarted, 'model view request Provider call');
       await page.getByRole('button', { name: 'Allow once', exact: true }).click();
