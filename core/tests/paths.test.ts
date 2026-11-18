@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { link, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isWithin, resolveWithin, KernelError } from '../dist/index.js';
+import { relativePathWithin } from '../dist/capability/paths.js';
 
 // 夹具建在 testplace/ 下：那个目录既不进版本控制也不进包。
 // 边界取 workspace，outside 是边界之外的那一半，用来构造两类越界。
@@ -63,6 +64,19 @@ test('relative paths use an unrestricted anchor while targets stay within the bo
       () => resolveWithin(workspace, '../../outside/secret.txt', { cwd: child }),
       (error) => hasCode(error, 'path_escapes_boundary'),
     );
+  });
+});
+
+test('relativePathWithin keeps a linked workspace path lexical and rejects traversal', async () => {
+  await withFixture(async ({ workspace, outside }) => {
+    const linkedBoundary = join(await realpath(workspace), '..', 'workspace-link');
+    await symlink(workspace, linkedBoundary, linkType);
+    await resolveWithin(linkedBoundary, 'note.txt', { cwd: linkedBoundary });
+    assert.equal(relativePathWithin(linkedBoundary, 'note.txt', { cwd: linkedBoundary }), 'note.txt');
+    assert.equal(relativePathWithin(linkedBoundary, 'child/../note.txt', { cwd: linkedBoundary }), 'note.txt');
+    assert.throws(() => relativePathWithin(linkedBoundary, '../outside/secret.txt', { cwd: linkedBoundary }), {
+      code: 'path_escapes_boundary',
+    });
   });
 });
 

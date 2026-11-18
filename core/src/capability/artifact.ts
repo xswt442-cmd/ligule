@@ -44,9 +44,10 @@ export async function readFileArtifact(
     }
   }
   const workspaceTarget = await resolveWithin(absoluteWorkspace, path, { cwd: absoluteWorkspace });
+  const realWorkspace = await realpath(absoluteWorkspace);
   const realBoundary = await realpath(boundary);
   if (!isWithin(realBoundary, workspaceTarget)) throw new KernelError('path_escapes_boundary');
-  const relativePath = relative(absoluteWorkspace, workspaceTarget);
+  const relativePath = relative(realWorkspace, workspaceTarget);
   if (relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) throw new KernelError('path_escapes_workspace');
   const flags = constants.O_RDONLY | (process.platform === 'win32' ? 0 : (constants.O_NOFOLLOW ?? 0));
   let handle;
@@ -91,7 +92,7 @@ export async function readFileArtifact(
       throw new KernelError('artifact_file_changed');
     }
     const artifact: FileArtifact = {
-      kind: 'file', sessionId, path: portablePath(relative(absoluteWorkspace, workspaceTarget)),
+      kind: 'file', sessionId, path: portablePath(relativePath),
       mimeType: MEDIA_TYPES[extname(workspaceTarget).toLowerCase()] ?? 'application/octet-stream',
       bytes: size, sha256: hash.digest('hex'),
       ...(description === undefined ? {} : { description }),

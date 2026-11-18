@@ -2,14 +2,14 @@
 // 每种操作在工具内部执行语义校验并返回稳定错误码；删除只使用操作系统回收站。
 import { isUtf8 } from 'node:buffer';
 import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, relative, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import type { ToolContext, ToolDefinition } from '../kernel/kernel.js';
 import { assertNoLegacyTrashConfig, boundaryOf, workingDirectoryOf } from '../capability/limits.js';
-import { resolveWithin } from '../capability/paths.js';
+import { relativePathWithin, resolveWithin } from '../capability/paths.js';
 import { resolveRecycler } from '../capability/recycle.js';
 import { versionOf } from '../kernel/observe.js';
-import { errorCode, errorMessage, toPosix } from './common.js';
+import { errorCode, errorMessage } from './common.js';
 
 interface CreateArguments { path: string; content: string }
 interface WriteArguments { path: string; content: string }
@@ -221,7 +221,7 @@ async function deleteTargetSnapshot(args: DeleteArguments, config: ToolContext['
   const boundary = boundaryOf(config);
   const workingDirectory = workingDirectoryOf(config);
   const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectory });
-  const name = toPosix(relative(boundary, target));
+  const name = relativePathWithin(boundary, args.path, { cwd: workingDirectory });
   if (name === '') throw new KernelError('delete_target_is_boundary', { detail: 'the workspace boundary itself cannot be sent to the recycle bin; name a file or directory inside it' });
   let named;
   let original;
@@ -292,7 +292,9 @@ export const createTool = {
   },
   async run(args: CreateArguments, { config, observations, ...context }: WriteToolContext) {
     const boundary = boundaryOf(config);
-    const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
+    const workingDirectory = workingDirectoryOf(config);
+    const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectory });
+    const relativePath = relativePathWithin(boundary, args.path, { cwd: workingDirectory });
     await mkdir(dirname(target), { recursive: true });
     try {
       await persistTextFile(target, args.content, context, true);
@@ -303,17 +305,17 @@ export const createTool = {
       const expected = Buffer.from(args.content, 'utf8');
       const outcome = await outcomeAfterWriteError(target, undefined, expected);
       if (outcome !== 'written') {
-        await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'create', outcome,
+        await context.fileChanges?.record({ path: relativePath, target, operation: 'create', outcome,
           beforeExists: false, expectedAfterExists: true, expectedAfterBytes: expected,
           allowReadback: fileChangeReadbackAllowed(context) });
         throw writeFailure('create', args.path, error, outcome);
       }
     }
-    await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'create', outcome: 'written',
+    await context.fileChanges?.record({ path: relativePath, target, operation: 'create', outcome: 'written',
       beforeExists: false, expectedAfterExists: true, expectedAfterBytes: Buffer.from(args.content, 'utf8'),
       allowReadback: fileChangeReadbackAllowed(context) });
     observations?.observe(target, versionOf(Buffer.from(args.content, 'utf8')));
-    return { text: `created ${toPosix(relative(boundary, target))} (${Buffer.byteLength(args.content, 'utf8')} bytes)` };
+    return { text: `created ${relativePath} (${Buffer.byteLength(args.content, 'utf8')} bytes)` };
   },
 } satisfies ToolDefinition<CreateArguments>;
 
@@ -334,7 +336,9 @@ export const writeTool = {
   // 版本检查与写入不是底层原子操作，不能防止并发写入之间的竞态。
   async run(args: WriteArguments, { config, observations, ...context }: WriteToolContext) {
     const boundary = boundaryOf(config);
-    const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
+    const workingDirectory = workingDirectoryOf(config);
+    const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectory });
+    const relativePath = relativePathWithin(boundary, args.path, { cwd: workingDirectory });
     let before;
     try {
       before = await readFile(target);
@@ -355,17 +359,17 @@ export const writeTool = {
     catch (error) {
       const outcome = await outcomeAfterWriteError(target, before, expected);
       if (outcome !== 'written') {
-        await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'write', outcome,
+        await context.fileChanges?.record({ path: relativePath, target, operation: 'write', outcome,
           beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
           allowReadback: fileChangeReadbackAllowed(context) });
         throw writeFailure('write', args.path, error, outcome);
       }
     }
-    await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'write', outcome: 'written',
+    await context.fileChanges?.record({ path: relativePath, target, operation: 'write', outcome: 'written',
       beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
       allowReadback: fileChangeReadbackAllowed(context) });
     observations?.observe(target, versionOf(expected));
-    return { text: `wrote ${toPosix(relative(boundary, target))} (${Buffer.byteLength(args.content, 'utf8')} bytes)` };
+    return { text: `wrote ${relativePath} (${Buffer.byteLength(args.content, 'utf8')} bytes)` };
   },
 } satisfies ToolDefinition<WriteArguments>;
 
@@ -441,7 +445,9 @@ export const editTool = {
     if (hasLegacyArguments && args.anchor!.trim() === '') {
       throw new KernelError('edit_anchor_empty', { detail: 'an anchor of only whitespace would match anywhere; give the text to locate' });
     }
-    const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
+    const workingDirectory = workingDirectoryOf(config);
+    const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectory });
+    const relativePath = relativePathWithin(boundary, args.path, { cwd: workingDirectory });
     let text: string;
     let before: Buffer;
     try {
@@ -475,17 +481,17 @@ export const editTool = {
       catch (error) {
         const outcome = await outcomeAfterWriteError(target, before, expected);
         if (outcome !== 'written') {
-          await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'edit', outcome,
+          await context.fileChanges?.record({ path: relativePath, target, operation: 'edit', outcome,
             beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
             allowReadback: fileChangeReadbackAllowed(context) });
           throw writeFailure('edit', args.path, error, outcome);
         }
       }
-      await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'edit', outcome: 'written',
+      await context.fileChanges?.record({ path: relativePath, target, operation: 'edit', outcome: 'written',
         beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
         allowReadback: fileChangeReadbackAllowed(context) });
       observations?.observe(target, versionOf(expected));
-      return { text: `edited ${toPosix(relative(boundary, target))}` };
+      return { text: `edited ${relativePath}` };
     }
 
     const matched = matchEdits(text, args.changes!, args.path);
@@ -494,20 +500,20 @@ export const editTool = {
     const removed = matched.reduce((total, change) => total + lineCount(change.oldText), 0);
     const added = matched.reduce((total, change) => total + lineCount(change.newText), 0);
     const result = {
-      text: `edited ${toPosix(relative(boundary, target))} (${matched.length} changes; first changed line ${matched[0]!.line}; ${removed} removed/${added} added lines)\nDiff${diff.truncated ? ' (truncated)' : ''}:\n${diff.text}`,
+      text: `edited ${relativePath} (${matched.length} changes; first changed line ${matched[0]!.line}; ${removed} removed/${added} added lines)\nDiff${diff.truncated ? ' (truncated)' : ''}:\n${diff.text}`,
     };
     const expected = Buffer.from(updated, 'utf8');
     try { await persistTextFile(target, updated, context); }
     catch (error) {
       const outcome = await outcomeAfterWriteError(target, before, expected);
       if (outcome !== 'written') {
-        await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'edit', outcome,
+        await context.fileChanges?.record({ path: relativePath, target, operation: 'edit', outcome,
           beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
           allowReadback: fileChangeReadbackAllowed(context) });
         throw writeFailure('edit', args.path, error, outcome);
       }
     }
-    await context.fileChanges?.record({ path: toPosix(relative(boundary, target)), target, operation: 'edit', outcome: 'written',
+    await context.fileChanges?.record({ path: relativePath, target, operation: 'edit', outcome: 'written',
       beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
       allowReadback: fileChangeReadbackAllowed(context) });
     observations?.observe(target, versionOf(expected));

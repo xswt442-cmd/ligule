@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createPermissionContext } from '../dist/kernel/permission.js';
@@ -142,5 +142,53 @@ test('Host records creation from a confirmed absent path without inventing a pri
     modeName: 'full',
     config: { loop: { iterations: 3, modelCalls: 3 } },
     testDirectory: join(process.cwd(), 'testplace', 'tmp'),
+  });
+});
+
+test('Host records file changes relative to a linked workspace boundary', { timeout: 20_000 }, async () => {
+  let step = 0;
+  const config: Record<string, unknown> = {};
+  await withTuiHost(async ({ client, directory, projectDirectory, sessionDirectory, sessionId, config: hostConfig }) => {
+    const workspaceLink = join(directory, 'project-link');
+    assert.equal(await realpath(workspaceLink), await realpath(projectDirectory));
+    assert.equal(hostConfig.boundary === workspaceLink, true);
+    assert.equal(hostConfig.workspaceRoot === workspaceLink, true);
+    client.onRequest((message) => message.method === 'approval.request' ? { decision: 'allow' } : undefined);
+    try { await client.request('run.start', { sessionId, input: 'create a file inside the linked workspace' }); }
+    catch (error) {
+      const raw = await readFile(join(sessionDirectory, `${sessionId}.jsonl`), 'utf8');
+      const records = raw.split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line) as {
+        kind?: string; tool?: string; fileChanges?: { operation?: unknown; path?: unknown }[];
+      });
+      const tool = records.find((event) => event.kind === 'tool' && Array.isArray(event.fileChanges));
+      const change = tool?.fileChanges?.[0];
+      const path = change?.path;
+      const parentSegments = typeof path === 'string' ? path.split('/').filter(segment => segment === '..').length : -1;
+      const hasBackslash = typeof path === 'string' && path.includes('\\');
+      throw new Error(`run_start_failed;tool=${tool?.tool ?? 'missing'};operation=${String(change?.operation)};parentSegments=${parentSegments};backslash=${hasBackslash}`, { cause: error });
+    }
+    const history = await client.request('session.read', { sessionId }) as {
+      events: { kind?: string; tool?: string; fileChanges?: Record<string, unknown>[] }[];
+    };
+    const created = history.events.find((event) => event.kind === 'tool' && event.tool === 'create');
+    assert.equal(created?.fileChanges?.[0]?.path, 'created-through-workspace-link.txt');
+    assert.equal(await readFile(join(projectDirectory, 'created-through-workspace-link.txt'), 'utf8'), 'created\n');
+  }, {
+    setup: async ({ directory, projectDirectory }) => {
+      const workspaceLink = join(directory, 'project-link');
+      await symlink(projectDirectory, workspaceLink, process.platform === 'win32' ? 'junction' : 'dir');
+      config.boundary = workspaceLink;
+      config.workspaceRoot = workspaceLink;
+      config.loop = { iterations: 3, modelCalls: 3 };
+    },
+    config,
+    providerReply: () => step++ === 0
+      ? { toolCalls: [{ tool: 'create', args: { path: 'created-through-workspace-link.txt', content: 'created\n' } }] }
+      : { text: 'created through the workspace link' },
+    permission: createPermissionContext('full-access', 'unrestricted', {
+      filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
+    }),
+    permissionControl: true,
+    modeName: 'full',
   });
 });

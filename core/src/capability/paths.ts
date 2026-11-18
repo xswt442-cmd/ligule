@@ -23,6 +23,21 @@ export function isWithin(boundary: string, target: string): boolean {
   return relativePath === '' || (relativePath !== '..' && !relativePath.startsWith(UP) && !isAbsolute(relativePath));
 }
 
+/**
+ * Build the stable workspace-relative spelling for a path that `resolveWithin` has already approved.
+ * File-change evidence must use the lexical boundary and request path: relating the realpath target to
+ * a junction or symlink boundary can produce `../...` even though the resolved file stays in bounds.
+ */
+export function relativePathWithin(boundary: string, path: string, { cwd = boundary }: ResolveWithinOptions = {}): string {
+  if (typeof boundary !== 'string' || boundary === '') throw new KernelError('boundary_required');
+  if (typeof path !== 'string' || path.trim() === '') throw new KernelError('path_required');
+  if (typeof cwd !== 'string' || cwd === '') throw new KernelError('path_cwd_required');
+  const absoluteBoundary = resolve(boundary);
+  const absoluteTarget = resolve(resolve(cwd), path);
+  if (!isWithin(absoluteBoundary, absoluteTarget)) throw new KernelError('path_escapes_boundary');
+  return relative(absoluteBoundary, absoluteTarget).split(sep).join('/');
+}
+
 // 目标还不存在时（写一个新文件），解析最近一层存在的祖先再拼回去：
 // 只判词法的话，一个指向边界之外的符号链接父目录会让写入落在边界之外。
 async function resolveReal(absolute: string): Promise<string> {

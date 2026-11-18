@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createPermissionContext } from '../dist/kernel/permission.js';
@@ -71,6 +71,42 @@ test('trusted UI saves a version-matched file and records the desktop source wit
       'a Desktop save does not appear as an Agent tool result or conversation message');
     assert.equal(providerRequests.length, 0);
   }, { permissionControl: true, permission: writable });
+});
+
+test('trusted UI saves through a linked workspace boundary with a relative change record', async () => {
+  const config: Record<string, unknown> = {};
+  await withTuiHost(async ({ client, directory, projectDirectory, sessionId, config: hostConfig }) => {
+    const workspaceLink = join(directory, 'project-link');
+    assert.equal(hostConfig.boundary === workspaceLink, true);
+    const file = join(projectDirectory, 'note.txt');
+    const before = Buffer.from('before\n');
+    const after = 'after\n';
+    await writeFile(file, before);
+    const initial = await client.request('project.file.read', { sessionId, path: 'note.txt' }) as FilePage;
+    const saved = await client.request('project.file.save', {
+      sessionId, path: 'note.txt', expectedVersion: initial.version, text: after,
+    }) as SaveResult;
+    assert.deepEqual(saved, {
+      saved: true, changed: true, version: versionOf(Buffer.from(after)), outcome: 'written', recorded: true,
+    });
+    assert.equal(await readFile(file, 'utf8'), after);
+    const history = await client.request('session.read', { sessionId }) as SessionView;
+    const change = history.events.at(-1)?.fileChanges?.[0];
+    assert.equal(history.events.at(-1)?.kind, 'workspaceFileChange');
+    assert.equal(change?.path, 'note.txt');
+    assert.equal(change?.operation, 'write');
+    assert.equal(change?.outcome, 'written');
+  }, {
+    setup: async ({ directory, projectDirectory }) => {
+      const workspaceLink = join(directory, 'project-link');
+      await symlink(projectDirectory, workspaceLink, process.platform === 'win32' ? 'junction' : 'dir');
+      config.boundary = workspaceLink;
+      config.workspaceRoot = workspaceLink;
+    },
+    config,
+    permissionControl: true,
+    permission: writable,
+  });
 });
 
 test('external edits and read-only Permission prevent a Desktop save from overwriting the file', async () => {

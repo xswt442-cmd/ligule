@@ -71,7 +71,7 @@ import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel, readPolicyOverride } from '../session/format.js';
 import { SPILL_NAME } from '../session/spill.js';
 import { assertNoLegacyTrashConfig, boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from '../capability/limits.js';
-import { resolveWithin } from '../capability/paths.js';
+import { relativePathWithin, resolveWithin } from '../capability/paths.js';
 import { runManagedExec, type ExecControlArguments, type ExecRunContext } from '../capability/exec.js';
 import { createFiniteCommandRegistry, type FiniteCommandOwner } from '../capability/finite-command.js';
 import { createManagedProcessRegistry, managedProcessPlugin, type ManagedProcessRegistry } from '../capability/managed-process.js';
@@ -3984,7 +3984,8 @@ export function createHost({
                 const currentDenial = permissionDenial(current.permission, 'write');
                 if (currentDenial !== undefined) throw new KernelError(currentDenial.code, { detail: currentDenial.reason });
               }, async mutation => {
-                const path = relative(boundaryOf(state.environment.config), mutation.target).split(sep).join('/');
+                const path = relativePathWithin(boundaryOf(state.environment.config), mutation.path,
+                  { cwd: workingDirectoryOf(state.environment.config) });
                 const fileChanges: FileChangeFact[] = [];
                 await state.fileChanges.forCall(fileChanges).record({
                   path,

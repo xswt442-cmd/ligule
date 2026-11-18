@@ -106,6 +106,30 @@ test('trusted UI lists and searches project files and reads bounded UTF-8 pages 
   }, { permissionControl: true });
 });
 
+test('trusted UI keeps project file paths relative through a linked workspace boundary', async () => {
+  const config: Record<string, unknown> = {};
+  await withTuiHost(async ({ client, directory, projectDirectory, sessionId, config: hostConfig }) => {
+    const workspaceLink = join(directory, 'project-link');
+    assert.equal(hostConfig.boundary === workspaceLink, true);
+    await writeFile(join(projectDirectory, 'linked.txt'), 'linked text');
+    const listing = await client.request('project.files.list', { sessionId, path: '.' }) as DirectoryPage;
+    assert.equal(listing.path, '.');
+    assert.ok(listing.entries.some(entry => entry.path === 'linked.txt'));
+    const preview = await client.request('project.file.read', { sessionId, path: 'linked.txt' }) as FilePreview;
+    assert.equal(preview.path, 'linked.txt');
+    assert.equal(preview.text, 'linked text');
+  }, {
+    setup: async ({ directory, projectDirectory }) => {
+      const workspaceLink = join(directory, 'project-link');
+      await symlink(projectDirectory, workspaceLink, process.platform === 'win32' ? 'junction' : 'dir');
+      config.boundary = workspaceLink;
+      config.workspaceRoot = workspaceLink;
+    },
+    config,
+    permissionControl: true,
+  });
+});
+
 test('project file reads reject traversal and symlink escape and identify binary and over-limit files', async () => {
   await withTuiHost(async ({ client, sessionId, projectDirectory, directory }) => {
     await writeFile(join(projectDirectory, 'binary.bin'), Buffer.from([0x41, 0x00, 0x42]));

@@ -85,7 +85,7 @@ function safeResolutionError(error: unknown): never {
   throw new KernelError('project_file_path_unavailable');
 }
 
-function relativeFromWorkingDirectory(workingDirectory: string, target: string): string {
+function relativeFromCanonicalWorkingDirectory(workingDirectory: string, target: string): string {
   const path = relative(workingDirectory, target).split(sep).join('/');
   return path === '' ? '.' : path;
 }
@@ -194,6 +194,7 @@ export async function listProjectDirectory(config: CapabilityConfig, pathValue: 
     MAX_DIRECTORY_ENTRIES);
   const requestedPath = pathValue === undefined ? boundaryPath(config) : pathValue;
   const target = await resolveProjectPath(config, requestedPath, true);
+  const workingRoot = await realpath(workingDirectoryOf(config));
   let info;
   try { info = await stat(target); }
   catch (error) {
@@ -207,6 +208,7 @@ export async function listProjectDirectory(config: CapabilityConfig, pathValue: 
   const deadline = Date.now() + MAX_DIRECTORY_SCAN_MS;
   let incomplete = false;
   let scannedEntries = 0;
+  const parent = relativeFromCanonicalWorkingDirectory(workingRoot, target);
   let directory;
   try { directory = await opendir(target); }
   catch { throw new KernelError('project_directory_unreadable'); }
@@ -223,7 +225,6 @@ export async function listProjectDirectory(config: CapabilityConfig, pathValue: 
         incomplete = true;
         continue;
       }
-      const parent = relativeFromWorkingDirectory(workingDirectoryOf(config), target);
       const path = parent === '.' ? entry.name : `${parent}/${entry.name}`;
       entries.push({ name: entry.name, path, kind });
     }
@@ -236,7 +237,7 @@ export async function listProjectDirectory(config: CapabilityConfig, pathValue: 
   const page = entries.slice(offset, offset + limit);
   const hasMore = offset + page.length < entries.length;
   return {
-    path: relativeFromWorkingDirectory(workingDirectoryOf(config), target),
+    path: parent,
     entries: page,
     offset,
     nextOffset: hasMore ? offset + page.length : null,
@@ -253,6 +254,7 @@ export async function searchProjectFiles(config: CapabilityConfig, queryValue: u
   const { offset, limit } = pageBounds(offsetValue, limitValue, 50, Math.min(MAX_FILE_SEARCH_PAGE_SIZE, limits.resultCount));
   const requestedPath = pathValue === undefined ? boundaryPath(config) : pathValue;
   const searchRoot = await resolveProjectPath(config, requestedPath, true);
+  const workingRoot = await realpath(workingDirectoryOf(config));
   let info;
   try { info = await stat(searchRoot); }
   catch (error) {
@@ -276,7 +278,7 @@ export async function searchProjectFiles(config: CapabilityConfig, queryValue: u
     throw new KernelError('project_file_search_unavailable');
   }
   const incomplete = scan.incomplete;
-  const prefix = relativeFromWorkingDirectory(workingDirectoryOf(config), searchRoot);
+  const prefix = relativeFromCanonicalWorkingDirectory(workingRoot, searchRoot);
   const matches = paths.slice(offset, offset + limit).map(path => ({ path: prefix === '.' ? path : `${prefix}/${path}` }));
   const hasMore = offset + matches.length < paths.length;
   return {
@@ -305,6 +307,7 @@ export async function readProjectFile(config: CapabilityConfig, sessionId: strin
   const limit = Math.min(Number(requestedLimit), limits.readBytes, MAX_FILE_PAGE_BYTES);
   if (limit < 4) throw new KernelError('project_file_read_limit_unavailable');
   const target = await resolveProjectPath(config, path, false);
+  const workingRoot = await realpath(workingDirectoryOf(config));
   let info;
   try { info = await stat(target); }
   catch (error) {
@@ -312,7 +315,7 @@ export async function readProjectFile(config: CapabilityConfig, sessionId: strin
     throw new KernelError('project_file_unreadable');
   }
   if (!info.isFile()) throw new KernelError('project_file_not_regular');
-  const displayPath = relativeFromWorkingDirectory(workingDirectoryOf(config), target);
+  const displayPath = relativeFromCanonicalWorkingDirectory(workingRoot, target);
   if (info.size > FILE_CHANGE_MAX_FILE_BYTES) {
     return { path: displayPath, size: info.size, version: null, encoding: 'too_large', offsetBytes: Number(offset), nextOffsetBytes: null };
   }
@@ -422,7 +425,7 @@ export async function saveProjectFile(config: CapabilityConfig, sessionId: strin
     catch { throw new KernelError('project_file_target_changed'); }
     if (!sameFileIdentity(initialInfo, currentInfo)) throw new KernelError('project_file_target_changed');
 
-    const displayPath = relativeFromWorkingDirectory(workingDirectoryOf(config), currentTarget);
+    const displayPath = path;
     const withRecord = async (result: Omit<ProjectFileSave, 'recorded'>): Promise<ProjectFileSave> => {
       let recorded = false;
       try { recorded = await recordChange(result); }
