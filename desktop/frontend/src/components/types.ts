@@ -7,4 +7,5 @@ export type Verbosity = 'brief' | 'standard' | 'detailed' | 'full';
 
 // `flash` 标记搜索定位到的行。
 // `branch` 标记可作为分支起点的完整结束轮次，并携带对应事件序号。
-export type RowProps = { row: Row; verbosity: Verbosity; flash?: boolean; branch?: (at: number) => void; onModels?: () => void; client?: Client; sessionId?: string | null; projectRoot?: string };
+export type RowProps = { row: Row; verbosity: Verbosity; flash?: boolean; branch?: (at: number) => void; onModels?: () => void;
+  onOpenSideSession?: (sessionId: string, originSessionId: string) => void; client?: Client; sessionId?: string | null; projectRoot?: string };

@@ -42,7 +42,7 @@ export function streamAnchor(rows: Row[], firstIndex: number): { id: number; off
   return null;
 }
 
-export function TranscriptViewport({ rows, hasRecords, reading, verbosity, flash, onBranch, onModels, pinned, setPinned, follow, initialIndex, list, firstIndex, stamp, streamContext, readerScrolling, onRangeChanged, onJumpToLatest, client, sessionId, projectRoot }: {
+export function TranscriptViewport({ rows, hasRecords, reading, verbosity, flash, onBranch, onModels, onOpenSideSession, pinned, setPinned, follow, initialIndex, list, firstIndex, stamp, streamContext, readerScrolling, onRangeChanged, onJumpToLatest, client, sessionId, projectRoot }: {
   rows: Row[];
   hasRecords: boolean;
   reading: boolean;
@@ -50,6 +50,7 @@ export function TranscriptViewport({ rows, hasRecords, reading, verbosity, flash
   flash: number | null;
   onBranch?: (at: number) => void;
   onModels?: () => void;
+  onOpenSideSession?: (sessionId: string, originSessionId: string) => void;
   pinned: boolean;
   setPinned: Dispatch<SetStateAction<boolean>>;
   follow: boolean;
@@ -83,6 +84,7 @@ export function TranscriptViewport({ rows, hasRecords, reading, verbosity, flash
         flash={row.seq !== undefined && row.seq === flash}
         branch={row.kind === 'round' ? onBranch : undefined}
         onModels={row.kind === 'round' ? onModels : undefined}
+        onOpenSideSession={onOpenSideSession}
         client={client}
         sessionId={sessionId}
         projectRoot={projectRoot}

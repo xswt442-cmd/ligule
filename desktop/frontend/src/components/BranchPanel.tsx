@@ -41,8 +41,10 @@ function noteText(note: { kind: 'parent' | 'branch' | 'control'; code: string },
     : t(`无法读取子任务：${note.code}`, `Could not load subtask: ${note.code}`);
 }
 
-export function BranchPanel({ client, sessionId, activeRunId = null, runStatusKnown = true, verbosity }: {
+export function BranchPanel({ client, sessionId, activeRunId = null, runStatusKnown = true, verbosity,
+  initialParentRunId, initialSubrunId }: {
   client: Client; sessionId: string | null; activeRunId?: string | null; runStatusKnown?: boolean; verbosity: Verbosity;
+  initialParentRunId?: string; initialSubrunId?: string;
 }) {
   const t = useText();
   const requestGeneration = useRef(0);
@@ -119,6 +121,13 @@ export function BranchPanel({ client, sessionId, activeRunId = null, runStatusKn
       if (branchReadGeneration.current === generation) setNote({ kind: 'branch', code: code(error) });
     }
   }, [client]);
+
+  useEffect(() => {
+    if (initialParentRunId === undefined || initialSubrunId === undefined || selectedId !== null) return;
+    const branch = branches.find(item => item.reference?.parentRunId === initialParentRunId
+      && item.reference.subrunId === initialSubrunId);
+    if (branch !== undefined) void open(branch);
+  }, [branches, initialParentRunId, initialSubrunId, open, selectedId]);
 
   const selected = branches.find((branch) => branch.id === selectedId) ?? null;
 

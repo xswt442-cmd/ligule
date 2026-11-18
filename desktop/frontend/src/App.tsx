@@ -12,6 +12,7 @@ import { ProjectFilesPanel } from './components/ProjectFilesPanel';
 import { ProjectFileView } from './components/ProjectFileView';
 import { ProjectGitPanel } from './components/ProjectGitPanel';
 import { DeliveryPanel, ArtifactDetailPanel, CheckDetailPanel } from './components/DeliveryPanel';
+import { SideSessionPanel } from './components/SideSessionPanel';
 import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
 import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
@@ -50,6 +51,8 @@ import { clearExternalSessionDraftIfCurrent, externalSessionDraftFor, externalSe
 import { clearSessionDraftIfCurrent, sessionDraftRevisionFor, updateSessionDraftRevision, type SessionDraftRevisions } from './session-draft-revisions';
 import { Composer } from './components/Composer';
 import { CommandWorkspace } from './components/CommandWorkspace';
+import { SideChatDialog } from './components/SideChatDialog';
+import { MAX_SIDE_CHAT_CONTEXT_BYTES, sideChatContextBytes, sideChatPrompt, type SideChatSelection } from './side-chat';
 import { ExternalSessionComposer, ExternalSessionControlPanel } from './components/ExternalSessionControlPanel';
 import type { MentionState } from './mentions';
 import type { PermissionConfirmations, PermissionTarget } from './permission-control';
@@ -58,6 +61,60 @@ import type { PermissionConfirmations, PermissionTarget } from './permission-con
 const LIVE_REASONING: Row = { id: -2, kind: 'reasoning', text: '' };
 const LIVE_ANSWER: Row = { id: -1, kind: 'answer', text: '' };
 type PolicySelection = 'always' | 'ask' | 'auto' | 'never';
+
+type ModelViewTarget = Extract<WorkbenchResource, { kind: 'file' | 'directory' | 'git' | 'subrun' }>
+  | { readonly kind: 'command'; readonly reference: WorkbenchCommandReference };
+
+type ModelViewRequest = {
+  readonly requestId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly target: ModelViewTarget;
+  readonly ready: boolean;
+  readonly opening: boolean;
+};
+
+function object(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function boundedString(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= max
+    && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function modelViewTarget(value: unknown): ModelViewTarget | undefined {
+  if (!object(value)) return undefined;
+  if (value.kind === 'command') {
+    const reference = value.reference;
+    if (!object(reference) || !['sourceSessionId', 'operationSessionId', 'operationId', 'executionId']
+      .every(key => boundedString(reference[key], 160))
+      || Object.keys(reference).some(key => !['sourceSessionId', 'operationSessionId', 'operationId', 'executionId'].includes(key))) return undefined;
+    return { kind: 'command', reference: {
+      sourceSessionId: reference.sourceSessionId as string,
+      operationSessionId: reference.operationSessionId as string,
+      operationId: reference.operationId as string,
+      executionId: reference.executionId as string,
+    } };
+  }
+  if (value.kind === 'file' && boundedString(value.projectRoot, 4096) && boundedString(value.path, 4096)
+    && typeof value.version === 'string' && /^(?:[a-f0-9]{16}|[a-f0-9]{64})$/iu.test(value.version)) {
+    return { kind: 'file', projectRoot: value.projectRoot, path: value.path, version: value.version };
+  }
+  if (value.kind === 'directory' && boundedString(value.projectRoot, 4096) && boundedString(value.path, 4096)) {
+    return { kind: 'directory', projectRoot: value.projectRoot, path: value.path };
+  }
+  if (value.kind === 'git' && boundedString(value.projectRoot, 4096) && boundedString(value.path, 4096)
+    && typeof value.version === 'string' && /^[a-f0-9]{64}$/iu.test(value.version)) {
+    return { kind: 'git', projectRoot: value.projectRoot, path: value.path, version: value.version };
+  }
+  if (value.kind === 'subrun' && boundedString(value.sessionId, 160) && boundedString(value.parentRunId, 160)
+    && boundedString(value.subrunId, 160) && boundedString(value.childSessionId, 160) && boundedString(value.childRunId, 160)) {
+    return { kind: 'subrun', sessionId: value.sessionId, parentRunId: value.parentRunId,
+      subrunId: value.subrunId, childSessionId: value.childSessionId, childRunId: value.childRunId };
+  }
+  return undefined;
+}
 
 function sameProjectRoot(left: string, right: string): boolean {
   const normalize = (value: string) => {
@@ -68,6 +125,16 @@ function sameProjectRoot(left: string, right: string): boolean {
   const second = normalize(right);
   const insensitive = /^[a-z]:\//iu.test(first) || first.startsWith('//');
   return insensitive ? first.toLowerCase() === second.toLowerCase() : first === second;
+}
+
+function modelViewTargetLabel(target: ModelViewTarget, t: (chinese: string, english: string) => string): string {
+  switch (target.kind) {
+    case 'file': return `${t('文件', 'File')} · ${target.path}`;
+    case 'directory': return `${t('目录', 'Directory')} · ${target.path}`;
+    case 'git': return `${t('差异', 'Diff')} · ${target.path}`;
+    case 'subrun': return `${t('子任务', 'Subtask')} · ${target.subrunId}`;
+    case 'command': return `${t('命令', 'Command')} · ${target.reference.executionId}`;
+  }
 }
 
 // 每次向前读取一页事件；打开会话时先取最近页，再按游标读取更早记录。
@@ -262,6 +329,18 @@ export function App({ transport }: { transport: Transport }) {
   const allowSend = useRef(new Set<string>());
   const [status, setStatus] = useState<Status | null>(null);
   const [hostRevision, setHostRevision] = useState(0);
+  const [sideChatSelection, setSideChatSelection] = useState<SideChatSelection | null>(null);
+  const [sideChatDialog, setSideChatDialog] = useState<SideChatSelection | null>(null);
+  const [sideChatQuestion, setSideChatQuestion] = useState('');
+  const [sideChatBusy, setSideChatBusy] = useState(false);
+  const [sideChatError, setSideChatError] = useState<string | null>(null);
+  const [modelViewRequest, setModelViewRequest] = useState<ModelViewRequest | null>(null);
+  const modelViewRequestRef = useRef<ModelViewRequest | null>(null);
+  useEffect(() => {
+    if (modelViewRequestRef.current === null || modelViewRequestRef.current.sessionId === sessionId) return;
+    modelViewRequestRef.current = null;
+    setModelViewRequest(null);
+  }, [sessionId]);
   const [taskSnapshotAt, setTaskSnapshotAt] = useState(Date.now());
   const [newSessionSettingsRevision, setNewSessionSettingsRevision] = useState(0);
   const [newSessionMode, setNewSessionMode] = useState<string | null>(null);
@@ -607,6 +686,15 @@ export function App({ transport }: { transport: Transport }) {
       } catch (error) { setWorkbenchError(code(error)); }
     });
   }, [applyWorkbenchState, leaveDock, projectRoot, sessionId, t]);
+  const openSideSessionResource = useCallback((sideSessionId: string, originSessionId: string, root: string) => {
+    leaveDock(() => {
+      try {
+        applyWorkbenchState(openWorkbenchResource(workbenchRef.current,
+          { kind: 'side-session', projectRoot: root, sessionId: sideSessionId, originSessionId }, t('侧聊来源', 'Side chat source')));
+        setWorkbenchError(null);
+      } catch (error) { setWorkbenchError(code(error)); }
+    });
+  }, [applyWorkbenchState, leaveDock, t]);
   const selectWorkbench = useCallback((key: string) => {
     leaveDock(() => applyWorkbenchState(selectWorkbenchTab(workbenchRef.current, key)));
   }, [applyWorkbenchState, leaveDock]);
@@ -619,6 +707,87 @@ export function App({ transport }: { transport: Transport }) {
       setWorkbenchError(null);
     } catch (error) { setWorkbenchError(code(error)); }
   }, [applyWorkbenchState]);
+  const clearModelViewRequest = useCallback(() => {
+    modelViewRequestRef.current = null;
+    setModelViewRequest(null);
+  }, []);
+  const resolveModelViewRequest = useCallback((request: ModelViewRequest, action: 'opened' | 'dismissed') => {
+    void client.call('view.request.ack', {
+      sessionId: request.sessionId, runId: request.runId, requestId: request.requestId, action,
+    }, 10_000).then(() => {
+      if (modelViewRequestRef.current?.requestId === request.requestId) clearModelViewRequest();
+    }).catch(error => {
+      setWorkbenchError(code(error));
+      const current = modelViewRequestRef.current;
+      if (current?.requestId === request.requestId) {
+        const retry = { ...current, opening: false };
+        modelViewRequestRef.current = retry;
+        setModelViewRequest(retry);
+      }
+    });
+  }, [clearModelViewRequest, client]);
+  const dismissModelViewRequest = useCallback(() => {
+    const request = modelViewRequestRef.current;
+    if (request === null || !request.ready || request.opening) return;
+    const opening = { ...request, opening: true };
+    modelViewRequestRef.current = opening;
+    setModelViewRequest(opening);
+    resolveModelViewRequest(opening, 'dismissed');
+  }, [resolveModelViewRequest]);
+  const openModelViewRequest = useCallback(() => {
+    const request = modelViewRequestRef.current;
+    if (request === null || !request.ready || request.opening) return;
+    if (request.sessionId !== active.current || request.sessionId !== sessionId) {
+      setWorkbenchError('view_request_stale');
+      clearModelViewRequest();
+      return;
+    }
+    const target = request.target;
+    if ((target.kind === 'file' || target.kind === 'directory' || target.kind === 'git')
+      && !sameProjectRoot(target.projectRoot, projectRoot)
+      || target.kind === 'subrun' && target.sessionId !== request.sessionId
+      || target.kind === 'command' && target.reference.sourceSessionId !== request.sessionId) {
+      setWorkbenchError('view_request_stale');
+      clearModelViewRequest();
+      return;
+    }
+    if (target.kind === 'command') {
+      const opening = { ...request, opening: true };
+      modelViewRequestRef.current = opening;
+      setModelViewRequest(opening);
+      try {
+        applyWorkbenchState(addWorkbenchCommand(workbenchRef.current, target.reference));
+        setWorkbenchError(null);
+        resolveModelViewRequest(opening, 'opened');
+      } catch (error) {
+        setWorkbenchError(code(error));
+        const retry = { ...opening, opening: false };
+        modelViewRequestRef.current = retry;
+        setModelViewRequest(retry);
+      }
+      return;
+    }
+    const title = target.kind === 'file' ? target.path.split('/').at(-1) ?? target.path
+      : target.kind === 'directory' ? target.path === '.' ? t('项目文件', 'Files') : target.path.split('/').at(-1) ?? target.path
+        : target.kind === 'git' ? t(`差异 · ${target.path}`, `Diff · ${target.path}`)
+          : t(`子任务 ${target.subrunId}`, `Subtask ${target.subrunId}`);
+    leaveDock(() => {
+      if (modelViewRequestRef.current?.requestId !== request.requestId) return;
+      const opening = { ...request, opening: true };
+      modelViewRequestRef.current = opening;
+      setModelViewRequest(opening);
+      try {
+        applyWorkbenchState(openWorkbenchResource(workbenchRef.current, target, title));
+        setWorkbenchError(null);
+        resolveModelViewRequest(opening, 'opened');
+      } catch (error) {
+        setWorkbenchError(code(error));
+        const retry = { ...opening, opening: false };
+        modelViewRequestRef.current = retry;
+        setModelViewRequest(retry);
+      }
+    });
+  }, [applyWorkbenchState, clearModelViewRequest, leaveDock, projectRoot, resolveModelViewRequest, sessionId, t]);
   const selectCommandReference = useCallback((key: string) => {
     applyWorkbenchState(selectWorkbenchCommand(workbenchRef.current, key));
   }, [applyWorkbenchState]);
@@ -907,10 +1076,28 @@ export function App({ transport }: { transport: Transport }) {
         setRows((current) => [...current, metaRow('error', `连接错误：${message.code} ${message.detail ?? ''}`, `Connection error: ${message.code} ${message.detail ?? ''}`)]);
         return;
       }
+      if (message.notify === 'view.ready') {
+        const pending = modelViewRequestRef.current;
+        if (pending !== null && pending.requestId === message.requestId) {
+          const ready = { ...pending, ready: true };
+          modelViewRequestRef.current = ready;
+          setModelViewRequest(ready);
+        }
+        return;
+      }
       // 按会话保存流式片段，后台会话继续输出时也能在切回后立即显示已收到内容。
       const owner = message.sessionId ?? '';
       const inView = owner === active.current;
       if (message.notify === 'progress') {
+        if (owner !== '') {
+          setRunningIds(current => {
+            const running = message.progress !== null && message.progress !== undefined;
+            const present = current.includes(owner);
+            if (running && !present) return [...current, owner];
+            if (!running && present) return current.filter(id => id !== owner);
+            return current;
+          });
+        }
         if (inView) {
           const progress = message.progress === null || message.progress === undefined
             ? null
@@ -935,6 +1122,7 @@ export function App({ transport }: { transport: Transport }) {
       if (message.notify === 'event') {
         const record = message.event as Record_;
         if (record?.kind === 'turn') {
+          setRunningIds(current => current.filter(id => id !== owner));
           const previous = terminalBySession.current.get(owner);
           terminalBySession.current.set(owner, record.seq ?? -1);
           if (previous !== record.seq) {
@@ -958,6 +1146,37 @@ export function App({ transport }: { transport: Transport }) {
     });
 
     const stopRequests = client.onRequest((message) => {
+      if (message.method === 'view.request') {
+        const responseId = message.id;
+        const params = message.params;
+        const sessionOwner = params?.sessionId;
+        const runId = params?.runId;
+        const viewRequestId = params?.requestId;
+        const target = modelViewTarget(params?.target);
+        const reply = (status: 'sent' | 'view_unavailable') => {
+          if (typeof responseId !== 'string') return;
+          try { client.reply(responseId, { status, opened: false, read: false }); } catch { /* the Host connection may already be closed */ }
+        };
+        if (typeof responseId !== 'string' || typeof viewRequestId !== 'string'
+          || !boundedString(sessionOwner, 160) || !boundedString(runId, 160)
+          || target === undefined || active.current !== sessionOwner || modelViewRequestRef.current !== null) {
+          reply('view_unavailable');
+          return;
+        }
+        void client.call('status.get', { sessionId: sessionOwner }, 5_000).then(value => {
+          const current = value as Status;
+          if (active.current !== sessionOwner || current.running !== true || current.activeRunId !== runId
+            || modelViewRequestRef.current !== null) {
+            reply('view_unavailable');
+            return;
+          }
+          const pending = { requestId: viewRequestId, sessionId: sessionOwner, runId, target, ready: false, opening: false };
+          modelViewRequestRef.current = pending;
+          setModelViewRequest(pending);
+          reply('sent');
+        }).catch(() => reply('view_unavailable'));
+        return;
+      }
       // 用户提问一次可以包含多道题，答复按题目编号关联；此流程与审批分开处理。
       if (message.method === 'question.request') {
         const asked = message.params as { sessionId?: string; projectRoot?: string; questions?: QuestionAsk['questions'] };
@@ -998,6 +1217,12 @@ export function App({ transport }: { transport: Transport }) {
       // 用户已切换会话时，不将该请求的响应写入当前会话状态。
       if (!isCurrent()) return;
       setStatus(next);
+      setRunningIds(current => {
+        const present = current.includes(id);
+        if (next.running && !present) return [...current, id];
+        if (!next.running && present) return current.filter(candidate => candidate !== id);
+        return current;
+      });
       setTaskSnapshotAt(Date.now());
     } catch (error) {
       if (isCurrent()) setRows((current) => [...current, metaRow('error', `无法读取状态：${code(error)}`, `Could not load status: ${code(error)}`)]);
@@ -1153,6 +1378,151 @@ export function App({ transport }: { transport: Transport }) {
     if (!observing) void refreshStatus(id);
     return true;
   }, [client, projectRoot, refreshStatus]);
+
+  useEffect(() => {
+    let frame = 0;
+    const capture = () => {
+      if (frame !== 0) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (sideChatDialog !== null || sessionId === null || projectRoot === '') {
+          setSideChatSelection(null);
+          return;
+        }
+        const selection = window.getSelection();
+        const text = selection?.toString().trim() ?? '';
+        if (selection === null || selection.isCollapsed || selection.rangeCount !== 1 || text === ''
+          || sideChatContextBytes(text) > MAX_SIDE_CHAT_CONTEXT_BYTES) {
+          setSideChatSelection(null);
+          return;
+        }
+        const parentOf = (node: Node | null): Element | null => node instanceof Element ? node : node?.parentElement ?? null;
+        const start = parentOf(selection.anchorNode);
+        const end = parentOf(selection.focusNode);
+        const source = start?.closest<HTMLElement>('[data-side-chat-kind]') ?? null;
+        if (source === null || source !== end?.closest('[data-side-chat-kind]') || source.closest('.cm-editor') !== null) {
+          setSideChatSelection(null);
+          return;
+        }
+        let reference: SideChatSelection['source'] | undefined;
+        if (source.dataset.sideChatKind === 'event') {
+          const eventSeq = Number(source.dataset.sideChatSeq);
+          if (Number.isSafeInteger(eventSeq) && eventSeq >= 0) reference = { kind: 'event', eventSeq };
+        } else if (source.dataset.sideChatKind === 'file') {
+          const path = source.dataset.sideChatPath;
+          const version = source.dataset.sideChatVersion;
+          if (typeof path === 'string' && typeof version === 'string' && /^[a-f0-9]{16}$/iu.test(version)) {
+            reference = { kind: 'file', path, version };
+          }
+        } else if (source.dataset.sideChatKind === 'diff') {
+          const path = source.dataset.sideChatPath;
+          if (typeof path === 'string' && path !== '') reference = { kind: 'diff', path };
+        }
+        if (reference === undefined) {
+          setSideChatSelection(null);
+          return;
+        }
+        const bounds = selection.getRangeAt(0).getBoundingClientRect();
+        setSideChatSelection({ sessionId, projectRoot,
+          ...(reference.kind !== 'event' && status?.running === true && status.activeRunId !== null
+            && status.activeRunId !== undefined ? { sourceRunId: status.activeRunId } : {}),
+          text, source: reference,
+          left: Math.max(8, Math.min(window.innerWidth - 150, bounds.left)),
+          top: Math.max(8, Math.min(window.innerHeight - 42, bounds.bottom + 6)),
+        });
+      });
+    };
+    document.addEventListener('selectionchange', capture);
+    window.addEventListener('scroll', capture, true);
+    window.addEventListener('resize', capture);
+    return () => {
+      document.removeEventListener('selectionchange', capture);
+      window.removeEventListener('scroll', capture, true);
+      window.removeEventListener('resize', capture);
+      if (frame !== 0) cancelAnimationFrame(frame);
+    };
+  }, [projectRoot, sessionId, sideChatDialog, status?.activeRunId, status?.running]);
+
+  const createSideChat = useCallback(async () => {
+    const context = sideChatDialog;
+    const question = sideChatQuestion.trim();
+    const sourceSessionId = context?.sessionId ?? null;
+    const root = context?.projectRoot ?? '';
+    if (context === null || question === '' || sourceSessionId === null || root === '' || sideChatBusy) return;
+    setSideChatBusy(true);
+    setSideChatError(null);
+    try {
+      const request = {
+        sessionId: sourceSessionId,
+        sourceKind: context.source.kind,
+        selection: context.text,
+        ...(context.source.kind === 'event' ? { sourceEventSeq: context.source.eventSeq } : {
+          sourcePath: context.source.path,
+          ...(context.source.kind === 'file' ? { sourceVersion: context.source.version } : {}),
+          ...(context.sourceRunId === undefined ? {} : { sourceRunId: context.sourceRunId }),
+        }),
+      };
+      const created = await client.call('session.side.create', request, 30_000) as {
+        sessionId?: string; sourceSessionId?: string;
+      };
+      if (typeof created.sessionId !== 'string' || created.sessionId === '' || created.sourceSessionId !== sourceSessionId) {
+        throw Object.assign(new Error('side_session_response_invalid'), { code: 'side_session_response_invalid' });
+      }
+      const sourceLabel = context.source.kind === 'event' ? `Session event ${context.source.eventSeq}`
+        : context.source.kind === 'file' ? `file ${context.source.path}` : `Git diff ${context.source.path}`;
+      const prompt = sideChatPrompt(context.text, question, sourceLabel);
+      const opened = await openSession(created.sessionId, undefined, false, root);
+      if (opened !== true) throw Object.assign(new Error('side_session_open_failed'), { code: 'side_session_open_failed' });
+      setDraft(prompt, { root, id: created.sessionId });
+      openSideSessionResource(created.sessionId, sourceSessionId, root);
+      setSideChatDialog(null);
+      setSideChatQuestion('');
+      setSideChatSelection(null);
+    } catch (error) {
+      setSideChatError(code(error));
+    } finally {
+      setSideChatBusy(false);
+    }
+  }, [client, openSession, openSideSessionResource, setDraft, sideChatBusy, sideChatDialog, sideChatQuestion]);
+
+  const sendSideConclusion = useCallback(async (sourceSessionId: string, sourceRunId: string, text: string, root: string) => {
+    await client.call('session.open', { sessionId: sourceSessionId, projectRoot: root }, 15_000);
+    const source = await client.call('status.get', { sessionId: sourceSessionId }, 15_000) as Status;
+    if (source.running !== true || source.activeRunId !== sourceRunId) {
+      throw Object.assign(new Error('side_chat_origin_run_stale'), { code: 'side_chat_origin_run_stale' });
+    }
+    try {
+      await client.call('run.steer', { sessionId: sourceSessionId, runId: sourceRunId, input: text }, 15_000);
+    } catch (error) {
+      const failure = code(error);
+      if (['run_not_running', 'run_steering_run_mismatch', 'run_steering_target_changed'].includes(failure)) {
+        throw Object.assign(new Error('side_chat_origin_run_stale'), { code: 'side_chat_origin_run_stale' });
+      }
+      throw error;
+    }
+  }, [client]);
+
+  const prepareSideFollowup = useCallback(async (sourceSessionId: string, text: string, root: string) => {
+    await client.call('session.open', { sessionId: sourceSessionId, projectRoot: root }, 15_000);
+    const source = await client.call('status.get', { sessionId: sourceSessionId }, 15_000) as Status;
+    if (source.running === true || source.activeRunId !== null) {
+      throw Object.assign(new Error('side_chat_origin_run_stale'), { code: 'side_chat_origin_run_stale' });
+    }
+    const preferences = await client.call('prefs.read', {}, 15_000) as { settings?: Settings };
+    const storedDrafts = preferences.settings?.drafts ?? readSettings().drafts;
+    const storedRoot = Object.keys(storedDrafts).find(candidate => sameProjectRoot(candidate, root));
+    const canonicalRoot = storedRoot ?? root;
+    const key = JSON.stringify([canonicalRoot, sourceSessionId]);
+    const unsavedEntry = [...unsavedInputs.current.entries()].find(([, value]) => value.id === sourceSessionId
+      && sameProjectRoot(value.root, root));
+    const localDraft = draftRevisions.current.get(unsavedEntry?.[0] ?? key)?.text ?? unsavedEntry?.[1].draft;
+    const storedDraft = storedRoot === undefined ? '' : storedDrafts[storedRoot]?.[sourceSessionId] ?? '';
+    const sourceDraft = localDraft !== undefined && localDraft !== '' ? localDraft : storedDraft || localDraft || '';
+    if (root === '' || await openSession(sourceSessionId, undefined, false, root) !== true) {
+      throw Object.assign(new Error('side_chat_origin_session_unavailable'), { code: 'side_chat_origin_session_unavailable' });
+    }
+    setDraft(sourceDraft === '' ? text : `${sourceDraft}\n\n${text}`, { root: canonicalRoot, id: sourceSessionId });
+  }, [client, openSession, setDraft]);
 
   useEffect(() => {
     if (sessionId === null || readOnlySessionId !== sessionId) return;
@@ -1969,6 +2339,8 @@ export function App({ transport }: { transport: Transport }) {
   const activeGitResource = activeWorkbenchTab?.resource.kind === 'git' ? activeWorkbenchTab.resource : undefined;
   const activeArtifactResource = activeWorkbenchTab?.resource.kind === 'artifact' ? activeWorkbenchTab.resource : undefined;
   const activeCheckResource = activeWorkbenchTab?.resource.kind === 'check' ? activeWorkbenchTab.resource : undefined;
+  const activeSideSessionResource = activeWorkbenchTab?.resource.kind === 'side-session' ? activeWorkbenchTab.resource : undefined;
+  const activeSubrunResource = activeWorkbenchTab?.resource.kind === 'subrun' ? activeWorkbenchTab.resource : undefined;
   const inactivePanelScope = activePanelResource !== undefined && activePanelResource.panelId !== 'panel.help'
     && activePanelResource.sessionId !== sessionId;
   const dockPanelProps: PanelProps = activePanelResource === undefined || activePanelResource.panelId === 'panel.help'
@@ -2127,6 +2499,20 @@ export function App({ transport }: { transport: Transport }) {
         </button>
       </div>}
 
+      {modelViewRequest?.sessionId === sessionId && <div className="model-view-request" role="status">
+        <div>
+          <strong>{t('模型请求打开一个资源', 'The model requests that you open a resource')}</strong>
+          <span>{modelViewTargetLabel(modelViewRequest.target, t)}</span>
+          <small>{t('收到请求不会自动切换工作台；打开也不代表已阅读。',
+            'Receiving the request does not change the workbench; opening does not confirm that you read it.')}</small>
+        </div>
+        <button type="button" disabled={!modelViewRequest.ready || modelViewRequest.opening} onClick={openModelViewRequest}>
+          {modelViewRequest.opening ? t('正在打开…', 'Opening…') : t('打开资源', 'Open requested resource')}
+        </button>
+        <button type="button" disabled={!modelViewRequest.ready || modelViewRequest.opening}
+          onClick={dismissModelViewRequest}>{t('忽略', 'Dismiss')}</button>
+      </div>}
+
       <TranscriptViewport
         client={client}
         sessionId={sessionId}
@@ -2138,6 +2524,10 @@ export function App({ transport }: { transport: Transport }) {
         flash={flash}
         onBranch={observingExternalSession ? undefined : (at) => void branchFrom(at)}
         onModels={openModelSettings}
+        onOpenSideSession={(sideId, originId) => {
+          openSideSessionResource(sideId, originId, projectRoot);
+          void openSession(sideId, undefined, false, projectRoot);
+        }}
         pinned={pinned}
         setPinned={setPinned}
         follow={!olderLoading && pinned && wanted === null && flash === null}
@@ -2280,6 +2670,16 @@ export function App({ transport }: { transport: Transport }) {
       </section>
     </main>
 
+    {sideChatSelection !== null && <button type="button" className="side-chat-selection-action"
+      style={{ left: sideChatSelection.left, top: sideChatSelection.top }}
+      onMouseDown={event => event.preventDefault()}
+      onClick={() => {
+        setSideChatDialog(sideChatSelection);
+        setSideChatSelection(null);
+        setSideChatQuestion('');
+        setSideChatError(null);
+      }}>{t('侧面询问', 'Ask about selection')}</button>}
+
     {settings.workbench.rightOpen && <WorkbenchDock state={settings.workbench}
       activeTitle={activeWorkbenchTab?.title ?? null}
       error={workbenchError}
@@ -2320,7 +2720,9 @@ export function App({ transport }: { transport: Transport }) {
               : activeGitResource !== undefined
                 ? sessionId === null || projectRoot === '' || !sameProjectRoot(activeGitResource.projectRoot, projectRoot)
                   ? <p className="stub" role="status">{t('请切换到这个工作区的会话后再查看改动。', 'Select a session in this project to view its changes.')}</p>
-                  : <ProjectGitPanel key={`${sessionId}:${activeGitResource.projectRoot}`} client={client} sessionId={sessionId}
+                  : <ProjectGitPanel key={`${sessionId}:${activeGitResource.projectRoot}:${activeGitResource.path ?? ''}:${activeGitResource.version ?? ''}`}
+                    client={client} sessionId={sessionId}
+                    initialPath={activeGitResource.path} initialVersion={activeGitResource.version}
                     onOpenFile={(path, version) => openProjectFile(activeGitResource.projectRoot, path, version)}
                     onOpenCheck={openCheckResource} />
                 : activeArtifactResource !== undefined
@@ -2333,11 +2735,29 @@ export function App({ transport }: { transport: Transport }) {
                       runId={activeCheckResource.runId} eventSeq={activeCheckResource.eventSeq}
                       onOpenEvent={(seq, kind) => void openSession(activeCheckResource.sessionId,
                         { sessionId: activeCheckResource.sessionId, seq, kind, text: '' }, false, activeCheckResource.projectRoot ?? projectRoot)} />
+                      : activeSubrunResource !== undefined
+                        ? activeSubrunResource.sessionId !== sessionId
+                          ? <p className="stub" role="status">{t('这个子任务属于另一个会话。', 'This subtask belongs to another Session.')}</p>
+                          : <BranchPanel key={`${activeSubrunResource.sessionId}:${activeSubrunResource.parentRunId}:${activeSubrunResource.subrunId}`}
+                            client={client} sessionId={activeSubrunResource.sessionId} verbosity={verbosity}
+                            activeRunId={activeSubrunResource.parentRunId} initialParentRunId={activeSubrunResource.parentRunId}
+                            initialSubrunId={activeSubrunResource.subrunId} />
+                    : activeSideSessionResource !== undefined
+                      ? <SideSessionPanel key={`${activeSideSessionResource.sessionId}:${activeSideSessionResource.originSessionId}`}
+                        client={client} sessionId={sessionId} projectRoot={activeSideSessionResource.projectRoot ?? projectRoot}
+                        sideSessionId={activeSideSessionResource.sessionId} originSessionId={activeSideSessionResource.originSessionId}
+                        onOpenOrigin={id => { void openSession(id, undefined, false, activeSideSessionResource.projectRoot ?? projectRoot); }}
+                        onOpenSideSession={id => { void openSession(id, undefined, false, activeSideSessionResource.projectRoot ?? projectRoot); }}
+                        onSendToRun={sendSideConclusion} onPrepareFollowup={prepareSideFollowup} />
           : <p className="stub" role="status">{t('这个资源暂时无法显示。', 'This resource is not available to display.')}</p>}
     </WorkbenchDock>}
 
     {/* 面板收起后把焦点交回输入坞：面板自己那一个过滤框带着 `autoFocus`，它收掉之后没人可交，落在页面上就得从页头重新 Tab 过去。 */}
     {paletteOpen && <Palette commands={commands} onClose={() => { setPaletteOpen(false); composerRef.current?.focus(); }} />}
+    {sideChatDialog !== null && <SideChatDialog context={sideChatDialog} question={sideChatQuestion} busy={sideChatBusy}
+      error={sideChatError} onQuestion={setSideChatQuestion}
+      onClose={() => { if (!sideChatBusy) { setSideChatDialog(null); setSideChatError(null); } }}
+      onCreate={() => void createSideChat()} />}
     {settingsOpen && <SettingsDialog
       initialSection={settingsSection}
       client={client}

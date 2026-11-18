@@ -164,7 +164,8 @@ export function ProjectFileView({ client, sessionId, path, expectedVersion, file
   }, [client, draftConflict, onDraftChange, path, readOnly, saving, sessionId, snapshot?.encoding, version]);
 
   const stale = snapshot !== null && expectedVersion !== undefined && snapshot.version !== expectedVersion;
-  return <section className="project-file-view" aria-label={t('文件预览', 'File preview')}>
+  return <section className="project-file-view" aria-label={t('文件预览', 'File preview')}
+    data-side-chat-kind="file" data-side-chat-path={path} data-side-chat-version={snapshot?.version ?? undefined}>
     <header className="project-file-view-head">
       <div>
         <strong>{path.split('/').at(-1)}</strong>

@@ -20,6 +20,7 @@ export type ProjectGitDiff = {
   readonly path: string;
   readonly staged: string | null;
   readonly unstaged: string | null;
+  readonly version?: string;
 };
 
 const MAX_STATUS_ENTRIES = 500;
@@ -70,8 +71,9 @@ export async function readProjectGitDiff(client: Client, sessionId: string, path
   if (!checkedPath(path)) throw Object.assign(new Error('project_file_path_invalid'), { code: 'project_file_path_invalid' });
   const value = await client.call('project.git.diff', { sessionId, path }, 15_000);
   const states = [...STATUS_STATES, 'no_change', 'file_not_changed', 'untracked', 'binary'];
-  if (!object(value) || Object.keys(value).some(key => !['state', 'path', 'staged', 'unstaged'].includes(key))
+  if (!object(value) || Object.keys(value).some(key => !['state', 'path', 'staged', 'unstaged', 'version'].includes(key))
     || !states.includes(String(value.state)) || !checkedPath(value.path)
+    || value.version !== undefined && (typeof value.version !== 'string' || !/^[a-f0-9]{64}$/iu.test(value.version))
     || value.staged !== null && (typeof value.staged !== 'string' || value.staged.includes('\u0000')
       || new TextEncoder().encode(value.staged).byteLength > MAX_DIFF_BYTES)
     || value.unstaged !== null && (typeof value.unstaged !== 'string' || value.unstaged.includes('\u0000')
@@ -81,5 +83,6 @@ export async function readProjectGitDiff(client: Client, sessionId: string, path
     throw Object.assign(new Error('project_git_diff_invalid'), { code: 'project_git_diff_invalid' });
   }
   return { state: value.state as ProjectGitDiff['state'], path: value.path as string,
-    staged: value.staged as string | null, unstaged: value.unstaged as string | null };
+    staged: value.staged as string | null, unstaged: value.unstaged as string | null,
+    ...(typeof value.version === 'string' ? { version: value.version } : {}) };
 }

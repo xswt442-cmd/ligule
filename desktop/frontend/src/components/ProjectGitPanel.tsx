@@ -37,16 +37,18 @@ function statusText(state: ProjectGitStatus['state'], t: (chinese: string, engli
   }
 }
 
-export function ProjectGitPanel({ client, sessionId, onOpenFile, onOpenCheck }: {
+export function ProjectGitPanel({ client, sessionId, initialPath, initialVersion, onOpenFile, onOpenCheck }: {
   client: Client;
   sessionId: string;
+  initialPath?: string;
+  initialVersion?: string;
   onOpenFile: (path: string, version?: string) => void;
   onOpenCheck?: (runId: string, eventSeq: number) => void;
 }) {
   const t = useText();
   const [status, setStatus] = useState<ProjectGitStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [selectedPath, setSelectedPath] = useState<string | null>(initialPath ?? null);
   const [diff, setDiff] = useState<ProjectGitDiff | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryPage>({ events: [], hasMore: false });
@@ -65,13 +67,19 @@ export function ProjectGitPanel({ client, sessionId, onOpenFile, onOpenCheck }: 
     void readProjectGitStatus(client, sessionId).then(value => {
       if (!active || generation !== statusGeneration.current) return;
       setStatus(value);
-      setSelectedPath(current => value.files.some(file => file.path === current)
-        ? current : value.files[0]?.path ?? null);
+      setSelectedPath(current => {
+        const preferred = initialPath ?? current;
+        if (preferred !== null && value.files.some(file => file.path === preferred)) return preferred;
+        return initialPath === undefined ? value.files[0]?.path ?? null : null;
+      });
+      if (initialPath !== undefined && !value.files.some(file => file.path === initialPath)) {
+        setDiffError('project_git_diff_stale');
+      }
     }).catch(error => {
       if (active && generation === statusGeneration.current) setStatusError(errorCode(error));
     });
     return () => { active = false; statusGeneration.current += 1; };
-  }, [client, refresh, sessionId]);
+  }, [client, initialPath, refresh, sessionId]);
 
   useEffect(() => {
     const generation = ++historyGeneration.current;
@@ -87,18 +95,27 @@ export function ProjectGitPanel({ client, sessionId, onOpenFile, onOpenCheck }: 
   }, [client, refresh, sessionId]);
 
   useEffect(() => {
-    if (selectedPath === null) { setDiff(null); setDiffError(null); return; }
+    if (selectedPath === null) {
+      setDiff(null);
+      if (initialPath === undefined) setDiffError(null);
+      return;
+    }
     const generation = ++diffGeneration.current;
     let active = true;
     setDiff(null);
     setDiffError(null);
     void readProjectGitDiff(client, sessionId, selectedPath).then(value => {
-      if (active && generation === diffGeneration.current) setDiff(value);
+      if (!active || generation !== diffGeneration.current) return;
+      if (initialVersion !== undefined && value.version !== initialVersion) {
+        setDiffError('project_git_diff_stale');
+        return;
+      }
+      setDiff(value);
     }).catch(error => {
       if (active && generation === diffGeneration.current) setDiffError(errorCode(error));
     });
     return () => { active = false; diffGeneration.current += 1; };
-  }, [client, refresh, selectedPath, sessionId]);
+  }, [client, initialVersion, refresh, selectedPath, sessionId]);
 
   const rows = useMemo(() => projectChangesFrom(history.events), [history.events]);
   const selected = status?.files.find(file => file.path === selectedPath) ?? null;
@@ -144,7 +161,9 @@ export function ProjectGitPanel({ client, sessionId, onOpenFile, onOpenCheck }: 
         </div>)}
       </div>
       {status.truncated && <p className="project-file-incomplete" role="status">{t('文件列表已截断。', 'The file list was truncated.')}</p>}
-      <section className="project-git-diff" aria-label={t('文件差异', 'File diff')}>
+      <section className="project-git-diff" aria-label={t('文件差异', 'File diff')}
+        data-side-chat-kind={diff?.state === 'ready' ? 'diff' : undefined}
+        data-side-chat-path={diff?.state === 'ready' ? diff.path : undefined}>
         <header><strong>{selected?.path ?? t('选择文件查看差异', 'Select a file to view its diff')}</strong>
           {selected !== null && <button type="button" onClick={() => onOpenFile(selected.path)}>{t('打开文件', 'Open file')}</button>}
         </header>

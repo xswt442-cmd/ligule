@@ -80,6 +80,10 @@ export type Record_ = {
   commandStatus?: string;
   reportStatus?: string;
   scopeStatus?: string;
+  sideSessionId?: string;
+  sourceSessionId?: string;
+  sourceRunId?: string;
+  selectionBytes?: number;
   // 标记由恢复流程补写的结果。
   recovery?: { assistantSeq?: number; safeToRedo?: boolean };
 };
@@ -116,6 +120,7 @@ export type Row = {
   english?: { text?: string; summary?: string; notes?: string[] };
   // 写入操作的变更行数：删除行数和新增行数。
   diff?: { added: number; removed: number };
+  sideSession?: { readonly sessionId: string; readonly originSessionId: string };
 };
 
 // 工具结果可以是字符串或包含 `text` 字段的结构化对象。
@@ -357,6 +362,14 @@ function projected(record: Record_, options: { startedAt?: number; now?: number 
       text: `检查结果：${name} · 命令 ${command} · 报告 ${report} · 范围 ${scope}`,
       english: { text: `Check result: ${name} · command ${command} · report ${report} · scope ${scope}` },
     }];
+  }
+  if (record.kind === 'sideSessionStarted') {
+    if (typeof record.sideSessionId !== 'string' || typeof record.sourceSessionId !== 'string') return [];
+    const run = typeof record.sourceRunId === 'string' ? ` · Run ${record.sourceRunId.slice(0, 8)}` : '';
+    const bytes = Number.isSafeInteger(record.selectionBytes) ? Number(record.selectionBytes) : 'unknown';
+    return [{ id: nextId(), kind: 'meta', text: `已创建侧聊${run} · ${bytes} B`,
+      english: { text: `Side chat created${run} · ${bytes} B` },
+      sideSession: { sessionId: record.sideSessionId, originSessionId: record.sourceSessionId } }];
   }
   if (record.kind === 'reasoning') return [{ id: nextId(), kind: 'reasoning', text: record.text ?? '' }];
   // 完整结束的轮次作为分支点显示，并提供创建分支的入口。

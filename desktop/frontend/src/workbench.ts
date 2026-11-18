@@ -1,14 +1,14 @@
 export type WorkbenchResource =
   | { readonly kind: 'file'; readonly projectRoot: string; readonly path: string; readonly line?: number; readonly version?: string }
   | { readonly kind: 'directory'; readonly projectRoot: string; readonly path: string }
-  | { readonly kind: 'git'; readonly projectRoot: string }
+  | { readonly kind: 'git'; readonly projectRoot: string; readonly path?: string; readonly version?: string }
   | { readonly kind: 'diff'; readonly projectRoot: string; readonly path: string; readonly beforeVersion: string; readonly afterVersion: string }
   | { readonly kind: 'execution'; readonly sessionId: string; readonly runId: string; readonly executionId: string }
   | { readonly kind: 'subrun'; readonly sessionId: string; readonly parentRunId: string; readonly subrunId: string; readonly childSessionId: string; readonly childRunId: string }
   | { readonly kind: 'artifact'; readonly projectRoot: string; readonly sessionId: string; readonly artifactKey: string }
   | { readonly kind: 'check'; readonly projectRoot?: string; readonly sessionId: string; readonly runId: string; readonly eventSeq: number }
   | { readonly kind: 'diagnostics'; readonly sessionId: string }
-  | { readonly kind: 'side-session'; readonly sessionId: string; readonly originSessionId: string }
+  | { readonly kind: 'side-session'; readonly projectRoot?: string; readonly sessionId: string; readonly originSessionId: string }
   | { readonly kind: 'panel'; readonly panelId: 'panel.delivery' | 'panel.branch' | 'panel.diagnostics' | 'panel.export' | 'panel.help'; readonly projectRoot?: string; readonly sessionId?: string };
 
 export type WorkbenchTab = {
@@ -150,7 +150,11 @@ function resourceFrom(value: unknown): WorkbenchResource | undefined {
     }
     case 'git': {
       const projectRoot = absoluteRoot(value.projectRoot);
-      return projectRoot === undefined ? undefined : { kind: 'git', projectRoot };
+      const path = value.path === undefined ? undefined : relativePath(value.path);
+      const version = value.version === undefined ? undefined : hash(value.version);
+      if (projectRoot === undefined || value.path !== undefined && path === undefined
+        || value.version !== undefined && (version === undefined || path === undefined)) return undefined;
+      return { kind: 'git', projectRoot, ...(path === undefined ? {} : { path }), ...(version === undefined ? {} : { version }) };
     }
     case 'diff': {
       const projectRoot = absoluteRoot(value.projectRoot);
@@ -198,10 +202,11 @@ function resourceFrom(value: unknown): WorkbenchResource | undefined {
       return sessionId === undefined ? undefined : { kind: 'diagnostics', sessionId };
     }
     case 'side-session': {
+      const projectRoot = value.projectRoot === undefined ? undefined : absoluteRoot(value.projectRoot);
       const sessionId = identifier(value.sessionId);
       const originSessionId = identifier(value.originSessionId);
-      return sessionId === undefined || originSessionId === undefined
-        ? undefined : { kind: 'side-session', sessionId, originSessionId };
+      return sessionId === undefined || originSessionId === undefined || value.projectRoot !== undefined && projectRoot === undefined
+        ? undefined : { kind: 'side-session', ...(projectRoot === undefined ? {} : { projectRoot }), sessionId, originSessionId };
     }
     case 'panel': {
       const panelIds = ['panel.delivery', 'panel.branch', 'panel.diagnostics', 'panel.export', 'panel.help'] as const;
@@ -231,7 +236,9 @@ function resourceKey(resource: WorkbenchResource): string {
   switch (resource.kind) {
     case 'file': return JSON.stringify(['file', rootIdentity(resource.projectRoot), pathIdentity(resource.projectRoot, resource.path)]);
     case 'directory': return JSON.stringify(['directory', rootIdentity(resource.projectRoot), pathIdentity(resource.projectRoot, resource.path)]);
-    case 'git': return JSON.stringify(['git', rootIdentity(resource.projectRoot)]);
+    case 'git': return resource.path === undefined
+      ? JSON.stringify(['git', rootIdentity(resource.projectRoot)])
+      : JSON.stringify(['git', rootIdentity(resource.projectRoot), pathIdentity(resource.projectRoot, resource.path), resource.version ?? null]);
     case 'diff': return JSON.stringify(['diff', rootIdentity(resource.projectRoot), pathIdentity(resource.projectRoot, resource.path),
       resource.beforeVersion, resource.afterVersion]);
     case 'execution': return JSON.stringify(['execution', resource.sessionId, resource.runId, resource.executionId]);
@@ -241,7 +248,8 @@ function resourceKey(resource: WorkbenchResource): string {
     case 'check': return JSON.stringify(['check', resource.projectRoot === undefined ? '' : rootIdentity(resource.projectRoot),
       resource.sessionId, resource.runId, resource.eventSeq]);
     case 'diagnostics': return JSON.stringify(['diagnostics', resource.sessionId]);
-    case 'side-session': return JSON.stringify(['side-session', resource.sessionId, resource.originSessionId]);
+    case 'side-session': return JSON.stringify(['side-session', resource.projectRoot === undefined ? '' : rootIdentity(resource.projectRoot),
+      resource.sessionId, resource.originSessionId]);
     case 'panel': return JSON.stringify(['panel', resource.panelId,
       resource.projectRoot === undefined ? '' : rootIdentity(resource.projectRoot), resource.sessionId ?? '']);
   }

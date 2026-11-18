@@ -11,6 +11,7 @@ export type Frame = {
   error?: { code?: string; message?: string };
   notify?: string;
   sessionId?: string;
+  requestId?: string;
   progress?: unknown;
   event?: Record<string, unknown>;
   code?: string;

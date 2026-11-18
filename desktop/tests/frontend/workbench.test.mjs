@@ -100,6 +100,14 @@ test('Git change resources are bound to a valid project root', () => {
   assert.equal(restored.tabs.at(-1).resource.kind, 'git');
   assert.throws(() => openWorkbenchResource(DEFAULT_WORKBENCH_STATE,
     { kind: 'git', projectRoot: '../repo' }, 'Project changes'), { code: 'workbench_resource_invalid' });
+  const requestedDiff = openWorkbenchResource(DEFAULT_WORKBENCH_STATE,
+    { kind: 'git', projectRoot: 'C:/repo', path: 'src/a.ts', version: 'a'.repeat(64) }, 'Diff · src/a.ts');
+  assert.deepEqual(requestedDiff.tabs[0].resource,
+    { kind: 'git', projectRoot: 'C:/repo', path: 'src/a.ts', version: 'a'.repeat(64) });
+  assert.deepEqual(workbenchStateFrom(JSON.parse(JSON.stringify(requestedDiff))).tabs[0].resource,
+    requestedDiff.tabs[0].resource);
+  assert.throws(() => openWorkbenchResource(DEFAULT_WORKBENCH_STATE,
+    { kind: 'git', projectRoot: 'C:/repo', version: 'a'.repeat(64) }, 'Invalid diff'), { code: 'workbench_resource_invalid' });
 });
 
 test('workbench accepts filesystem roots while keeping the file target relative', () => {

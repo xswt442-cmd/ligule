@@ -32,7 +32,12 @@ export const RowView = memo(function RowView(props: RowProps) {
   const locale = useLocale();
   if (locale === 'en' && props.row.english !== undefined) props = { ...props, row: { ...props.row, ...props.row.english } };
   const View = VIEWS[props.row.kind];
-  if (props.flash !== true) return <View {...props} />;
+  const sideChatSource = props.row.seq === undefined ? {} : {
+    'data-side-chat-kind': 'event',
+    'data-side-chat-seq': String(props.row.seq),
+  };
+  if (props.flash !== true && props.row.seq === undefined) return <View {...props} />;
+  if (props.flash !== true) return <div style={{ display: 'contents' }} {...sideChatSource}><View {...props} /></div>;
   // 仅为高亮行增加包装节点，避免改变其他行的结构。
-  return <div className="row-flash"><View {...props} /></div>;
+  return <div className="row-flash" {...sideChatSource}><View {...props} /></div>;
 });

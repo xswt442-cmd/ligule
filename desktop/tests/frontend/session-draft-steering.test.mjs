@@ -37,12 +37,17 @@ const fullAccess = createPermissionContext('full-access', 'unrestricted', {
 
 test('background steering and new conversations preserve session-owned drafts', {
   skip: skipReason,
-  timeout: 40_000,
+  timeout: 60_000,
 }, async () => {
   let releaseProvider;
   let reportProviderStarted;
   const providerGate = new Promise((resolve) => { releaseProvider = resolve; });
   const providerStarted = new Promise((resolve) => { reportProviderStarted = resolve; });
+  let reportViewProviderStarted;
+  const viewProviderStarted = new Promise((resolve) => { reportViewProviderStarted = resolve; });
+  let reportDiffViewProviderStarted;
+  const diffViewProviderStarted = new Promise((resolve) => { reportDiffViewProviderStarted = resolve; });
+  const viewRequestsIssued = new Set();
   let providerRequestCount = 0;
   let releaseFileSave = () => {};
   let reportFileSaveStarted = () => {};
@@ -86,14 +91,17 @@ test('background steering and new conversations preserve session-owned drafts', 
 
     let releaseSteeringReply;
     let reportSteeringAccepted;
+    let reportSideSteeringAccepted;
     let reportBackgroundDraftSaved;
     let reportSentDraftCleared;
     const steeringReplyGate = new Promise((resolve) => { releaseSteeringReply = resolve; });
     const steeringAccepted = new Promise((resolve) => { reportSteeringAccepted = resolve; });
+    const sideSteeringAccepted = new Promise((resolve) => { reportSideSteeringAccepted = resolve; });
     const backgroundDraftSaved = new Promise((resolve) => { reportBackgroundDraftSaved = resolve; });
     const sentDraftCleared = new Promise((resolve) => { reportSentDraftCleared = resolve; });
     let sawBackgroundDraft = false;
     let sawClearedDraft = false;
+    let sideConclusionInput = '';
     const hostCall = async (method, params) => {
       if (method === 'project.file.save' && holdFileSave) {
         holdFileSave = false;
@@ -102,8 +110,12 @@ test('background steering and new conversations preserve session-owned drafts', 
       }
       const result = await client.request(method, params);
       if (method === 'run.steer' && params.sessionId === sessionId) {
-        reportSteeringAccepted();
-        await steeringReplyGate;
+        if (typeof params.input === 'string' && params.input === sideConclusionInput) {
+          reportSideSteeringAccepted();
+        } else {
+          reportSteeringAccepted();
+          await steeringReplyGate;
+        }
       }
       if (method === 'prefs.write') {
         const saved = JSON.parse(params.json);
@@ -133,6 +145,10 @@ let deliver;
 const transport = {
   send(raw) {
     const request = JSON.parse(raw);
+    if (typeof request.method !== 'string') {
+      window.hostReply(request.id, request.result);
+      return;
+    }
     window.hostCall(request.method, request.params).then(
       result => deliver(JSON.stringify({ id: request.id, result })),
       error => deliver(JSON.stringify({ id: request.id, error: { code: error?.code ?? error?.message ?? 'host_request_failed' } })),
@@ -143,6 +159,7 @@ const transport = {
   defaultWorkspace: async () => window.projectRoot(),
 };
 createRoot(document.getElementById('root')).render(<App transport={transport} />);
+window.pushHostFrame = frame => deliver(JSON.stringify(frame));
 `;
     const html = '<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body><div id="root"></div><script type="module" src="/__session-draft-steering-entry.tsx"></script></body></html>';
     const vite = await createServer({
@@ -177,9 +194,16 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
       page.setDefaultNavigationTimeout(12_000);
       const errors = [];
       page.on('pageerror', (error) => errors.push(error.message));
+      client.onNotification((frame) => {
+        void page.evaluate(message => window.pushHostFrame(message), frame).catch(() => undefined);
+      });
       await page.exposeBinding('hostCall', (_source, method, params) => hostCall(method, params));
+      await page.exposeBinding('hostReply', (_source, id, result) => client.reply(id, result));
       await page.exposeBinding('projectRoot', () => projectDirectory);
       await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/__session-draft-steering`, { waitUntil: 'domcontentloaded' });
+      client.onRequest((message) => {
+        void page.evaluate(frame => window.pushHostFrame(frame), message).catch(() => undefined);
+      });
       const input = page.locator('.composer-input');
       await page.getByRole('button', { name: 'SESSION_A' }).waitFor();
       await page.waitForFunction(() => {
@@ -194,7 +218,7 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
       const fileSearch = page.getByRole('searchbox', { name: 'Search file names' });
       await page.getByRole('button', { name: 'src', exact: true }).click();
       await page.getByRole('button', { name: 'app.ts', exact: true }).click();
-      await page.locator('[data-file-preview]').getByText('export const answer = 42;').waitFor();
+      await page.locator('.project-file-source').getByText('export const answer = 42;').waitFor();
       assert.ok(requests.some(request => request.method === 'project.files.list' && request.params.path === 'src'),
         'the tree loads nested folders only when expanded');
       await page.getByRole('button', { name: 'Close app.ts' }).click();
@@ -389,14 +413,82 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
       await page.getByRole('button', { name: 'Hide workbench' }).click();
       await page.setViewportSize({ width: 1280, height: 720 });
 
-      await input.fill('task in A');
-      await page.getByRole('button', { name: 'Send' }).click();
+      void client.request('run.start', { sessionId, input: 'task in A' }).catch(() => undefined);
       await within(providerStarted, 'initial provider request');
-      const status = await client.request('status.get', { sessionId });
-      runningRunId = status.activeRunId;
+      const parentStatus = await client.request('status.get', { sessionId });
+      runningRunId = parentStatus.activeRunId;
       assert.equal(typeof runningRunId, 'string');
+      await page.getByRole('button', { name: 'SESSION_B' }).click();
+      await page.getByRole('button', { name: 'SESSION_A' }).click();
+      await page.getByText('task in A', { exact: true }).waitFor();
+      await page.evaluate((selected) => {
+        const owner = [...document.querySelectorAll('[data-side-chat-kind="event"]')]
+          .find(element => element.textContent?.includes(selected));
+        if (owner === undefined) throw new Error('selected_source_event_not_rendered');
+        const walker = document.createTreeWalker(owner, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode()) !== null) {
+          const offset = node.textContent?.indexOf(selected) ?? -1;
+          if (offset < 0) continue;
+          const range = document.createRange();
+          range.setStart(node, offset);
+          range.setEnd(node, offset + selected.length);
+          const selection = window.getSelection();
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+          return;
+        }
+        throw new Error('selected_source_text_not_found');
+      }, 'task in A');
+      await page.getByRole('button', { name: 'Ask about selection' }).click();
+      const sideDialog = page.getByRole('dialog', { name: 'Side question' });
+      await sideDialog.getByRole('textbox').fill('Check the selected task context.');
+      const providerCallsBeforeSideCreate = providerRequests.length;
+      await sideDialog.getByRole('button', { name: 'Create side chat' }).click();
+      const sidePanel = page.getByRole('region', { name: 'Side chat source' });
+      await sidePanel.waitFor();
+      const linkedSource = await client.request('session.read', { sessionId, fullResults: true });
+      const sideLink = linkedSource.events.find(event => event.kind === 'sideSessionStarted' && event.sourceRunId === runningRunId);
+      assert.ok(sideLink?.sideSessionId, 'the Host records a structured link to the active source Run');
+      const sideSessionId = sideLink.sideSessionId;
+      assert.equal(providerRequests.length, providerCallsBeforeSideCreate, 'selecting context and creating a side Session do not call the Provider');
+      const sideStatus = await client.request('status.get', { sessionId: sideSessionId });
+      assert.equal(sideStatus.permission.profile, 'read-only');
+      assert.equal(sideStatus.permission.network, 'disabled');
+      assert.equal(sideStatus.activeRunId, null);
+      assert.equal((await client.request('status.get', { sessionId })).activeRunId, runningRunId,
+        'the source Run remains active while the side Session is created');
+      assert.match(await input.inputValue(), /task in A/u);
+      assert.match(await input.inputValue(), /Check the selected task context/u);
+
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      const sideAnswer = sidePanel.locator('.side-session-answer textarea');
+      await sidePanel.getByRole('button', { name: 'Refresh', exact: true }).click();
+      await page.waitForFunction(() => document.querySelector('.side-session-answer textarea')?.value.startsWith('Local response:') === true);
+      assert.equal(providerRequests.length, providerCallsBeforeSideCreate + 1,
+        'the side Agent request starts only after the user sends the prepared question');
+      const sideRecord = await client.request('session.read', { sessionId: sideSessionId, fullResults: true });
+      sideConclusionInput = [...sideRecord.events].reverse().find(event => event.kind === 'assistant')?.text ?? '';
+      assert.notEqual(sideConclusionInput, '', 'the side Agent produced a user-reviewable answer');
+      assert.equal(await sideAnswer.inputValue(), sideConclusionInput.slice(0, 8_192), 'the side panel reads its saved answer from the Host Session');
+      await sidePanel.getByRole('button', { name: 'Send to original Run' }).waitFor();
+      await sidePanel.getByRole('button', { name: 'Send to original Run' }).click();
+      await within(sideSteeringAccepted, 'side conclusion steering acceptance');
+      assert.ok(requests.some(request => request.method === 'run.steer' && request.params.sessionId === sessionId
+        && request.params.runId === runningRunId && request.params.input === sideConclusionInput),
+        'sending a side conclusion uses the original Session and Run through normal steering');
+      await page.getByRole('button', { name: 'Open source Session' }).click();
+      await page.waitForFunction(() => {
+        const field = document.querySelector('.composer-input');
+        return field instanceof HTMLTextAreaElement && !field.readOnly && !field.disabled;
+      });
+      assert.equal(await input.inputValue(), '', 'returning from a side chat preserves the source composer draft');
 
       await input.fill('steer sent from A');
+      const reopenedSourceStatus = await client.request('status.get', { sessionId });
+      assert.equal(reopenedSourceStatus.running, true, 'opening the source Session restores its active Run state');
+      assert.equal(reopenedSourceStatus.activeRunId, runningRunId, 'the restored active Run remains bound to its original identity');
+      await page.getByRole('button', { name: 'Active run' }).waitFor();
       await page.getByRole('button', { name: 'Active run' }).click();
       await within(steeringAccepted, 'steering acceptance');
       await page.getByRole('button', { name: 'SESSION_B' }).click();
@@ -410,6 +502,11 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
       releaseSteeringReply();
       try { await within(sentDraftCleared, 'sent draft persistence'); }
       catch (error) { throw new Error(`${error instanceof Error ? error.message : String(error)}; writes=${JSON.stringify(preferenceWrites)}`); }
+      releaseProvider();
+      await waitFor(async () => {
+        const state = await client.request('status.get', { sessionId });
+        return state.running === false && state.activeRunId === null;
+      }, { within: 8_000 });
       assert.equal(await input.inputValue(), 'draft from B', 'the response for A does not change B');
       await page.getByRole('button', { name: 'SESSION_A' }).click();
       await page.waitForFunction(() => {
@@ -476,19 +573,79 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
         return field instanceof HTMLTextAreaElement && !field.readOnly;
       });
       assert.equal(await input.inputValue(), 'A draft survives new sessions', 'restoring $new does not replace A');
+
+      const sourceDraftBeforeStaleFollowup = await input.inputValue();
+      await page.getByRole('button', { name: 'Open side Session' }).click();
+      await page.getByRole('button', { name: 'Send to original Run' }).click();
+      await page.getByRole('alert').filter({ hasText: 'side_chat_origin_run_stale' }).waitFor();
+      const providerRequestsBeforeFollowup = providerRequests.length;
+      await page.getByRole('button', { name: 'Prepare source follow-up' }).click();
+      const expectedSideFollowupDraft = `${sourceDraftBeforeStaleFollowup}\n\n${sideConclusionInput}`;
+      await page.waitForFunction((expected) => document.querySelector('.composer-input')?.value === expected,
+        expectedSideFollowupDraft);
+      await page.waitForTimeout(100);
+      assert.equal(providerRequests.length, providerRequestsBeforeFollowup,
+        'preparing a follow-up does not send it to the Provider');
+      assert.equal(await input.inputValue(), expectedSideFollowupDraft,
+        'a stale Run result is added after the existing source draft for review');
+
+      const draftBeforeViewRequest = await input.inputValue();
+      const viewRun = client.request('run.start', { sessionId, input: 'request a view of src/app.ts' });
+      await within(viewProviderStarted, 'model view request Provider call');
+      await page.getByRole('button', { name: 'Allow once', exact: true }).click();
+      await input.focus();
+      const modelViewNotice = page.getByRole('status').filter({ hasText: 'The model requests that you open a resource' });
+      await modelViewNotice.waitFor();
+      assert.match(await modelViewNotice.innerText(), /File · src\/app\.ts/u);
+      assert.equal(await input.inputValue(), draftBeforeViewRequest, 'a model view request preserves the current composer draft');
+      assert.equal(await input.evaluate(field => document.activeElement === field), true,
+        'receiving a model view request does not move input focus');
+      assert.equal(await page.locator('.project-file-view').count(), 0,
+        'the Host request does not open a file before the user chooses it');
+      await within(viewRun, 'model view Run completion');
+      const viewResult = providerRequests.at(-1)?.messages.find(message => message.role === 'tool')?.content;
+      assert.match(String(viewResult), /"status":"sent"/u);
+      assert.match(String(viewResult), /"opened":false/u);
+      assert.match(String(viewResult), /"read":false/u);
+      await modelViewNotice.getByRole('button', { name: 'Open requested resource' }).click();
+      await page.locator('.project-file-source').getByText('export const answer = 7;').waitFor();
+      assert.equal(await input.inputValue(), draftBeforeViewRequest, 'opening the resource keeps the composer draft');
+      assert.equal(providerRequests.at(-1)?.messages.some(message => typeof message.content === 'string'
+        && message.content.includes('export const answer = 7;')), false,
+      'the display request returns no file contents to the model');
+      const openedViewRecord = await client.request('session.read', { sessionId, fullResults: true });
+      assert.equal(openedViewRecord.events.filter(event => event.kind === 'viewRequest').length, 1);
+      assert.equal(openedViewRecord.events.filter(event => event.kind === 'viewRequestDelivered').length, 1);
+      assert.equal(openedViewRecord.events.filter(event => event.kind === 'viewRequestOpened').length, 1);
+
+      const diffViewRun = client.request('run.start', { sessionId, input: 'request a diff view of src/app.ts' });
+      await within(diffViewProviderStarted, 'model diff view request Provider call');
+      await page.getByRole('button', { name: 'Allow once', exact: true }).click();
+      const diffViewNotice = page.getByRole('status').filter({ hasText: 'The model requests that you open a resource' });
+      await diffViewNotice.waitFor();
+      assert.equal(await page.locator('.project-file-view').count(), 1,
+        'a diff request leaves the resource the user is reading in place until they choose to switch');
+      await within(diffViewRun, 'model diff view Run completion');
+      await writeFile(join(projectDirectory, 'src', 'app.ts'), '\uFEFFexport const answer = 8;\r\n');
+      await diffViewNotice.getByRole('button', { name: 'Open requested resource' }).click();
+      await page.getByRole('alert').filter({ hasText: 'project_git_diff_stale' }).waitFor();
+      assert.equal(providerRequests.at(-1)?.messages.some(message => typeof message.content === 'string'
+        && message.content.includes('export const answer = 8;')), false,
+      'opening a diff request never sends the diff text back to the model');
       assert.deepEqual(errors, []);
     } finally {
       releaseProvider();
       releaseSteeringReply?.();
       releaseFileSave();
-      if (runningRunId !== undefined) await client.request('run.wait', { sessionId, runId: runningRunId }).catch(() => undefined);
       await context?.close();
+      client.onNotification(() => {});
+      client.onRequest(() => {});
       await vite.close();
     }
   }, {
     beforeResponse: async () => {
       providerRequestCount += 1;
-      if (providerRequestCount === 1) {
+      if (providerRequestCount === 1 || providerRequestCount >= 3) {
         reportProviderStarted();
         await providerGate;
       }
@@ -496,5 +653,20 @@ createRoot(document.getElementById('root')).render(<App transport={transport} />
     permission: fullAccess,
     permissionControl: true,
     testDirectory,
+    providerReply: async body => {
+      const requested = [...body.messages].reverse().find(message => message.role === 'user'
+        && typeof message.content === 'string')?.content;
+      if (requested === 'request a view of src/app.ts' && !viewRequestsIssued.has(requested)) {
+        viewRequestsIssued.add(requested);
+        reportViewProviderStarted();
+        return { toolCalls: [{ tool: 'open_resource', args: { kind: 'file', path: 'src/app.ts' } }] };
+      }
+      if (requested === 'request a diff view of src/app.ts' && !viewRequestsIssued.has(requested)) {
+        viewRequestsIssued.add(requested);
+        reportDiffViewProviderStarted();
+        return { toolCalls: [{ tool: 'open_resource', args: { kind: 'diff', path: 'src/app.ts' } }] };
+      }
+      return undefined;
+    },
   });
 });
