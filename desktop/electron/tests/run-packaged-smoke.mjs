@@ -1205,10 +1205,7 @@ async function runP15NativeWorkbench() {
 
     await page.locator('[data-side-chat-kind="event"]').filter({ hasText: sourceInput }).last()
       .selectText({ timeout: 5_000 });
-    p15NativeCases.selectionDiagnostics = await page.evaluate(() => ({
-      text: window.getSelection()?.toString() ?? '',
-      actionCount: document.querySelectorAll('.side-chat-selection-action').length,
-    }));
+    p15NativeCases.selectionText = await page.evaluate(() => window.getSelection()?.toString() ?? '');
     await page.getByRole('button', { name: /Ask about selection|侧面询问/u }).click({ timeout: 5_000 });
     const sideDialog = page.locator('.side-chat-dialog');
     await sideDialog.waitFor({ state: 'visible', timeout: 5_000 });
