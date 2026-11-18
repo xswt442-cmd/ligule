@@ -17,6 +17,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 **修复**
 
 - 慢速冷启动期间，Host 偏好设置读取与写入使用独立的等待期限，避免读取在 Host 完成初始化前提前失败。
+- Linux AppImage/deb 明确包含 MIT 许可证，并设置匹配 `ligule.desktop` 的窗口标识，保证启动器条目可识别运行中的窗口。
 
 ### English
 
@@ -29,6 +30,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 **Fixed**
 
 - Host preference reads now have a separate startup allowance from writes, preventing a slow cold start from failing before the Host finishes initializing.
+- Linux AppImage/deb packages include the MIT license and use a window identity matching `ligule.desktop`, so desktop launchers can associate the running window with its entry.
 
 ## [0.1.2] - 2026-11-05
 

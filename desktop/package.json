@@ -4,6 +4,9 @@
 "version": "0.1.2",
   "description": "Ligule Electron desktop application",
   "homepage": "https://github.com/xswt442-cmd/ligule#readme",
+  "author": "xswt442-cmd <xswt442@gmail.com>",
+  "license": "MIT",
+  "desktopName": "ligule",
   "main": "electron/dist/main.js",
   "files": ["package.json"],
   "scripts": {

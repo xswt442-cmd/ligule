@@ -60,6 +60,7 @@ module.exports = {
     '!node_modules/**',
   ],
   extraResources: [
+    { from: '../LICENSE', to: 'LICENSE' },
     { from: 'electron/dist/host-entry.js', to: 'host-entry.js' },
     { from: 'vendor/node', to: 'node' },
     { from: 'vendor/app', to: 'app', filter: ['package.json'] },
@@ -75,6 +76,7 @@ module.exports = {
   nsis: { oneClick: false, allowToChangeInstallationDirectory: true },
   linux: {
     executableName: 'ligule',
+    syncDesktopName: true,
     maintainer: 'xswt442-cmd <xswt442@gmail.com>',
     target: [
       { target: 'AppImage', arch: ['x64'] },
