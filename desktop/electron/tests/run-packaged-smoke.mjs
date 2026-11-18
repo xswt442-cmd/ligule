@@ -1359,6 +1359,7 @@ async function runP15NativeWorkbench() {
       state: 'completed',
       runId: deliveryState.split(' · ')[0] ?? '',
     };
+    await captureEvidence('packaged-smoke.png');
 
     if (process.platform === 'win32') {
       const viewportBeforeResize = await page.evaluate(() => {
@@ -1773,7 +1774,7 @@ async function runChecks() {
       'P15 原生侧聊与资源展示只使用本地确定性 Provider；未执行无响应模型请求的 Host 重启场景');
     await check('P15 native side chat and model resource view', runP15NativeWorkbench);
     await check('capture packaged window evidence', async () => {
-      await captureEvidence();
+      if (!existsSync(join(evidenceRoot, 'packaged-smoke.png'))) throw new Error('p15_native_window_evidence_missing');
       return '保存实际 packaged BrowserWindow 截图';
     });
     return;
@@ -2014,7 +2015,11 @@ async function runChecks() {
   }
 
   await check('capture packaged window evidence', async () => {
-    await captureEvidence();
+    if (p15NativeWorkbench) {
+      if (!existsSync(join(evidenceRoot, 'packaged-smoke.png'))) throw new Error('p15_native_window_evidence_missing');
+    } else {
+      await captureEvidence();
+    }
     return '保存实际 packaged BrowserWindow 截图';
   });
 }
