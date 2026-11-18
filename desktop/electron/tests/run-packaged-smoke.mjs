@@ -2,7 +2,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { createWriteStream, existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { finished } from 'node:stream/promises';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -590,7 +590,7 @@ function descendantOf(processList, childPid, ancestorPid) {
 }
 
 async function hostProcessFor(mainPid) {
-  const expectedNode = resolve(hostNode);
+  const expectedNode = process.platform === 'win32' ? resolve(hostNode) : await realpath(hostNode);
   return waitUntil(async () => {
     const processes = await processSnapshot();
     return processes.find(item => {
