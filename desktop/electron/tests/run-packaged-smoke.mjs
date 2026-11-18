@@ -1252,6 +1252,8 @@ async function runP15NativeWorkbench() {
     await page.locator('.approval-actions button[data-tone="allow"]').click();
     const viewNotice = page.locator('.model-view-request');
     await viewNotice.waitFor({ state: 'visible', timeout: 20_000 });
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.model-view-request button')?.disabled === false`),
+      10_000, 'p15_native_view_request_ready');
     const beforeOpen = await page.evaluate(() => ({
       openedAutomatically: document.querySelector('.project-file-view') !== null,
       ready: document.querySelector('.model-view-request button')?.disabled === false,
