@@ -1305,6 +1305,61 @@ async function runP15NativeWorkbench() {
       providerResult: { status: 'sent', opened: false, read: false, includedFile: false },
       providerRequests: 3,
     };
+
+    const filePermission = await setInitialPermission('workspace-write', 'policy', sourceSessionId);
+    const fileAccess = await hostCall('status.get', { sessionId: sourceSessionId });
+    if (fileAccess.result?.permission?.profile !== 'workspace-write'
+      || fileAccess.result.permission.network !== 'policy') throw new Error('p15_native_file_save_permission_invalid');
+    const savedText = 'P15_NATIVE_FILE_SAVE: Host recorded this Desktop edit.\n';
+    await page.getByRole('button', { name: /Edit file|编辑文件/u }).click();
+    await page.locator('.project-code-editor .cm-content').fill(savedText);
+    await page.getByRole('button', { name: /Save file|保存文件/u }).click();
+    await page.locator('.project-file-save-status').filter({ hasText: /Saved to disk|已保存到磁盘/u })
+      .waitFor({ state: 'visible', timeout: 15_000 });
+    const savedFile = await readFile(join(workspace, 'src', 'p15-view.txt'), 'utf8');
+    if (savedFile !== savedText) throw new Error('p15_native_file_save_contents_invalid');
+    const savedSession = await hostCall('session.read', { sessionId: sourceSessionId, fullResults: true });
+    const savedChange = savedSession.result?.events?.find(event => event.kind === 'workspaceFileChange'
+      && event.source === 'desktop' && Array.isArray(event.fileChanges)
+      && event.fileChanges.some(change => change.path === 'src/p15-view.txt' && change.operation === 'write'
+        && change.outcome === 'written'));
+    if (savedChange === undefined) throw new Error('p15_native_file_save_change_record_missing');
+    p15NativeCases.fileSave = { path: 'src/p15-view.txt', bytes: Buffer.byteLength(savedText), source: 'desktop', outcome: 'written',
+      permissionScope: filePermission };
+    await captureEvidence('p15-native-file-saved.png');
+
+    const workbenchTabs = page.locator('.workbench-tablist [role="tab"]');
+    while (await workbenchTabs.count() > 0) {
+      const count = await workbenchTabs.count();
+      await page.locator('.workbench-tab-close').click();
+      await page.waitForFunction(expected => document.querySelectorAll('.workbench-tablist [role="tab"]').length < expected,
+        count, { timeout: 5_000 });
+    }
+    const workbenchToggle = page.locator('button[aria-label="工作台"], button[aria-label="Workbench"]');
+    if (await workbenchToggle.getAttribute('aria-expanded') !== 'true') await workbenchToggle.click();
+    const workbenchHome = page.locator('.workbench-home-actions');
+    await workbenchHome.waitFor({ state: 'visible', timeout: 10_000 });
+    await workbenchHome.getByRole('button', { name: /Deliveries|交付/u }).click();
+    const deliveryPanel = page.locator('.delivery-panel');
+    await deliveryPanel.waitFor({ state: 'visible', timeout: 15_000 });
+    const completedRun = deliveryPanel.locator('.delivery-runs li').filter({ hasText: /P15_NATIVE_VIEW/u }).last();
+    await completedRun.waitFor({ state: 'visible', timeout: 15_000 });
+    await completedRun.locator('small').filter({ hasText: /Completed|已完成/u })
+      .waitFor({ state: 'visible', timeout: 15_000 });
+    await completedRun.getByRole('button').first().click();
+    const deliveryDetail = deliveryPanel.locator('.delivery-run-header');
+    await deliveryDetail.waitFor({ state: 'visible', timeout: 10_000 });
+    const deliveryTask = await deliveryDetail.locator('strong').textContent() ?? '';
+    const deliveryState = await deliveryDetail.locator('small').textContent() ?? '';
+    if (!deliveryTask.includes('P15_NATIVE_VIEW') || !/Completed|已完成/u.test(deliveryState)) {
+      throw new Error('p15_native_delivery_run_details_invalid');
+    }
+    p15NativeCases.deliveryReview = {
+      task: 'P15_NATIVE_VIEW',
+      state: 'completed',
+      runId: deliveryState.split(' · ')[0] ?? '',
+    };
+
     const viewportBeforeResize = await page.evaluate(() => {
       window.__p15WindowResizeEvents = [];
       window.addEventListener('resize', () => window.__p15WindowResizeEvents.push({ width: window.innerWidth, height: window.innerHeight }));
