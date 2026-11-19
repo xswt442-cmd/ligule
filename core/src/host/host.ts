@@ -46,7 +46,7 @@ import { POLICY_SEMANTICS, createDecisionChain, isPolicyMode, isPolicyRule, poli
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
-import { createRunAcceptance, findRunReceipt, isRunAcceptance, publishRunResult, readRunResult, runPayloadDigest, runReceipts, runResultPage, type RunAcceptance } from '../session/run.js';
+import { createRunAcceptance, findRunReceipt, isRunAcceptance, publishRunResult, readRunResult, runPayloadDigest, runReceipts, runResultPage, type DurableRunReceipt, type RunAcceptance } from '../session/run.js';
 import type { SessionEvent, SessionHeader } from '../session/format.js';
 import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDirectory, workspaceDataDirectory } from '../session/list.js';
 import { adoptForSessionDirectory } from '../session/adopt.js';
@@ -3545,8 +3545,42 @@ export function createHost({
     };
   }
 
-  const pendingSubmissions = new Map<string, { scope: string; key?: string; digest: string;
-    receipt: Promise<import('../session/run.js').DurableRunReceipt> }>();
+  type PendingSubmission = { scope: string; key?: string; digest: string; receipt: Promise<DurableRunReceipt> };
+  type DeferredReceipt = { promise: Promise<DurableRunReceipt>;
+    resolve: (value: DurableRunReceipt | PromiseLike<DurableRunReceipt>) => void; reject: (reason?: unknown) => void };
+  const pendingSubmissions = new Map<string, PendingSubmission>();
+
+  // 一次模型 Run 的提交只在这里登记：同一会话同时挂一个 pending；重复请求按 requestKey 与 payload digest 复用。
+  function beginSubmission(sessionId: string, scope: string, key: string | undefined, digest: string):
+    { readonly kind: 'pending'; readonly pending: PendingSubmission } |
+    { readonly kind: 'started'; readonly accepted: DeferredReceipt; readonly cleanup: () => void } {
+    const pending = pendingSubmissions.get(sessionId);
+    if (pending !== undefined) return { kind: 'pending', pending };
+    const accepted: DeferredReceipt = deferred<DurableRunReceipt>();
+    void accepted.promise.catch(() => undefined);
+    const current: PendingSubmission = { scope, key, digest, receipt: accepted.promise };
+    pendingSubmissions.set(sessionId, current);
+    return {
+      kind: 'started', accepted,
+      cleanup: () => { if (pendingSubmissions.get(sessionId) === current) pendingSubmissions.delete(sessionId); },
+    };
+  }
+
+  function requireMatchingSubmission(pending: PendingSubmission, scope: string, key: string | undefined, digest: string): void {
+    if (key === undefined || pending.key !== key || pending.scope !== scope) throw new KernelError('run_already_running');
+    if (pending.digest !== digest) throw new KernelError('run_request_conflict');
+  }
+
+  // 已落盘的同一 requestKey 提交只有在 payload 完全一致时才复用；不一致视为客户端冲突。
+  function replaySubmission(events: readonly SessionEvent[], sessionId: string, scope: string,
+    key: string | undefined, digest: string): DurableRunReceipt | undefined {
+    if (key === undefined) return undefined;
+    const previous = findRunReceipt(events, sessionId, scope, { requestKey: key });
+    if (previous === undefined) return undefined;
+    const user = events.find(event => event.kind === 'user' && event.seq === previous.userSeq);
+    if (!user || !isRunAcceptance(user.run) || user.run.payloadDigest !== digest) throw new KernelError('run_request_conflict');
+    return previous;
+  }
 
   async function executeRun(state: HostSessionState, input: string, origin: 'human' | 'controller',
     delegation: DelegationSpec | undefined, acceptance: RunAcceptance, connection: HostClientConnection,
@@ -4375,37 +4409,23 @@ export function createHost({
             if (grant !== undefined) assertGrantSessionScope(grant, state);
             const requestKey = message.params.requestKey;
             const digest = runPayloadDigest(input, message.params.delegation);
-            const waitForOriginal = async (receipt: import('../session/run.js').DurableRunReceipt) => {
+            const waitForOriginal = async (receipt: DurableRunReceipt) => {
               if (state.activeRunId === receipt.runId && state.operation !== undefined) return await state.operation;
               if (receipt.state === 'accepted' || receipt.state === 'interrupted') throw new KernelError('run_not_active');
               return await host.handle({ method: 'run.wait', params: {
                 sessionId, runId: receipt.runId, origin: origin ?? 'human',
               } }, connection);
             };
-            const pending = pendingSubmissions.get(sessionId);
-            if (pending !== undefined) {
-              if (requestKey === undefined || pending.key !== requestKey || pending.scope !== scope) {
-                throw new KernelError('run_already_running');
-              }
-              if (pending.digest !== digest) throw new KernelError('run_request_conflict');
-              return { wait: (async () => await waitForOriginal(await pending.receipt))() };
+            const begun = beginSubmission(sessionId, scope, requestKey, digest);
+            if (begun.kind === 'pending') {
+              requireMatchingSubmission(begun.pending, scope, requestKey, digest);
+              return { wait: (async () => await waitForOriginal(await begun.pending.receipt))() };
             }
-            const accepted = deferred<import('../session/run.js').DurableRunReceipt>();
-            void accepted.promise.catch(() => undefined);
-            const current = { scope, key: requestKey, digest, receipt: accepted.promise };
-            pendingSubmissions.set(sessionId, current);
-            const cleanupSubmission = () => {
-              if (pendingSubmissions.get(sessionId) === current) pendingSubmissions.delete(sessionId);
-            };
+            const { accepted, cleanup: cleanupSubmission } = begun;
             try {
               if (requestKey !== undefined) {
-                const events = await state.session.read();
-                const existing = findRunReceipt(events, sessionId, scope, { requestKey });
+                const existing = replaySubmission(await state.session.read(), sessionId, scope, requestKey, digest);
                 if (existing !== undefined) {
-                  const user = events.find(event => event.kind === 'user' && event.seq === existing.userSeq);
-                  if (!user || !isRunAcceptance(user.run) || user.run.payloadDigest !== digest) {
-                    throw new KernelError('run_request_conflict');
-                  }
                   accepted.resolve(existing);
                   return { wait: waitForOriginal(existing), cleanup: cleanupSubmission };
                 }
@@ -4652,32 +4672,20 @@ export function createHost({
             if (grant !== undefined) assertGrantSessionScope(grant, state);
             const key = message.params.requestKey;
             const digest = runPayloadDigest(input, message.params.delegation);
-            const pending = pendingSubmissions.get(sessionId);
-            if (pending !== undefined) {
-              if (key === undefined || pending.key !== key || pending.scope !== scope) throw new KernelError('run_already_running');
-              if (pending.digest !== digest) throw new KernelError('run_request_conflict');
+            const begun = beginSubmission(sessionId, scope, key, digest);
+            if (begun.kind === 'pending') {
+              requireMatchingSubmission(begun.pending, scope, key, digest);
               return {
-                wait: pending.receipt.then((receipt) => ({ ...runReceiptView(receipt, state.activeRunId === receipt.runId), reused: true })),
+                wait: begun.pending.receipt.then((receipt) => ({ ...runReceiptView(receipt, state.activeRunId === receipt.runId), reused: true })),
               };
             }
-            const accepted = deferred<import('../session/run.js').DurableRunReceipt>();
-            void accepted.promise.catch(() => undefined);
-            const current = { scope, key, digest, receipt: accepted.promise };
-            pendingSubmissions.set(sessionId, current);
-            const cleanupSubmission = () => {
-              if (pendingSubmissions.get(sessionId) === current) pendingSubmissions.delete(sessionId);
-            };
+            const { accepted, cleanup: cleanupSubmission } = begun;
             try {
-              const events = await state.session.read();
-              if (key !== undefined) {
-                const previous = findRunReceipt(events, sessionId, scope, { requestKey: key });
-                if (previous !== undefined) {
-                  const user = events.find(event => event.kind === 'user' && event.seq === previous.userSeq);
-                  if (!user || !isRunAcceptance(user.run) || user.run.payloadDigest !== digest) throw new KernelError('run_request_conflict');
-                  accepted.resolve(previous);
-                  const live = state.activeRunId === previous.runId;
-                  return { wait: Promise.resolve({ ...runReceiptView(previous, live), reused: true }), cleanup: cleanupSubmission };
-                }
+              const previous = replaySubmission(await state.session.read(), sessionId, scope, key, digest);
+              if (previous !== undefined) {
+                accepted.resolve(previous);
+                const live = state.activeRunId === previous.runId;
+                return { wait: Promise.resolve({ ...runReceiptView(previous, live), reused: true }), cleanup: cleanupSubmission };
               }
               runContextOf(state, message.params.delegation);
               const run = createRunAcceptance(sessionId, input, message.params.delegation, scope, key,
