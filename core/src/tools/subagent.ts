@@ -6,7 +6,7 @@
 // 该工具通过插件注册，不属于 Kernel 内置能力。每个父会话最多同时运行三个派生任务。
 import { randomUUID } from 'node:crypto';
 import { resolveSubagentSpec, type AgentPresetPreview, type PreparedSubagentRun, type SubagentCallContext, type SubagentProvider, type SubagentRunArguments } from './subagent-spec.js';
-import { opendir, readdir } from 'node:fs/promises';
+import { opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import type { ExecController } from '../capability/exec.js';
@@ -16,18 +16,18 @@ import type { FileWriteQueue } from '../kernel/file-write-queue.js';
 import { createLoop, type LoopLimits, type LoopProgressEvent } from '../kernel/loop.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import type { SessionLog } from '../session/session.js';
-import { isRunAcceptance, publishRunResult, readRunResult, runReceipts } from '../session/run.js';
+import { publishRunResult } from '../session/run.js';
 import { runEvidenceReferences } from '../session/run-evidence.js';
-import { readSessionRecord } from '../session/record.js';
 import { checkedCheckDeclaration, checkedCheckEvent } from '../session/checks.js';
 import { checkedFileChangeFact } from '../session/file-changes.js';
 import type { SessionEvent } from '../session/format.js';
 import { beginChildRun, childRunDelegation } from './subagent-run.js';
+import { readPersistedSubrun, referenceOf as subrunReferenceOf, SubrunRegistry, viewOf as viewSubrun, type SubrunRecord } from './subrun-store.js';
 import type { RunSteeringInbox } from '../kernel/run-steering.js';
 import { currentKernelExecutionContext } from '../kernel/execution-context.js';
 import type { RequestDiagnostic } from '../kernel/request-diagnostics.js';
-import { workspaceIdentity } from '../kernel/workspace.js';
 import { isTrusted } from '../kernel/workspace-trust.js';
+import { workspaceIdentity } from '../kernel/workspace.js';
 import { completeExtensionRun, prepareExtensionRequest, type ExtensionHookRegistry } from '../kernel/extensions.js';
 import {
   assertDelegationCompletion, completedRunResult, DELEGATION_RESULT_TOOL, failedRunResult,
@@ -61,7 +61,6 @@ import {
 
 const DEFAULT_CONCURRENT_SUBAGENTS = 3;
 const MAX_CONCURRENT_SUBAGENTS = 8;
-const MAX_RETAINED_SUBRUNS = 64;
 
 function stableErrorCode(error: unknown): string {
   const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
@@ -158,27 +157,6 @@ export interface SubagentRuntime {
   interaction(runId: string, type: 'approval' | 'question', waiting: boolean): void;
 }
 
-type SubrunRecord = {
-  readonly subrunId: string;
-  readonly parentRunId?: string;
-  readonly parentCallId?: string;
-  readonly controller: AbortController;
-  state: SubrunStatus['state'];
-  sessionId?: string;
-  runId?: string;
-  path?: string;
-  inbox?: RunSteeringInbox;
-  phase: string | null;
-  pendingApprovals: number;
-  pendingQuestions: number;
-  errorCode?: string;
-  result?: Record<string, unknown>;
-  work?: Promise<Record<string, unknown>>;
-  startedAt: number;
-  updatedAt: number;
-  completedAt?: number;
-};
-
 interface ChildRunStarted extends SubrunReference {
   readonly path: string;
   readonly inbox: RunSteeringInbox;
@@ -261,11 +239,23 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
     throw new KernelError('subagent_concurrency_invalid', { detail: `loop.maxConcurrentSubagents must be an integer between 1 and ${MAX_CONCURRENT_SUBAGENTS}` });
   }
   const maxConcurrentSubagents = concurrency as number;
-  let counter = 0;
-  let counterInitialization: Promise<void> | undefined;
   let closed = false;
   let active = 0;
-  const subruns = new Map<string, SubrunRecord>();
+  const registry = new SubrunRegistry(deps.directory, deps.sessionId);
+  const configRoot = typeof deps.config.workspaceRoot === 'string' ? deps.config.workspaceRoot
+    : typeof deps.config.boundary === 'string' ? deps.config.boundary : process.cwd();
+  const viewOf = (record: SubrunRecord): SubrunStatus =>
+    viewSubrun(record, deps.taskBudget?.()?.snapshot() ?? null);
+  const persistedChild = async (subrunId: string, parentRunId: string) => await readPersistedSubrun({
+    directory: deps.directory,
+    parentSessionId: deps.sessionId,
+    parentSession: deps.parentSession,
+    configRoot,
+    subrunId,
+    parentRunId,
+  });
+  const persistedStatus = async (subrunId: string, parentRunId: string) =>
+    (await persistedChild(subrunId, parentRunId)).status;
   const closedParents = new Set<string>();
   let parentKernel: { manifest(): readonly { readonly name: string }[]; selectable(): readonly string[] } | undefined;
   let executeSubagent: ((args: SubagentRunArguments, context: SubagentCallContext, lifecycle?: ChildRunLifecycle) => Promise<Record<string, unknown>>) | undefined;
@@ -300,78 +290,6 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
     return prepared.preview;
   }
 
-  async function nextSessionId(): Promise<string> {
-    if (counterInitialization === undefined) {
-      counterInitialization = (async () => {
-        let entries;
-        try { entries = await readdir(deps.directory, { withFileTypes: true }); }
-        catch (cause) { throw new KernelError('subagent_session_directory_read_failed', { cause }); }
-        const prefix = `${deps.sessionId}.sub-`;
-        for (const entry of entries) {
-          if (!entry.isFile() || !entry.name.startsWith(prefix) || !entry.name.endsWith('.jsonl')) continue;
-          const suffix = entry.name.slice(prefix.length, -'.jsonl'.length);
-          if (!/^\d+$/u.test(suffix)) continue;
-          const number = Number(suffix);
-          if (Number.isSafeInteger(number)) counter = Math.max(counter, number);
-        }
-      })();
-    }
-    const initialize = counterInitialization;
-    try { await initialize; }
-    catch (cause) {
-      if (counterInitialization === initialize) counterInitialization = undefined;
-      throw cause;
-    }
-    counter += 1;
-    return `${deps.sessionId}.sub-${counter}`;
-  }
-
-  const referenceOf = (record: SubrunRecord): SubrunReference => {
-    if (record.sessionId === undefined || record.runId === undefined) throw new KernelError('subagent_not_started');
-    return {
-      subrunId: record.subrunId, sessionId: record.sessionId, runId: record.runId,
-      ...(record.parentRunId === undefined ? {} : { parentRunId: record.parentRunId }),
-      ...(record.parentCallId === undefined ? {} : { parentCallId: record.parentCallId }),
-    };
-  };
-
-  function viewOf(record: SubrunRecord): SubrunStatus {
-    if (record.sessionId === undefined || record.runId === undefined) throw new KernelError('subagent_not_started');
-    const nested = typeof record.result?.result === 'object' && record.result.result !== null
-      ? record.result.result as Record<string, unknown> : undefined;
-    const result = record.result === undefined ? undefined : {
-      state: typeof nested?.state === 'string' ? nested.state : record.state,
-      textCharacters: typeof record.result.text === 'string' ? record.result.text.length : 0,
-      ...(nested?.validation === undefined ? {} : { validation: nested.validation }),
-    };
-    return {
-      ...referenceOf(record),
-      state: record.state,
-      phase: record.phase,
-      task: deps.taskBudget?.()?.snapshot() ?? null,
-      pendingInteractions: { approvals: record.pendingApprovals, questions: record.pendingQuestions },
-      ...(record.errorCode === undefined ? {} : { errorCode: record.errorCode }),
-      ...(result === undefined ? {} : { result }),
-      startedAt: record.startedAt,
-      updatedAt: record.updatedAt,
-      ...(record.completedAt === undefined ? {} : { completedAt: record.completedAt }),
-    };
-  }
-
-  function findSubrun(subrunId: string, parentRunId?: string): SubrunRecord {
-    const record = subruns.get(subrunId);
-    if (record === undefined || record.parentRunId !== parentRunId) throw new KernelError('subagent_not_found');
-    return record;
-  }
-
-  function pruneSubruns(): void {
-    if (subruns.size < MAX_RETAINED_SUBRUNS) return;
-    const oldestFinished = [...subruns.values()].find(record =>
-      record.state === 'completed' || record.state === 'failed' || record.state === 'cancelled');
-    if (oldestFinished === undefined) throw new KernelError('subagent_operation_limit');
-    subruns.delete(oldestFinished.subrunId);
-  }
-
   async function start(args: SubagentRunArguments, context: SubagentCallContext, source: 'human' | 'controller' = 'controller'):
     Promise<SubrunReference> {
     if (closed) throw new KernelError('subagent_host_closed');
@@ -384,10 +302,10 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
     if (closed || (context.runId !== undefined && closedParents.has(context.runId))) {
       throw new KernelError(closed ? 'subagent_host_closed' : 'subagent_parent_not_active');
     }
-    const sessionId = await nextSessionId();
+    const sessionId = await registry.nextSessionId();
     if (closed) throw new KernelError('subagent_host_closed');
     if (context.runId !== undefined && closedParents.has(context.runId)) throw new KernelError('subagent_parent_not_active');
-    pruneSubruns();
+    registry.prune();
     const controller = new AbortController();
     const parentSignal = context.signal;
     const abortParent = () => controller.abort(parentSignal?.reason);
@@ -409,7 +327,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
       startedAt: Date.now(),
       updatedAt: Date.now(),
     };
-    subruns.set(subrunId, record);
+    registry.add(record);
     let started = false;
     let referenceReady = false;
     const work = Promise.resolve().then(() => execute(prepared.args, { ...context, permission: prepared.permission, signal: controller.signal }, {
@@ -428,13 +346,13 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
         started = true;
         if (prepared.preset === undefined) {
           referenceReady = true;
-          ready.resolve(referenceOf(record));
+          ready.resolve(subrunReferenceOf(record));
         }
       },
       ...(prepared.preset === undefined ? {} : {
         onContextPersisted: () => {
           referenceReady = true;
-          ready.resolve(referenceOf(record));
+          ready.resolve(subrunReferenceOf(record));
         },
       }),
       onProgress: (event) => {
@@ -466,66 +384,9 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
     void record.work.catch(() => undefined);
     try { return await ready.promise; }
     catch (error) {
-      subruns.delete(subrunId);
+      registry.delete(subrunId);
       throw error;
     }
-  }
-
-  async function persistedChild(subrunId: string, parentRunId: string) {
-    if (deps.parentSession === undefined || !subrunId.startsWith(`${deps.sessionId}.sub-`)
-      || subrunId.length > 160 || /[\\/\u0000-\u001f\u007f]/u.test(subrunId)) {
-      throw new KernelError('subagent_not_found');
-    }
-    const child = await readSessionRecord(join(deps.directory, `${subrunId}.jsonl`));
-    if (child.header?.sessionId !== subrunId) throw new KernelError('subagent_not_found');
-    const acceptance = child.events.find(event => event.kind === 'user' && isRunAcceptance(event.run)
-      && event.run.parentage?.sessionId === deps.sessionId
-      && event.run.parentage.runId === parentRunId && event.run.parentage.subrunId === subrunId)?.run;
-    if (!isRunAcceptance(acceptance) || acceptance.parentage === undefined) throw new KernelError('subagent_not_found');
-    const receipt = runReceipts(child.events, subrunId).find(item => item.runId === acceptance.runId);
-    if (receipt === undefined) throw new KernelError('subagent_not_found');
-    const startedAt = Date.parse(acceptance.acceptedAt);
-    let result: RunResult | undefined;
-    let errorCode: string | undefined;
-    if (receipt.resultRef !== undefined) {
-      const configRoot = typeof deps.config.workspaceRoot === 'string' ? deps.config.workspaceRoot
-        : typeof deps.config.boundary === 'string' ? deps.config.boundary : process.cwd();
-      try { result = await readRunResult(deps.directory, workspaceIdentity(configRoot), subrunId, receipt); }
-      catch (error) { errorCode = stableErrorCode(error); }
-    }
-    const terminal = child.events.find(event => event.kind === 'turn' && event.userSeq === receipt.userSeq
-      && ['completed', 'failed', 'cancelled', 'interrupted'].includes(String(event.status)));
-    const state: SubrunStatus['state'] = receipt.state === 'completed' || receipt.state === 'failed' || receipt.state === 'cancelled'
-      ? receipt.state : 'unknown';
-    errorCode ??= result?.diagnostic?.code
-      ?? (typeof terminal?.code === 'string' ? terminal.code : undefined);
-    const status: SubrunStatus = {
-      subrunId,
-      sessionId: subrunId,
-      runId: acceptance.runId,
-      parentRunId,
-      ...(acceptance.parentage.callId === undefined ? {} : { parentCallId: acceptance.parentage.callId }),
-      state,
-      phase: null,
-      task: null,
-      pendingInteractions: { approvals: 0, questions: 0 },
-      ...(errorCode === undefined ? {} : { errorCode }),
-      ...(result === undefined ? {} : { result: {
-        state: result.state,
-        textCharacters: result.output.text?.length ?? 0,
-        validation: result.validation,
-      } }),
-      startedAt: Number.isFinite(startedAt) ? startedAt : 0,
-      updatedAt: Number.isFinite(startedAt) ? startedAt : 0,
-      ...(state === 'completed' || state === 'failed' || state === 'cancelled'
-        ? { completedAt: Number.isFinite(startedAt) ? startedAt : 0 } : {}),
-    };
-    const turnContext = child.events.filter(event => event.kind === 'turnContext' && event.userSeq === receipt.userSeq).at(-1);
-    return { status, result, turnContext };
-  }
-
-  async function persistedStatus(subrunId: string, parentRunId: string): Promise<SubrunStatus> {
-    return (await persistedChild(subrunId, parentRunId)).status;
   }
 
   async function list(parentRunId: string, options: { readonly cursor?: string; readonly limit?: number } = {}) {
@@ -562,7 +423,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
     const scanned = persisted.slice(0, scanLimit);
     const truncated = directoryTruncated || persisted.length > scanned.length;
     const ids = new Set(scanned);
-    for (const record of subruns.values()) {
+    for (const record of registry.values()) {
       if (record.parentRunId === parentRunId && record.runId !== undefined) ids.add(record.subrunId);
     }
     const afterNumber = after === undefined ? undefined : Number(after.slice(prefix.length));
@@ -587,7 +448,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
   }
 
   async function status(subrunId: string, parentRunId: string): Promise<SubrunStatus> {
-    const record = subruns.get(subrunId);
+    const record = registry.get(subrunId);
     if (record === undefined) return await persistedStatus(subrunId, parentRunId);
     if (record.parentRunId !== parentRunId) throw new KernelError('subagent_not_found');
     return viewOf(record);
@@ -596,7 +457,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
   async function message({ subrunId, runId, parentRunId, input }: {
     subrunId: string; runId: string; parentRunId: string; input: string;
   }, source: 'human' | 'controller', onAccepted?: () => void) {
-    const record = findSubrun(subrunId, parentRunId);
+    const record = registry.find(subrunId, parentRunId);
     if (record.state !== 'running' || record.runId !== runId || record.inbox === undefined) {
       throw new KernelError('subagent_not_running');
     }
@@ -607,9 +468,9 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
     if (subrunIds.length < 1 || subrunIds.length > 8 || !Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 30_000) {
       throw new KernelError('subagent_wait_invalid');
     }
-    const records = subrunIds.map(id => subruns.get(id)).filter((record): record is SubrunRecord => record !== undefined);
+    const records = subrunIds.map(id => registry.get(id)).filter((record): record is SubrunRecord => record !== undefined);
     for (const record of records) if (record.parentRunId !== parentRunId) throw new KernelError('subagent_not_found');
-    const missing = subrunIds.filter(id => !subruns.has(id));
+    const missing = subrunIds.filter(id => !registry.has(id));
     for (const id of missing) await persistedStatus(id, parentRunId);
     let timedOut = false;
     if (timeoutMs === 0) timedOut = records.some(record => record.state === 'starting' || record.state === 'running');
@@ -627,7 +488,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
   }
 
   async function waitForResult(subrunId: string, parentRunId?: string): Promise<unknown> {
-    const record = subruns.get(subrunId);
+    const record = registry.get(subrunId);
     if (record === undefined) {
       if (parentRunId === undefined) throw new KernelError('subagent_not_found');
       const persisted = await persistedChild(subrunId, parentRunId);
@@ -663,7 +524,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
   }
 
   async function cancel({ subrunId, runId, parentRunId }: { subrunId: string; runId: string; parentRunId: string }) {
-    const record = findSubrun(subrunId, parentRunId);
+    const record = registry.find(subrunId, parentRunId);
     if (record.state !== 'running' || record.runId !== runId) {
       return { subrunId, runId, cancelRequested: false, state: record.state };
     }
@@ -674,7 +535,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
 
   async function settleParent(parentRunId: string, state: 'completed' | 'failed' | 'cancelled'): Promise<void> {
     if (state !== 'completed') closedParents.add(parentRunId);
-    const records = [...subruns.values()].filter(record => record.parentRunId === parentRunId
+    const records = [...registry.values()].filter(record => record.parentRunId === parentRunId
       && (record.state === 'starting' || record.state === 'running'));
     if (state !== 'completed') {
       for (const record of records) record.controller.abort(new KernelError('subagent_parent_cancelled'));
@@ -693,22 +554,22 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
 
   async function finishParent(parentRunId: string): Promise<void> {
     closedParents.add(parentRunId);
-    const records = [...subruns.values()].filter(record => record.parentRunId === parentRunId
+    const records = [...registry.values()].filter(record => record.parentRunId === parentRunId
       && (record.state === 'starting' || record.state === 'running'));
     await Promise.all(records.map(record => record.work ?? Promise.resolve()));
   }
 
   async function close(): Promise<void> {
     closed = true;
-    for (const record of subruns.values()) {
+    for (const record of registry.values()) {
       if (record.parentRunId !== undefined) closedParents.add(record.parentRunId);
       if (record.state === 'starting' || record.state === 'running') record.controller.abort(new KernelError('subagent_host_closed'));
     }
-    await Promise.all([...subruns.values()].flatMap(record => record.work === undefined ? [] : [record.work.catch(() => undefined)]));
+    await Promise.all([...registry.values()].flatMap(record => record.work === undefined ? [] : [record.work.catch(() => undefined)]));
   }
 
   function interaction(runId: string, type: 'approval' | 'question', waiting: boolean): void {
-    const record = [...subruns.values()].find(item => item.runId === runId);
+    const record = [...registry.values()].find(item => item.runId === runId);
     if (record === undefined) return;
     const field = type === 'approval' ? 'pendingApprovals' : 'pendingQuestions';
     record[field] = Math.max(0, record[field] + (waiting ? 1 : -1));
@@ -762,7 +623,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
           const parentTools = new Set(kernel.manifest().map(({ name }) => name));
           active += 1;
           try {
-            const id = lifecycle?.sessionId ?? await nextSessionId();
+            const id = lifecycle?.sessionId ?? await registry.nextSessionId();
             const subrunId = lifecycle?.subrunId ?? id;
             // 首行在首次写入时生成；模式选择确定后再补入模式身份。
             let modeIdentity: {
