@@ -3,7 +3,7 @@
 // 新记录首行保存会话元数据和格式版本；版本或事件类型无法识别时拒绝重建。
 // 压缩摘要和检查点保存在独立文件中。读取前会验证覆盖事件的哈希，校验失败时忽略检查点。
 // 记录读写失败会抛出 `KernelRuntimeError` 并中止循环，不能当作普通工具失败处理。
-import { mkdir, open, truncate, type FileHandle } from 'node:fs/promises';
+import { mkdir, open, stat, truncate, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelError, KernelRuntimeError } from '../errors.js';
 import { loadCheckpointFile, type CompactionBlock } from './checkpoint.js';
@@ -126,8 +126,42 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
     ownership.assertOwned();
   }
 
+  // 解析结果按文件指纹缓存：状态轮询和分页读取都走 `read()`，同一份未变化的记录
+  // 不应该每次都重新解析整份 JSONL。写入成功后主动丢弃缓存，读取方拿到的仍是新记录。
+  // 超过上限的记录不缓存：解析后对象可能比原文大数倍，长会话不能让常驻内存无界增长。
+  const PARSED_CACHE_MAX_BYTES = 32n * 1024n * 1024n;
+  let parsed: { size: bigint; mtimeNs: bigint; record: ReadSessionRecord } | undefined;
+
+  async function fingerprint(): Promise<{ size: bigint; mtimeNs: bigint } | undefined> {
+    try {
+      const info = await stat(path, { bigint: true });
+      return { size: info.size, mtimeNs: info.mtimeNs };
+    } catch {
+      return undefined;
+    }
+  }
+
   async function loadEvents(repair = false): Promise<ReadSessionRecord> {
+    // 修复路径会截断文件，必须重新解析，不能命中缓存。
+    if (!repair) {
+      const stamp = await fingerprint();
+      if (stamp !== undefined && parsed !== undefined
+        && parsed.size === stamp.size && parsed.mtimeNs === stamp.mtimeNs) {
+        // 事件对象不在这里复制：投影和渲染只读字段，复制数组足以防止就地排序污染缓存。
+        return { ...parsed.record, events: parsed.record.events.slice() };
+      }
+    }
+    // 先取指纹再解析：只有解析期间文件未变化时才缓存，避免把旧记录当新记录记住。
+    const before = repair ? undefined : await fingerprint();
     const record = await readSessionRecord(path);
+    if (before !== undefined && before.size <= PARSED_CACHE_MAX_BYTES) {
+      const after = await fingerprint();
+      if (after !== undefined && after.size === before.size && after.mtimeNs === before.mtimeNs) {
+        parsed = { ...after, record };
+        // 缓存持有原始数组，读取方拿到副本，就地修改不会污染下一次读取。
+        return { ...record, events: record.events.slice() };
+      }
+    }
     if (repair && record.truncatedBytes > 0) await truncate(path, record.completeBytes);
     return record;
   }
@@ -188,10 +222,13 @@ export function createSessionLog({ directory, id, meta }: CreateSessionLogOption
       } catch (rollbackError) {
         throw new KernelRuntimeError('session_rollback_failed', { cause: rollbackError });
       }
+      parsed = undefined;
       throw new KernelRuntimeError('session_write_failed', { cause: error });
     }
     await close();
     nextSeq += 1;
+    // 记录已变化：下次读取必须重新解析，不能返回写入前的缓存。
+    parsed = undefined;
     return written;
   }
 

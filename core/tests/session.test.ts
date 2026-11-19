@@ -318,3 +318,20 @@ test('a refusal reaches the model as a sentence instead of an empty result', asy
     ]);
   });
 });
+
+test('reading an unchanged session reuses its parse and an append replaces it', async () => {
+  await withDirectory(async (directory) => {
+    const session = createSessionLog({ directory, id: 'run-cache' });
+    await session.append({ kind: 'user', text: 'first' });
+    await session.append({ kind: 'assistant', text: 'second' });
+    const first = await session.read();
+    assert.equal(first.length, 2);
+    // 命中缓存时仍返回独立数组：读取方就地删减不能影响下一次读取。
+    first.pop();
+    assert.equal((await session.read()).length, 2);
+    const third = await session.append({ kind: 'user', text: 'third' });
+    const after = await session.read();
+    assert.deepEqual(after.map((event) => event.seq), [0, 1, third.seq]);
+    assert.equal(after.at(-1)?.kind, 'user');
+  });
+});
