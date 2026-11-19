@@ -21,6 +21,23 @@ function seqOf(record: WindowRecord): number | undefined {
   return Number.isSafeInteger(seq) && (seq as number) >= 1 ? seq as number : undefined;
 }
 
+export type RecoveryPage = { events: readonly WindowRecord[]; hasMore: boolean };
+
+/**
+ * The page to read next when the view misses records older than the page it holds.
+ *
+ * Returns `null` once the page reaches the missing range, or when the Host has no
+ * earlier records: the caller should then show that the gap cannot be filled
+ * instead of pretending the view is complete.
+ */
+export function olderRecoveryPage(page: RecoveryPage, missingFrom: number): { before: number } | null {
+  const sequences = page.events.map(record => seqOf(record)).filter((seq): seq is number => seq !== undefined);
+  if (sequences.length === 0) return null;
+  const oldest = Math.min(...sequences);
+  if (oldest <= missingFrom || !page.hasMore) return null;
+  return { before: oldest };
+}
+
 export class SessionWindow<T extends WindowRecord = WindowRecord> {
   private through = 0;
 

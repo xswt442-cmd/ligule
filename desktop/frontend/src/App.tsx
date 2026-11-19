@@ -46,7 +46,7 @@ import { addWorkbenchCommand, closeWorkbenchCommand, closeWorkbenchTab, openWork
 import { LocaleProvider, localeOf } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
 import { SessionStreamBuffer } from './session-stream';
-import { SessionWindow } from './session-window';
+import { SessionWindow, olderRecoveryPage } from './session-window';
 import { observeExternalSession } from './external-session-observation';
 import { clearExternalSessionDraftIfCurrent, externalSessionDraftFor, externalSessionDraftRevisionFor, updateExternalSessionDrafts, type ExternalSessionDrafts } from './external-session-drafts';
 import { clearSessionDraftIfCurrent, sessionDraftRevisionFor, updateSessionDraftRevision, type SessionDraftRevisions } from './session-draft-revisions';
@@ -1388,12 +1388,32 @@ export function App({ transport }: { transport: Transport }) {
           if (decision.reason === 'gap') { missing = decision.missingFrom; break; }
         }
         if (missing > 0) {
-          // 中间记录没有送达：重读当前窗口补齐；仍不连续时下一次打开会再次同步。
+          // 中间记录没有送达：从最新窗口往回补读，直到覆盖缺口或用完更早的记录。
           try {
-            const fresh = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[] };
-            if (openRequest.current === request) {
-              const filled = sessionWindow.adopt(fresh.events.filter((event) => Number(event.seq) >= missing));
-              for (const record of filled) appendRecord(record);
+            const collected = new Map<number, Record_>();
+            const remember = (events: Record_[]) => {
+              for (const event of events) {
+                const seq = Number(event.seq);
+                if (Number.isSafeInteger(seq)) collected.set(seq, event);
+              }
+            };
+            let page = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+            if (openRequest.current !== request) return false;
+            remember(page.events);
+            let older = olderRecoveryPage(page, missing);
+            for (let reads = 0; older !== null && reads < 8; reads += 1) {
+              const previous = await client.call('session.read', { sessionId: id, before: older.before, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+              if (openRequest.current !== request) return false;
+              remember(previous.events);
+              older = olderRecoveryPage(previous, missing);
+            }
+            const ordered = [...collected.values()].sort((left, right) => Number(left.seq) - Number(right.seq));
+            for (const record of sessionWindow.adopt(ordered)) appendRecord(record);
+            const head = Number(buffered.at(-1)?.seq);
+            if (Number.isSafeInteger(head) && head > sessionWindow.loadedThrough) {
+              // 缺口早于可恢复窗口：如实说明，不把不连续的记录当成完整视图。
+              const skipped = head - sessionWindow.loadedThrough;
+              setRows((current) => [...current, metaRow('meta', `有 ${skipped} 条更早的记录未能读取（已超出可恢复窗口）。`, `${skipped} earlier record(s) could not be read (outside the recoverable window).`)]);
             }
           } catch { /* 传输已断开时由重新连接流程统一处理 */ }
         }

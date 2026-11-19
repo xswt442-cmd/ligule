@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { SessionWindow } from '../../frontend/src/session-window.ts';
+import { SessionWindow, olderRecoveryPage } from '../../frontend/src/session-window.ts';
 
 test('a live record applies only when it continues the applied range', () => {
   const window = new SessionWindow();
@@ -50,4 +50,14 @@ test('a snapshot cursor must be a non-negative integer', () => {
   const window = new SessionWindow(2);
   assert.throws(() => window.reset(1.5), TypeError);
   assert.equal(window.loadedThrough, 2);
+});
+
+test('recovery reads earlier pages until the missing range is covered', () => {
+  // The held page starts above the gap: read the page before its oldest record.
+  assert.deepEqual(olderRecoveryPage({ events: [{ seq: 40 }, { seq: 41 }], hasMore: true }, 12), { before: 40 });
+  // A page already reaching the gap needs no more reads.
+  assert.equal(olderRecoveryPage({ events: [{ seq: 12 }, { seq: 13 }], hasMore: true }, 12), null);
+  // No earlier records exist: the gap cannot be filled, so stop asking.
+  assert.equal(olderRecoveryPage({ events: [{ seq: 40 }], hasMore: false }, 12), null);
+  assert.equal(olderRecoveryPage({ events: [], hasMore: true }, 1), null);
 });
