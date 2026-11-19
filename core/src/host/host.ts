@@ -53,7 +53,7 @@ import { adoptForSessionDirectory } from '../session/adopt.js';
 import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
-import { listProjectDirectory, readProjectFile, saveProjectFile, searchProjectFiles } from './project-files.js';
+import { listProjectDirectory, readProjectFile, readProjectFileText, saveProjectFile, searchProjectFiles } from './project-files.js';
 import { projectGitDiffVersion, readProjectGitDiff, readProjectGitStatus } from './project-git.js';
 import { branchSessionId, exportImageUrl, exportMarkdown, exportRecordOf, MAX_EXPORT_ASSETS, readExportEvidence, writeExport, type ExportAsset, type ExportRecord } from './export.js';
 import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
@@ -61,7 +61,7 @@ export { compactionLimitsOf } from './runtime-limits.js';
 import { createCompaction } from '../session/compaction.js';
 import { sessionWriterActive } from '../session/lock.js';
 import { requestAgentControl, TRUSTED_AGENT_CONTROL_ORIGIN, type AgentControlRequest } from './agent-control-runtime.js';
-import { controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissionControl, requireTrustedUi, runChannelOf, runOriginBasis, runScopesOf, type ControlTrust } from './capabilities.js';
+import { controllerScopeOf, mayRecordHumanRun, maySetPermission, operationSessionDenial, requirePermissionControl, requireTrustedUi, runChannelOf, runOriginBasis, runScopesOf, type ControlTrust } from './capabilities.js';
 import { usageEvent } from '../session/usage.js';
 import { summarizeUsage } from '../session/usage-summary.js';
 import { readSessionRecord } from '../session/record.js';
@@ -3616,6 +3616,16 @@ export function createHost({
         if (grant !== undefined) assertGrantSessionScope(grant, state);
       };
 
+      // Operation Session 只承载这一条命令的记录与控制：它不因为来源会话曾有权限就继续接受写文件、
+      // 创建 Run、导出或再委派的请求。能力表在 capabilities.ts，避免每个入口各写一份 if。
+      const targeted = sessionId === '' ? undefined : sessions.get(sessionId);
+      const operationDenial = targeted?.operationOnly === true ? operationSessionDenial(message.method) : undefined;
+      if (operationDenial !== undefined) {
+        throw new KernelError(operationDenial, {
+          detail: `an operation session does not carry the capability for ${message.method}`,
+        });
+      }
+
       switch (message.method) {
         case 'workspace.trust': {
           requireTrustedUi('workspace-trust', controlTrust);
@@ -3711,9 +3721,9 @@ export function createHost({
             if (sourceKind === 'file') {
               sourceVersion = requiredString(message.params.sourceVersion, 'sourceVersion');
               if (!/^[a-f0-9]{16}$/iu.test(sourceVersion)) throw new KernelError('side_context_reference_invalid');
-              const page = await readProjectFile(source.environment.config, source.id, sourcePath, 0, 64_000);
-              if (page.version !== sourceVersion) throw new KernelError('side_context_version_stale');
-              if (page.encoding !== 'utf8' || typeof page.text !== 'string' || !page.text.includes(selection)) {
+              const snapshot = await readProjectFileText(source.environment.config, source.id, sourcePath, sourceVersion);
+              if (snapshot.kind === 'stale') throw new KernelError('side_context_version_stale');
+              if (snapshot.kind !== 'text' || !snapshot.text.includes(selection)) {
                 throw new KernelError('side_context_unverified');
               }
             } else {

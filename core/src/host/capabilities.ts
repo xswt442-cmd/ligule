@@ -114,3 +114,27 @@ export function runOriginBasis(trust: ControlTrust, bridge: boolean): RunResolve
   if (trust.permissionControl) return 'permission-control';
   return bridge ? 'agent-control-bridge' : 'caller-scope-default';
 }
+
+// Operation Session 的完整能力矩阵：operation.start 只授权"这一条已批准的命令及其记录与控制"。
+// 它不继承来源会话的通用能力，历史查看也不复活执行授权；不在表里的方法一律拒绝。
+// 断言来源权限/信任/Grant 变化本来就应停止命令，这里保证停止之后这些会话也无法借旧授权做事。
+const OPERATION_SESSION_METHODS: ReadonlySet<string> = new Set([
+  'session.open',
+  'session.close',
+  'session.read',
+  'session.observe',
+  'status.get',
+  'execution.status',
+  'execution.logs',
+  'execution.wait',
+  'execution.cancel',
+]);
+
+/** Operation Session 被拒绝的方法对应的错误码，保留模型 Run / 取消 / 再启动三类语义。 */
+export function operationSessionDenial(method: string): string | undefined {
+  if (OPERATION_SESSION_METHODS.has(method)) return undefined;
+  if (method === 'run.start' || method === 'run.submit') return 'operation_session_model_run_unavailable';
+  if (method === 'run.cancel') return 'operation_session_run_cancel_unavailable';
+  if (method === 'operation.start') return 'operation_session_start_unavailable';
+  return 'operation_session_control_unavailable';
+}

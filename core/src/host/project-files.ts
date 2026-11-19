@@ -294,6 +294,39 @@ function isUtf8Boundary(bytes: Buffer, offset: number): boolean {
   return offset === 0 || offset === bytes.length || (bytes[offset]! & 0xc0) !== 0x80;
 }
 
+/** 来源校验使用的文本窗口上限：与 Desktop 合并分页的上限一致，超过就按不可验证处理。 */
+export const PROJECT_FILE_TEXT_WINDOW_BYTES = 256 * 1024;
+
+export type ProjectFileTextSnapshot =
+  | { readonly kind: 'text'; readonly text: string }
+  | { readonly kind: 'stale' }
+  | { readonly kind: 'unavailable' };
+
+/**
+ * 读取一份有界、版本一致的文本快照，供 Side Chat 等来源校验使用。
+ * 逐页读取并核对 version；页面间版本变化按 stale 返回，非 UTF-8、超限或读取失败返回 unavailable。
+ * 选择可能跨页，因此必须把同一版本的页面拼起来再做包含判断，不能只读 offset=0 的第一页。
+ */
+export async function readProjectFileText(config: CapabilityConfig, sessionId: string, pathValue: unknown,
+  expectedVersion: string): Promise<ProjectFileTextSnapshot> {
+  const pages: string[] = [];
+  let offset = 0;
+  let total = 0;
+  let version: string | undefined;
+  while (total < PROJECT_FILE_TEXT_WINDOW_BYTES) {
+    const page = await readProjectFile(config, sessionId, pathValue, offset, MAX_FILE_PAGE_BYTES);
+    if (page.encoding !== 'utf8' || typeof page.text !== 'string' || page.version === null) return { kind: 'unavailable' };
+    version ??= page.version;
+    if (page.version !== version) return { kind: 'stale' };
+    if (page.version !== expectedVersion) return { kind: 'stale' };
+    pages.push(page.text);
+    total += Buffer.byteLength(page.text, 'utf8');
+    if (page.nextOffsetBytes === null || total >= PROJECT_FILE_TEXT_WINDOW_BYTES) break;
+    offset = page.nextOffsetBytes;
+  }
+  return { kind: 'text', text: pages.join('') };
+}
+
 export async function readProjectFile(config: CapabilityConfig, sessionId: string, pathValue: unknown, offsetValue: unknown,
   limitValue: unknown): Promise<ProjectFilePreview> {
   const path = textPath(pathValue);

@@ -134,6 +134,43 @@ test('a file side chat validates the current file version and keeps the referenc
   }, { permissionControl: true });
 });
 
+test('a file side chat verifies a selection that starts on a later page of a bounded snapshot', async () => {
+  await withTuiHost(async ({ client, sessionId, projectDirectory, providerRequests }) => {
+    await mkdir(join(projectDirectory, 'src'), { recursive: true });
+    // 让选中内容跨过第一页 64_000 字节的边界：单读 offset=0 一定看不到完整选择。
+    const marker = '跨页选择的内容 — a cross-page selection spanning two pages';
+    const text = 'a'.repeat(63_990) + marker + 'b'.repeat(70_000) + '\r\n结尾 CRLF\r\n\uFEFF尾部';
+    await writeFile(join(projectDirectory, 'src', 'long.txt'), text);
+    const bytes = Buffer.from(text, 'utf8');
+    assert.ok(bytes.length > 128_000, 'the fixture is larger than two 64_000-byte pages');
+
+    const first = await client.request('project.file.read', { sessionId, path: 'src/long.txt' }) as {
+      version: string | null; text?: string; nextOffsetBytes?: number | null;
+    };
+    assert.ok(first.version);
+    assert.equal(typeof first.nextOffsetBytes, 'number');
+    assert.equal(first.text?.includes(marker), false, 'the first page alone does not contain the whole selection');
+
+    const second = await client.request('project.file.read', {
+      sessionId, path: 'src/long.txt', offsetBytes: first.nextOffsetBytes,
+    }) as { text?: string };
+    assert.equal(second.text?.includes(marker), false, 'the second page alone does not contain the whole selection either');
+
+    const created = await client.request('session.side.create', {
+      sessionId, sourceKind: 'file', sourcePath: 'src/long.txt', sourceVersion: first.version,
+      selection: marker,
+    }) as { sessionId: string; selectionBytes: number };
+    assert.equal(created.selectionBytes, Buffer.byteLength(marker, 'utf8'));
+    const side = await client.request('session.read', { sessionId: created.sessionId }) as {
+      events: { kind?: string; sourceKind?: string; sourceVersion?: string }[];
+    };
+    assert.ok(side.events.some(event => event.kind === 'sideSessionOrigin'
+      && event.sourceKind === 'file' && event.sourceVersion === first.version));
+    assert.equal(providerRequests.length, 0);
+
+  }, { permissionControl: true });
+});
+
 test('an untrusted controller cannot create a side Session', async () => {
   await withTuiHost(async ({ client, sessionId }) => {
     await assert.rejects(client.request('session.side.create', {

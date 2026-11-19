@@ -129,6 +129,69 @@ test('a manual command has an independent non-model Session and uses the Host ex
   });
 });
 
+test('an Operation Session only carries its own command controls', {
+  skip: process.platform !== 'win32' && process.platform !== 'linux',
+  timeout: 25_000,
+}, async () => {
+  await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+    await writeFile(join(projectDirectory, 'operation-sleep.mjs'), [
+      "process.stdout.write('operation-sleep-started\n');",
+      'setInterval(() => {}, 1_000);',
+    ].join('\n'));
+    await writeFile(join(projectDirectory, 'operation-note.txt'), 'written by the human\n');
+    await client.request('workspace.trust', {
+      projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
+    });
+    await client.request('policy.set', { sessionId, mode: 'auto' });
+    client.onRequest((request) => request.method === 'approval.request' ? { decision: 'allow' } : undefined);
+    const started = await client.request('operation.start', {
+      sessionId, command: 'node operation-sleep.mjs', cwd: '.',
+    }) as { operationSessionId: string; operationId: string; executionId: string };
+    try {
+      const page = await client.request('project.file.read', { sessionId, path: 'operation-note.txt' }) as { version: string };
+      await assert.rejects(client.request('project.file.save', {
+        sessionId: started.operationSessionId, path: 'operation-note.txt', expectedVersion: page.version,
+        text: 'rewritten through the old authorization\n',
+      }), { code: 'operation_session_control_unavailable' });
+      assert.equal(await readFile(join(projectDirectory, 'operation-note.txt'), 'utf8'), 'written by the human\n',
+        'an Operation Session must not write project files');
+      await assert.rejects(client.request('project.file.read', {
+        sessionId: started.operationSessionId, path: 'operation-note.txt',
+      }), { code: 'operation_session_control_unavailable' });
+      await assert.rejects(client.request('session.export', {
+        sessionId: started.operationSessionId, path: join(projectDirectory, 'operation-export.md'),
+      }), { code: 'operation_session_control_unavailable' });
+      await assert.rejects(client.request('session.label', {
+        sessionId: started.operationSessionId, name: 'renamed like a conversation',
+      }), { code: 'operation_session_control_unavailable' });
+      await assert.rejects(client.request('session.control', {
+        projectRoot: projectDirectory, sessionId: started.operationSessionId, request: { action: 'status' },
+      }), { code: 'operation_session_control_unavailable' });
+
+      const status = await client.request('status.get', { sessionId: started.operationSessionId }) as {
+        operation?: { operationId?: string; finished?: boolean } | null;
+      };
+      assert.equal(status.operation?.operationId, started.operationId);
+      assert.equal(status.operation?.finished, false);
+      const read = await client.request('session.read', { sessionId: started.operationSessionId }) as {
+        events: { kind?: string }[];
+      };
+      assert.equal(read.events.some((event) => event.kind === 'operationStarted'), true);
+    } finally {
+      const cancelled = await client.request('execution.cancel', {
+        sessionId: started.operationSessionId, runId: started.operationId, executionId: started.executionId,
+      }) as { state?: string };
+      assert.equal(cancelled.state, 'cancelled');
+    }
+  }, {
+    permission: fullAccess,
+    permissionControl: true,
+    modeName: 'full',
+    config: { policy: { mode: 'auto' }, loop: { iterations: 8, modelCalls: 8 } },
+    testDirectory: join(process.cwd(), 'testplace', 'tmp'),
+  });
+});
+
 test('a manual command can be cancelled through its own Operation Session', {
   skip: process.platform !== 'win32' && process.platform !== 'linux',
   timeout: 25_000,
@@ -212,6 +275,13 @@ test('lowering source Permission cancels its active manual command', {
       events: { kind?: string; state?: string; errorCode?: string }[];
     };
     assert.equal(operation.events.some(event => event.kind === 'operationFinished' && event.state === 'cancelled'), true);
+    await writeFile(join(projectDirectory, 'operation-revoked.txt'), 'kept as the human wrote it\n');
+    const page = await client.request('project.file.read', { sessionId, path: 'operation-revoked.txt' }) as { version: string };
+    await assert.rejects(client.request('project.file.save', {
+      sessionId: started.operationSessionId, path: 'operation-revoked.txt', expectedVersion: page.version,
+      text: 'written after the source lost write permission\n',
+    }), { code: 'operation_session_control_unavailable' });
+    assert.equal(await readFile(join(projectDirectory, 'operation-revoked.txt'), 'utf8'), 'kept as the human wrote it\n');
     assert.equal(providerRequests.length, 0);
   }, {
     permission: fullAccess,
