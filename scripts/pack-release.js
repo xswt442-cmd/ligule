@@ -22,6 +22,38 @@ function spreadsheetPayload() {
   return { directory: dirname(path), version: manifest.version };
 }
 
+// 发行 manifest 里的外部依赖必须钉死在本次构建实际用到的版本上：范围写法会让不同时间
+// 的消费者解析出不同的运行时，而 Core 只验证过工作区里的这一份组合。
+function installedVersion(name, field) {
+  const candidates = [
+    join(root, 'core', 'node_modules', name, 'package.json'),
+    join(root, 'tui', 'node_modules', name, 'package.json'),
+  ];
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) continue;
+    const manifest = JSON.parse(readFileSync(candidate, 'utf8'));
+    if (manifest.name !== name || typeof manifest.version !== 'string') {
+      throw new Error(`${field} entry ${name} resolves to a manifest for ${String(manifest.name)}`);
+    }
+    return manifest.version;
+  }
+  throw new Error(`${field} entry ${name} is not installed in the workspace, so its exact version cannot be pinned`);
+}
+
+function pinInstalledVersions(manifest) {
+  for (const field of ['dependencies', 'optionalDependencies']) {
+    for (const [name, version] of Object.entries(manifest[field] ?? {})) {
+      if (name === '@ligule/core') continue;
+      const installed = installedVersion(name, field);
+      if (/^\d/u.test(version) && version !== installed) {
+        process.stderr.write(`pack-release: ${field}.${name} declared ${version}, pinning installed ${installed}\n`);
+      }
+      manifest[field][name] = installed;
+    }
+  }
+  return manifest;
+}
+
 export function releaseManifest() {
   const manifest = JSON.parse(readFileSync(join(root, 'tui', 'package.json'), 'utf8'));
   delete manifest.packageManager;
@@ -44,7 +76,7 @@ export function releaseManifest() {
   manifest.dependencies['@ligule/core'] = '*';
   manifest.dependencies[BUNDLED_SPREADSHEET] = spreadsheetPayload().version;
   manifest.bundledDependencies = [...new Set([...manifest.bundledDependencies, BUNDLED_SPREADSHEET])];
-  return manifest;
+  return pinInstalledVersions(manifest);
 }
 
 function deployTui(target) {

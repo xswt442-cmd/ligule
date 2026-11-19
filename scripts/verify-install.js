@@ -123,6 +123,29 @@ if (JSON.stringify(installed.optionalDependencies) !== JSON.stringify(pkg.option
 }
 if (existsSync(join(consumer, 'node_modules', 'typescript'))) throw new Error('devDependencies came along into the consumer');
 
+// 发行 manifest 把外部依赖钉死在构建时工作区实际安装的版本上；这里核对消费者真正装上的
+// 版本，而不是落入更新的补丁版本。被捆绑的包（@ligule/core、xlsx）不经过 registry。
+function installedDependencyVersion(name) {
+  const manifestPath = join(consumer, 'node_modules', name, 'package.json');
+  if (!existsSync(manifestPath)) return undefined;
+  return JSON.parse(readFileSync(manifestPath, 'utf8')).version;
+}
+for (const [name, version] of Object.entries(pkg.dependencies)) {
+  if (name === '@ligule/core' || name === 'xlsx') continue;
+  const resolved = installedDependencyVersion(name);
+  if (resolved !== version) throw new Error(`the consumer installed ${name}@${String(resolved)}, the release pins ${version}`);
+}
+for (const [name, version] of Object.entries(pkg.optionalDependencies)) {
+  const resolved = installedDependencyVersion(name);
+  if (resolved !== undefined && resolved !== version) {
+    throw new Error(`the consumer installed optional ${name}@${resolved}, the release pins ${version}`);
+  }
+}
+const lock = JSON.parse(readFileSync(join(consumer, 'package-lock.json'), 'utf8'));
+if (lock.packages?.['node_modules/@ligule/core'] !== undefined) {
+  throw new Error('the consumer resolved @ligule/core from a registry instead of the bundled copy');
+}
+
 // 确认 npm 生成 CLI 命令 shim，再直接用 Node 启动同一个入口，避免经 shell 拼接参数。
 const commandShim = join(consumer, 'node_modules', '.bin', process.platform === 'win32' ? `${pkg.name}.cmd` : pkg.name);
 if (!existsSync(commandShim)) throw new Error(`${pkg.name}'s installed CLI command shim is missing`);
