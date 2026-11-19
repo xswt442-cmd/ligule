@@ -1782,9 +1782,18 @@ export function createHost({
     const page = at !== undefined
       ? events.filter((event) => event.seq === at)
       : (before === undefined ? events : events.filter((event) => event.seq < before)).slice(-(limit ?? events.length));
+    // 检查记录里的范围状态是写入当时的快照；客户端要看到的是此刻的事实。
+    // 结论基于完整事件流而不是当前页，因此分页不会让一条已过期检查重新显示为有效。
+    const projected = new Map<number, SessionEvent>();
+    for (const event of events) {
+      projected.set(event.seq, event.kind === 'check' && typeof event.runId === 'string'
+        ? { ...event, scopeStatus: effectiveCheckScopeStatus(events, event.runId, event) }
+        : event);
+    }
+    const visible = page.map((event) => projected.get(event.seq) ?? event);
     return {
       sessionId,
-      events: fullResults ? await fillSpills(page, env) : page,
+      events: fullResults ? await fillSpills(visible, env) : visible,
       header: header ?? null,
       provisionalOutput,
       provisionalOutputError,

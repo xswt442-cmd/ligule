@@ -17,9 +17,8 @@ import { createLoop, type LoopLimits, type LoopProgressEvent } from '../kernel/l
 import { createPromptAssembly } from '../kernel/prompt.js';
 import type { SessionLog } from '../session/session.js';
 import { publishRunResult } from '../session/run.js';
-import { runEvidenceReferences } from '../session/run-evidence.js';
+import { laterScopeChangesTouch, runEvidenceReferences } from '../session/run-evidence.js';
 import { checkedCheckDeclaration, checkedCheckEvent } from '../session/checks.js';
-import { checkedFileChangeFact } from '../session/file-changes.js';
 import type { SessionEvent } from '../session/format.js';
 import { beginChildRun, childRunDelegation } from './subagent-run.js';
 import { readPersistedSubrun, referenceOf as subrunReferenceOf, SubrunRegistry, viewOf as viewSubrun, type SubrunRecord } from './subrun-store.js';
@@ -203,13 +202,8 @@ function requiredCheckFailures(events: readonly SessionEvent[], runId: string, r
     const recorded = latest === undefined ? undefined : checkByCall.get(latest.callId);
     const check = recorded?.check;
     const checkSeq = recorded?.event.seq;
-    const knownChangeAfter = check !== undefined && checkSeq !== undefined && events.some(event =>
-      (event.kind === 'tool' && event.runId === runId || event.kind === 'workspaceFileChange' && event.source === 'desktop')
-      && event.seq > checkSeq && Array.isArray(event.fileChanges)
-      && event.fileChanges.some(value => {
-        const change = checkedFileChangeFact(value);
-        return change !== undefined && check.declaration.scope.includes(change.path) && change.outcome !== 'unchanged';
-      }));
+    const knownChangeAfter = check !== undefined && checkSeq !== undefined
+      && laterScopeChangesTouch(events, runId, check, checkSeq);
     const complete = check !== undefined
       && check.commandStatus === 'met'
       && check.reportStatus === 'reported_pass'

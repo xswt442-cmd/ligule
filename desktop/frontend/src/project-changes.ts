@@ -65,9 +65,7 @@ export function projectChangesFrom(events: readonly Record<string, unknown>[]): 
   }
   changes.sort((left, right) => right.seq - left.seq);
   checks.sort((left, right) => right.seq - left.seq);
-  return { changes, checks: checks.map(check => {
-    const knownChangeAfter = changes.some(change => change.seq > check.seq && check.scope.includes(change.path)
-      && change.outcome !== 'unchanged' && (change.source === 'desktop' || change.runId === check.runId));
-    return knownChangeAfter && check.scopeStatus === 'sampled' ? { ...check, scopeStatus: 'stale' } : check;
-  }) };
+  // 范围是否仍然有效由 Host 依据完整会话判定并通过 `scopeStatus` 传下；界面只呈现，不再按当前页重算，
+  // 否则同一事实会得到两个答案，而且页外的后续改动会被漏掉。
+  return { changes, checks };
 }

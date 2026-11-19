@@ -37,12 +37,12 @@ test('Git diff responses bound output and classify untracked and binary files wi
     'session', 'src/file.ts'), { code: 'project_git_diff_invalid' });
 });
 
-test('Session change projection preserves Desktop source and marks a later scoped check stale', () => {
+test('Session change projection preserves Desktop source and the Host-decided check status', () => {
   const output = projectChangesFrom([
     { seq: 1, kind: 'check', runId: 'run-a', declaration: { name: 'A', scope: ['src/other.ts'] },
       commandStatus: 'met', reportStatus: 'reported_pass', scopeStatus: 'sampled' },
     { seq: 2, kind: 'check', runId: 'run-b', declaration: { name: 'B', scope: ['src/a.ts'] },
-      commandStatus: 'met', reportStatus: 'reported_pass', scopeStatus: 'sampled' },
+      commandStatus: 'met', reportStatus: 'reported_pass', scopeStatus: 'stale' },
     { seq: 3, kind: 'check', runId: 'run-c', declaration: { name: 'C', scope: ['src/a.ts'] },
       commandStatus: 'unknown', reportStatus: 'unverified', scopeStatus: 'unverified' },
     { seq: 4, kind: 'tool', runId: 'run-c', tool: 'edit', fileChanges: [
@@ -58,10 +58,7 @@ test('Session change projection preserves Desktop source and marks a later scope
   assert.equal(output.changes.length, 2, 'unsafe paths are not shown');
   assert.equal(output.changes[0].source, 'desktop');
   assert.equal(output.changes[1].source, 'agent');
-  assert.equal(output.checks.find(check => check.runId === 'run-a').scopeStatus, 'sampled',
-    'a different Agent Run does not stale this check');
-  assert.equal(output.checks.find(check => check.runId === 'run-b').scopeStatus, 'stale',
-    'a later Desktop save stales a check for its scoped path');
-  assert.equal(output.checks.find(check => check.runId === 'run-c').scopeStatus, 'unverified',
-    'a later change does not convert an unverified check into stale');
+  assert.equal(output.checks.find(check => check.runId === 'run-a').scopeStatus, 'sampled');
+  assert.equal(output.checks.find(check => check.runId === 'run-b').scopeStatus, 'stale');
+  assert.equal(output.checks.find(check => check.runId === 'run-c').scopeStatus, 'unverified');
 });

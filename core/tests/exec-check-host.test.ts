@@ -177,6 +177,9 @@ test('a Desktop save after a Run makes its scoped check stale without attributin
     assert.equal(runResult.checks?.[0]?.name, 'desktop-edit scope');
     assert.equal(runResult.checks?.[0]?.scopeStatus, 'stale');
     assert.deepEqual(runResult.fileChanges ?? [], [], 'Desktop facts do not appear as Agent Run tool changes');
+    const reread = await client.request('session.read', { sessionId }) as { events: { kind?: string; scopeStatus?: string }[] };
+    assert.equal(reread.events.find(event => event.kind === 'check')?.scopeStatus, 'stale',
+      'history reads report the same stale status the Run summary does');
     assert.equal(await readFile(scopedPath, 'utf8'), 'after Desktop save\n');
   }, {
     permission,
