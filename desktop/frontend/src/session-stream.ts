@@ -18,6 +18,12 @@ export class SessionStreamBuffer {
     const stream = this.sessions.get(sessionId) ?? { ...EMPTY_STREAM };
     if (recordKind === 'assistant') stream.text = '';
     else if (recordKind === 'reasoning') stream.reasoning = '';
+    // A finished turn ends every stream. Runs that are cancelled or fail keep no
+    // durable message, so partial text must not carry into the next turn.
+    else if (recordKind === 'turn') {
+      stream.text = '';
+      stream.reasoning = '';
+    }
 
     if (stream.text === '' && stream.reasoning === '') this.sessions.delete(sessionId);
     else this.sessions.set(sessionId, stream);
