@@ -3609,6 +3609,14 @@ export function createHost({
         assertDelegationPermission(activeGrant, state.permission.profile, state.permission.network);
         if (writing && !activeGrant.allowOperator) throw new KernelError('agent_control_operator_required');
       };
+      // 项目文件与 Git inspection 共同判定“这个会话此刻能否使用项目文件”：
+      // 通道能力/委派 Grant、权限变化中的拒绝与读写权限档位只比较这一处。
+      const requireProjectFileUse = async (state: HostSessionState, use: 'read' | 'write'): Promise<void> => {
+        await requireProjectFileAccess(state, use === 'write');
+        if (use === 'write' && state.permissionChanging) throw new KernelError('permission_change_in_progress');
+        const denied = permissionDenial(state.permission, use);
+        if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+      };
       // 目标 Run 的可见性只在这里判定：接受记录里的作用域、调用方可见范围与 Grant 作用域。
       // 处理器只拿得到已经通过判定的会话事件，不再各自复制同一段判定。
       const requireRunReference = async (state: HostSessionState, runId: string) => {
@@ -3983,27 +3991,19 @@ export function createHost({
         }
         case 'project.file.read': {
           const state = open(sessionId);
-          await requireProjectFileAccess(state);
-          const denied = permissionDenial(state.permission, 'read');
-          if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+          await requireProjectFileUse(state, 'read');
           return await readProjectFile(state.environment.config, state.id, message.params.path, message.params.offsetBytes,
             message.params.limitBytes);
         }
         case 'project.file.save': {
           return await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
-            await requireProjectFileAccess(state, true);
-            if (state.permissionChanging) throw new KernelError('permission_change_in_progress');
-            const denied = permissionDenial(state.permission, 'write');
-            if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+            await requireProjectFileUse(state, 'write');
             const result = await saveProjectFile(state.environment.config, state.id, message.params.path,
               message.params.expectedVersion, message.params.text, fileWriteQueue, async () => {
                 const current = open(sessionId);
                 if (current !== state) throw new KernelError('project_file_session_changed');
-                await requireProjectFileAccess(current, true);
-                if (current.permissionChanging) throw new KernelError('permission_change_in_progress');
-                const currentDenial = permissionDenial(current.permission, 'write');
-                if (currentDenial !== undefined) throw new KernelError(currentDenial.code, { detail: currentDenial.reason });
+                await requireProjectFileUse(current, 'write');
               }, async mutation => {
                 const path = relativePathWithin(boundaryOf(state.environment.config), mutation.path,
                   { cwd: workingDirectoryOf(state.environment.config) });
@@ -4035,16 +4035,12 @@ export function createHost({
         }
         case 'project.git.status': {
           const state = open(sessionId);
-          await requireProjectFileAccess(state);
-          const denied = permissionDenial(state.permission, 'read');
-          if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+          await requireProjectFileUse(state, 'read');
           return await readProjectGitStatus(state.environment.projectRoot, boundaryOf(state.environment.config));
         }
         case 'project.git.diff': {
           const state = open(sessionId);
-          await requireProjectFileAccess(state);
-          const denied = permissionDenial(state.permission, 'read');
-          if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
+          await requireProjectFileUse(state, 'read');
           const diff = await readProjectGitDiff(state.environment.projectRoot, boundaryOf(state.environment.config), message.params.path);
           const version = projectGitDiffVersion(diff);
           return { ...diff, ...(version === undefined ? {} : { version }) };
