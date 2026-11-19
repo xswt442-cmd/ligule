@@ -7,7 +7,8 @@ import { open } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { KernelError } from './error.js';
-import { checkedOtlpEndpoint, createOtlpTraceSink } from './telemetry-otlp.js';
+import { checkedOtlpEndpoint } from './telemetry-endpoint.js';
+import type { OtlpTraceSink } from './telemetry-otlp.js';
 
 const MAX_RECORD_BYTES = 1024;
 const MAX_QUEUE_RECORDS = 256;
@@ -229,6 +230,42 @@ interface Manifest {
 
 interface FileIdentity { readonly dev: string; readonly ino: string }
 
+// 默认不加载 OpenTelemetry SDK：只有真正配置了 OTLP 端点时才在第一次导出前加载。
+function lazyOtlpSink(endpoint: string): OtlpTraceSink {
+  let real: OtlpTraceSink | undefined;
+  let loading: Promise<OtlpTraceSink> | undefined;
+  const pending: Readonly<Record<string, string | number | boolean>>[] = [];
+  const load = (): Promise<OtlpTraceSink> => {
+    loading ??= import('./telemetry-otlp.js').then((module) => module.createOtlpTraceSink(endpoint));
+    return loading;
+  };
+  return {
+    emit(event) {
+      if (real !== undefined) { real.emit(event); return; }
+      pending.push(event);
+      if (pending.length > MAX_QUEUE_RECORDS) pending.shift();
+      void load().then((sink) => {
+        real = sink;
+        for (const buffered of pending.splice(0)) sink.emit(buffered);
+      }).catch(() => { /* telemetry must stay best-effort */ });
+    },
+    async flush() {
+      if (real === undefined && pending.length === 0) return;
+      const sink = real ?? await load();
+      real = sink;
+      for (const buffered of pending.splice(0)) sink.emit(buffered);
+      await sink.flush();
+    },
+    async shutdown() {
+      if (real === undefined && pending.length === 0) return;
+      const sink = real ?? await load();
+      real = sink;
+      for (const buffered of pending.splice(0)) sink.emit(buffered);
+      await sink.shutdown();
+    },
+  };
+}
+
 /** Bounded local JSONL telemetry plus an optional, loopback-only OTLP trace sink. */
 export function createTelemetry(options: TelemetryOptions = {}, onStorageFailure?: (code: string) => void): Telemetry {
   if (options.enabled !== true) return NOOP;
@@ -245,7 +282,7 @@ export function createTelemetry(options: TelemetryOptions = {}, onStorageFailure
     if (localEnabled && endpoint !== undefined) throw new KernelError('telemetry_options_invalid');
     if (endpoint === undefined) return NOOP;
   }
-  const otlp = endpoint === undefined ? undefined : createOtlpTraceSink(endpoint);
+  const otlp = endpoint === undefined ? undefined : lazyOtlpSink(endpoint);
 
   const requestedDirectory = localEnabled ? resolve(options.directory!) : '';
   let directory = requestedDirectory;

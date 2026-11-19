@@ -1,11 +1,20 @@
 import { open, lstat, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { createHash } from 'node:crypto';
-import sharp from 'sharp';
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../errors.js';
 import { resolveWithin, isWithin } from './paths.js';
 import type { FileArtifact } from '../artifact.js';
+
+type SharpModule = typeof import('sharp');
+
+let sharpFactory: Promise<SharpModule['default']> | undefined;
+
+// 预览只在真的遇到图片时加载解码器。
+function sharpModule(): Promise<SharpModule['default']> {
+  sharpFactory ??= import('sharp').then((module) => module.default);
+  return sharpFactory;
+}
 
 const FILE_LIMIT = 20 * 1024 * 1024;
 const TOTAL_LIMIT = 64 * 1024 * 1024;
@@ -123,6 +132,7 @@ export async function previewFileArtifact(artifact: FileArtifact, workspaceRoot:
   if (current.artifact.sha256 !== artifact.sha256 || current.size !== artifact.bytes) throw new KernelError('artifact_modified');
   if (isText) return { type: 'text' as const, text: current.preview!.toString('utf8'), truncated: current.size > current.preview!.length };
   if (isImage) {
+    const sharp = await sharpModule();
     const converted = await sharp(current.preview!, { limitInputPixels: 40_000_000, failOn: 'warning', page: 0, pages: 1 })
       .resize({ width: 512, height: 512, fit: 'inside', withoutEnlargement: true })
       .webp({ quality: 70 }).toBuffer();

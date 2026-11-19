@@ -166,7 +166,7 @@ export function createMcpTools(
         } catch (error) {
           throw new KernelError('mcp_arguments_invalid_json', { detail: `arguments is not JSON: ${(error as Error).message}` });
         }
-        const problems = validateToolArguments(parsed, found.inputSchema);
+        const problems = await validateToolArguments(parsed, found.inputSchema);
         if (problems.length > 0) throw new KernelError('mcp_arguments_invalid', { detail: problems.join('; ') });
         await authorization.authorizeArguments?.(args.server, args.tool, parsed);
         const result = await registry.call(args.server, args.tool, parsed, signal) as { content?: unknown[]; isError?: boolean };

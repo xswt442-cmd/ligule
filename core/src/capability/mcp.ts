@@ -13,9 +13,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Ajv } from 'ajv';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import * as formatsModule from 'ajv-formats';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { JsonSchemaType } from '@modelcontextprotocol/sdk/validation';
 import { KernelError } from '../errors.js';
 import { createOwnedProcessJob, type OwnedProcessJob } from './win32-job.js';
@@ -140,7 +138,14 @@ function definitionOf(
 const DRAFT_2020_12 = 'https://json-schema.org/draft/2020-12/schema';
 const DRAFT_7 = 'http://json-schema.org/draft-07/schema#';
 
-export function validateToolArguments(args: unknown, schema: Record<string, unknown>): string[] {
+// SDK 校验器只在真正调用 MCP 工具时加载，避免每个 Ligule 进程都拉起整套客户端 SDK。
+let validatorModule: Promise<typeof import('@modelcontextprotocol/sdk/validation/ajv')> | undefined;
+function validatorLoader() {
+  validatorModule ??= import('@modelcontextprotocol/sdk/validation/ajv');
+  return validatorModule;
+}
+
+export async function validateToolArguments(args: unknown, schema: Record<string, unknown>): Promise<string[]> {
   try {
     const declaredDialect = schema.$schema;
     const options = {
@@ -158,6 +163,7 @@ export function validateToolArguments(args: unknown, schema: Record<string, unkn
         : undefined;
     if (ajv === undefined) return [`tool schema dialect is unsupported: ${String(declaredDialect)}`];
     formatsModule.default.default(ajv as Ajv);
+    const { AjvJsonSchemaValidator } = await validatorLoader();
     const validator = new AjvJsonSchemaValidator(ajv as Ajv);
     const validate = validator.getValidator<Record<string, unknown>>({ type: 'object', ...schema } as JsonSchemaType);
     const result = validate(args);
@@ -376,6 +382,10 @@ export async function connectServer(
 ): Promise<ConnectedServer> {
   const job = process.platform === 'win32' ? await createOwnedProcessJob({ assignCurrentProcess: false }) : undefined;
   const processGroupLauncher = await processGroupLauncherPath();
+  const [{ Client }, { StdioClientTransport }] = await Promise.all([
+    import('@modelcontextprotocol/sdk/client/index.js'),
+    import('@modelcontextprotocol/sdk/client/stdio.js'),
+  ]);
   const transport = new StdioClientTransport({
     command: processGroupLauncher === undefined ? settings.command : process.execPath,
     args: processGroupLauncher === undefined ? settings.args : [processGroupLauncher, settings.command, ...settings.args],
@@ -545,7 +555,7 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[], options:
         await refreshTools(opened, activeSignal);
         const definition = opened.tools.get(tool);
         if (definition === undefined) throw new KernelError('mcp_tool_unknown', { detail: `${name}/${tool}` });
-        const problems = validateToolArguments(args, definition.inputSchema);
+        const problems = await validateToolArguments(args, definition.inputSchema);
         if (problems.length > 0) throw new KernelError('mcp_arguments_invalid', { detail: problems.join('; ') });
       }
       try {

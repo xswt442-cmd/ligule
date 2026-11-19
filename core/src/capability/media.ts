@@ -3,7 +3,6 @@ import { constants, type Stats } from 'node:fs';
 import { lstat, mkdir, open, opendir, readdir, rename, unlink } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import lockfile from 'proper-lockfile';
-import sharp from 'sharp';
 import { KernelError } from '../errors.js';
 import { workspaceIdentity } from '../workspace-identity.js';
 import { dataRoot } from '../data-root.js';
@@ -12,6 +11,16 @@ import { parseSessionBytes } from '../session/record.js';
 import { resolveWithin } from './paths.js';
 import { boundaryOf, workingDirectoryOf } from './limits.js';
 import { IMAGE_ID, IMAGE_LIMITS, isImageReference, type ImageReference } from '../media.js';
+
+type SharpModule = typeof import('sharp');
+
+let sharpFactory: Promise<SharpModule['default']> | undefined;
+
+// 只有真正处理图片时才加载原生 libvips，避免每个进程都承担解码器的启动成本。
+function sharpModule(): Promise<SharpModule['default']> {
+  sharpFactory ??= import('sharp').then((module) => module.default);
+  return sharpFactory;
+}
 export { IMAGE_LIMITS, isImageReference, type ImageReference } from '../media.js';
 
 export interface SessionMediaScan {
@@ -412,6 +421,7 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
       if (workspace.length > 2048) throw new KernelError('image_workspace_invalid');
       if (!['file', 'desktop', 'browser', 'document'].includes(source)) throw new KernelError('image_source_invalid');
       if (input.length === 0 || input.length > IMAGE_LIMITS.inputBytes) throw new KernelError('image_bytes_exceeded');
+      const sharp = await sharpModule();
       const decoder = sharp(input, { limitInputPixels: IMAGE_LIMITS.pixels, failOn: 'warning', page: 0, pages: 1 });
       // destroy(error) emits on the stream as well as rejecting an active Sharp promise.
       decoder.on('error', () => {});
@@ -484,6 +494,7 @@ export type MediaStore = ReturnType<typeof createMediaStore>;
 /** A transient display derivative; canonical records contain only the original reference. */
 export async function imagePreview(media: MediaStore, reference: ImageReference) {
   const bytes = await media.read(reference);
+  const sharp = await sharpModule();
   const output = await sharp(bytes, { limitInputPixels: IMAGE_LIMITS.pixels, failOn: 'warning' })
     .resize({ width: 512, height: 512, fit: 'inside', withoutEnlargement: true })
     .webp({ quality: 70 }).toBuffer({ resolveWithObject: true });

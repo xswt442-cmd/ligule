@@ -142,21 +142,21 @@ function configsToConfig(env: Record<string, string> | undefined, tools: Record<
   return { mcp: { servers: { fs: { ...tools, ...(env === undefined ? {} : { env }) } } } };
 }
 
-test('arguments are checked against the definition the server declared', () => {
+test('arguments are checked against the definition the server declared', async () => {
   const schema = {
     type: 'object',
     properties: { path: { type: 'string' }, lines: { type: 'integer' }, tags: { type: 'array', items: { type: 'string' } } },
     required: ['path'],
     additionalProperties: false,
   };
-  assert.deepEqual(validateToolArguments({ path: 'a.txt', lines: 3, tags: ['x'] }, schema), []);
-  assert.match(validateToolArguments({}, schema).join('; '), /required property 'path'/);
-  assert.match(validateToolArguments({ path: 3 }, schema).join('; '), /must be string/);
-  assert.match(validateToolArguments({ path: 'a', tags: [1] }, schema).join('; '), /tags\/0 must be string/);
-  assert.match(validateToolArguments({ path: 'a', other: 1 }, schema).join('; '), /additional properties/);
+  assert.deepEqual(await validateToolArguments({ path: 'a.txt', lines: 3, tags: ['x'] }, schema), []);
+  assert.match((await validateToolArguments({}, schema)).join('; '), /required property 'path'/);
+  assert.match((await validateToolArguments({ path: 3 }, schema)).join('; '), /must be string/);
+  assert.match((await validateToolArguments({ path: 'a', tags: [1] }, schema)).join('; '), /tags\/0 must be string/);
+  assert.match((await validateToolArguments({ path: 'a', other: 1 }, schema)).join('; '), /additional properties/);
 });
 
-test('arguments honor numeric, enum, and union schema constraints', () => {
+test('arguments honor numeric, enum, and union schema constraints', async () => {
   const schema = {
     type: 'object',
     properties: {
@@ -168,14 +168,14 @@ test('arguments honor numeric, enum, and union schema constraints', () => {
     required: ['milliseconds', 'format', 'email', 'value'],
     additionalProperties: false,
   };
-  assert.deepEqual(validateToolArguments({ milliseconds: 1, format: 'short', email: 'agent@example.com', value: 0 }, schema), []);
-  assert.match(validateToolArguments({ milliseconds: 0, format: 'short', email: 'agent@example.com', value: 0 }, schema).join('; '), /minimum|>=/i);
-  assert.match(validateToolArguments({ milliseconds: 1, format: 'wide', email: 'agent@example.com', value: 0 }, schema).join('; '), /allowed values/i);
-  assert.match(validateToolArguments({ milliseconds: 1, format: 'short', email: 'invalid', value: 0 }, schema).join('; '), /email/);
-  assert.match(validateToolArguments({ milliseconds: 1, format: 'short', email: 'agent@example.com', value: false }, schema).join('; '), /anyOf|valid/i);
+  assert.deepEqual(await validateToolArguments({ milliseconds: 1, format: 'short', email: 'agent@example.com', value: 0 }, schema), []);
+  assert.match((await validateToolArguments({ milliseconds: 0, format: 'short', email: 'agent@example.com', value: 0 }, schema)).join('; '), /minimum|>=/i);
+  assert.match((await validateToolArguments({ milliseconds: 1, format: 'wide', email: 'agent@example.com', value: 0 }, schema)).join('; '), /allowed values/i);
+  assert.match((await validateToolArguments({ milliseconds: 1, format: 'short', email: 'invalid', value: 0 }, schema)).join('; '), /email/);
+  assert.match((await validateToolArguments({ milliseconds: 1, format: 'short', email: 'agent@example.com', value: false }, schema)).join('; '), /anyOf|valid/i);
 });
 
-test('a changed schema reusing its $id is validated from the new definition', () => {
+test('a changed schema reusing its $id is validated from the new definition', async () => {
   const id = '$id';
   const schema = (minimum: number) => ({
     [id]: 'urn:ligule:mcp:test:changed-schema',
@@ -183,11 +183,11 @@ test('a changed schema reusing its $id is validated from the new definition', ()
     properties: { value: { type: 'integer', minimum } },
     required: ['value'],
   });
-  assert.deepEqual(validateToolArguments({ value: 1 }, schema(1)), []);
-  assert.match(validateToolArguments({ value: 1 }, schema(10)).join('; '), />= 10/);
+  assert.deepEqual(await validateToolArguments({ value: 1 }, schema(1)), []);
+  assert.match((await validateToolArguments({ value: 1 }, schema(10))).join('; '), />= 10/);
 });
 
-test('the default schema dialect is Draft 2020-12 and prefixItems are enforced', () => {
+test('the default schema dialect is Draft 2020-12 and prefixItems are enforced', async () => {
   const schema = {
     type: 'object',
     properties: {
@@ -196,29 +196,29 @@ test('the default schema dialect is Draft 2020-12 and prefixItems are enforced',
     required: ['values'],
     description: 'This standard annotation is accepted.',
   };
-  assert.deepEqual(validateToolArguments({ values: ['only'] }, schema), []);
-  assert.notDeepEqual(validateToolArguments({ values: ['other'] }, schema), []);
-  assert.notDeepEqual(validateToolArguments({ values: ['only', 'extra'] }, schema), []);
+  assert.deepEqual(await validateToolArguments({ values: ['only'] }, schema), []);
+  assert.notDeepEqual(await validateToolArguments({ values: ['other'] }, schema), []);
+  assert.notDeepEqual(await validateToolArguments({ values: ['only', 'extra'] }, schema), []);
 });
 
-test('an explicit Draft 7 schema is supported and unsupported dialects fail closed', () => {
+test('an explicit Draft 7 schema is supported and unsupported dialects fail closed', async () => {
   const schema = {
     $schema: 'http://json-schema.org/draft-07/schema#',
     type: 'object',
     properties: { start: { type: 'boolean' }, end: { type: 'boolean' } },
     dependencies: { start: ['end'] },
   };
-  assert.deepEqual(validateToolArguments({ start: true, end: false }, schema), []);
-  assert.match(validateToolArguments({ start: true }, schema).join('; '), /dependency|end/);
-  assert.notDeepEqual(validateToolArguments({}, { $schema: 'http://json-schema.org/draft-04/schema#', type: 'object' }), []);
-  assert.notDeepEqual(validateToolArguments({}, { type: 'object', properties: { value: { type: 'string', unknownConstraint: true } } }), []);
+  assert.deepEqual(await validateToolArguments({ start: true, end: false }, schema), []);
+  assert.match((await validateToolArguments({ start: true }, schema)).join('; '), /dependency|end/);
+  assert.notDeepEqual(await validateToolArguments({}, { $schema: 'http://json-schema.org/draft-04/schema#', type: 'object' }), []);
+  assert.notDeepEqual(await validateToolArguments({}, { type: 'object', properties: { value: { type: 'string', unknownConstraint: true } } }), []);
 });
 
 test('an invalid tool schema fails closed with the existing argument error code', async () => {
   const registry = fakeRegistry('aaaa', { type: 'bogus' });
   const disclosed = { seen: new Set(['fs/read_file@aaaa']) };
   const { callTool } = createMcpTools(registry, disclosed);
-  assert.notDeepEqual(validateToolArguments({}, { type: 'bogus' }), []);
+  assert.notDeepEqual(await validateToolArguments({}, { type: 'bogus' }), []);
   await assert.rejects(
     () => callTool.run({ server: 'fs', tool: 'read_file', arguments: '{}', schemaDigest: 'aaaa' }),
     (error) => (error as CodedError).code === 'mcp_arguments_invalid',
