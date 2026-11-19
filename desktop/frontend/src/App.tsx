@@ -46,6 +46,7 @@ import { addWorkbenchCommand, closeWorkbenchCommand, closeWorkbenchTab, openWork
 import { LocaleProvider, localeOf } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
 import { SessionStreamBuffer } from './session-stream';
+import { SessionWindow } from './session-window';
 import { observeExternalSession } from './external-session-observation';
 import { clearExternalSessionDraftIfCurrent, externalSessionDraftFor, externalSessionDraftRevisionFor, updateExternalSessionDrafts, type ExternalSessionDrafts } from './external-session-drafts';
 import { clearSessionDraftIfCurrent, sessionDraftRevisionFor, updateSessionDraftRevision, type SessionDraftRevisions } from './session-draft-revisions';
@@ -272,6 +273,21 @@ export function App({ transport }: { transport: Transport }) {
   const liveStreamRef = useRef<SessionStreamBuffer | null>(null);
   if (liveStreamRef.current === null) liveStreamRef.current = new SessionStreamBuffer();
   const liveBySession = liveStreamRef.current;
+  // 已应用的记录序号；打开会话期间收到的记录先缓存在这里，等快照落定后再按序应用。
+  const sessionWindowRef = useRef<SessionWindow<Record_> | null>(null);
+  if (sessionWindowRef.current === null) sessionWindowRef.current = new SessionWindow<Record_>();
+  const sessionWindow = sessionWindowRef.current;
+  const pendingRecords = useRef<Record_[] | null>(null);
+  const appendRecord = useCallback((record: Record_) => {
+    if (record?.kind === 'assistant') {
+      for (const call of record.toolCalls ?? []) dispatchAt.current.set(call.id, Date.now());
+    }
+    // 事件不保存逐条计时；运行时长由界面在轮次进行期间测量。
+    const started = record?.kind === 'tool' && record.callId !== undefined ? dispatchAt.current.get(record.callId) : undefined;
+    if (started !== undefined && record?.callId !== undefined) dispatchAt.current.delete(record.callId);
+    const added = projectRecord(record, started === undefined ? {} : { startedAt: started });
+    if (added.length > 0) setRows((current) => [...current, ...added]);
+  }, []);
   const acceptExternalDelta = useCallback((kind: 'text' | 'reasoning', text: string) => {
     const held = liveBySession.append(sessionId ?? '', kind, text);
     if (held !== null && sessionId !== null) setLive(held);
@@ -1131,14 +1147,13 @@ export function App({ transport }: { transport: Transport }) {
         const held = liveBySession.settle(owner, record?.kind ?? '');
         if (inView) setLive(held);
         if (!inView) return;
-        if (record?.kind === 'assistant') {
-          for (const call of record.toolCalls ?? []) dispatchAt.current.set(call.id, Date.now());
+        // 打开会话的读取尚未完成：先按序缓存，等快照替换页面后再逐条应用。
+        const buffered = pendingRecords.current;
+        if (buffered !== null) {
+          buffered.push(record);
+          return;
         }
-        // 事件不保存逐条计时；运行时长由界面在轮次进行期间测量。
-        const started = record?.kind === 'tool' && record.callId !== undefined ? dispatchAt.current.get(record.callId) : undefined;
-        if (started !== undefined && record?.callId !== undefined) dispatchAt.current.delete(record.callId);
-        const added = projectRecord(record, started === undefined ? {} : { startedAt: started });
-        if (added.length > 0) setRows((current) => [...current, ...added]);
+        appendRecord(record);
       }
     });
 
@@ -1264,6 +1279,9 @@ export function App({ transport }: { transport: Transport }) {
     setUnread((current) => current.filter((item) => item !== id));
     setMobileSidebar(false);
     setRows([]);
+    // 记录事件可能在快照返回前就已到达；先缓存，等快照落定后按序号再应用。
+    pendingRecords.current = [];
+    sessionWindow.reset(0);
     setPage(null);
     setOlderLoading(false);
     prependAnchor.current = null;
@@ -1358,6 +1376,28 @@ export function App({ transport }: { transport: Transport }) {
       connectionLost.current = false;
       setLink(null);
       setPage({ before: Number(events[0]?.seq ?? 1), hasMore });
+      // 快照已覆盖读取期间到达的记录；只把其中更新的记录接到末尾，重复的直接丢弃。
+      sessionWindow.reset(Number(events.at(-1)?.seq ?? 0));
+      const buffered = pendingRecords.current;
+      pendingRecords.current = null;
+      if (buffered !== null) {
+        let missing = 0;
+        for (const record of buffered) {
+          const decision = sessionWindow.incoming(record);
+          if (decision.apply) { appendRecord(record); continue; }
+          if (decision.reason === 'gap') { missing = decision.missingFrom; break; }
+        }
+        if (missing > 0) {
+          // 中间记录没有送达：重读当前窗口补齐；仍不连续时下一次打开会再次同步。
+          try {
+            const fresh = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[] };
+            if (openRequest.current === request) {
+              const filled = sessionWindow.adopt(fresh.events.filter((event) => Number(event.seq) >= missing));
+              for (const record of filled) appendRecord(record);
+            }
+          } catch { /* 传输已断开时由重新连接流程统一处理 */ }
+        }
+      }
       // 如果保存的阅读位置仍在已加载页面中就恢复该位置；否则停在末尾，不改变展示档或自动加载更多页面。
       const back = savedAnchor !== undefined && savedAnchor > Number(events[0]?.seq) && savedAnchor < Number(events.at(-1)?.seq)
         ? { sessionId: id, seq: savedAnchor, kind: 'anchor' }
@@ -1365,6 +1405,7 @@ export function App({ transport }: { transport: Transport }) {
       setWanted(hit ?? back);
     } catch (error) {
       // 忽略旧请求的失败，避免将过期错误显示在当前会话中。
+      pendingRecords.current = null;
       if (openRequest.current === request) setRows((current) => [...current, metaRow('error', `无法打开会话：${code(error)}`, `Could not open conversation: ${code(error)}`)]);
       return false;
     } finally {
