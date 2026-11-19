@@ -75,6 +75,7 @@ import { assertNoLegacyTrashConfig, boundaryOf, limitsOf, workingDirectoryOf, ty
 import { relativePathWithin, resolveWithin } from '../capability/paths.js';
 import { runManagedExec, type ExecControlArguments, type ExecRunContext } from '../capability/exec.js';
 import { createFiniteCommandRegistry, type FiniteCommandOwner } from '../capability/finite-command.js';
+import { createProcessOwnership } from './process-ownership.js';
 import { createManagedProcessRegistry, managedProcessPlugin, type ManagedProcessRegistry } from '../capability/managed-process.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
@@ -1255,6 +1256,8 @@ export function createHost({
       }
     },
   });
+
+  const processOwnership = createProcessOwnership(finiteCommands);
 
   function open(id: string): HostSessionState {
     const state = sessions.get(id);
@@ -3489,13 +3492,12 @@ export function createHost({
         confirmedPartialWorkspaceWrite,
       });
       state.permission = next;
-      await state.managedProcesses.stopAll();
-      await Promise.all([...sessions.values()].filter((candidate) => candidate.operationSourceSessionId === state.id)
-        .map(async (operation) => {
-          operation.operationRevoked = true;
-          operation.running?.abort(new KernelError('operation_source_permission_changed'));
-          await finiteCommands.stopSession(operation.id);
-        }));
+      const derivedOperations = [...sessions.values()].filter((candidate) => candidate.operationSourceSessionId === state.id);
+      for (const operation of derivedOperations) {
+        operation.operationRevoked = true;
+        operation.running?.abort(new KernelError('operation_source_permission_changed'));
+      }
+      await processOwnership.stopAfterPermissionChange(state, derivedOperations.map((operation) => operation.id));
       if (permissionDenial(next, 'external') !== undefined) await revokeSessionMcp(state, BROWSER_SERVER);
       return { sessionId: state.id, permission: sessionPermissionView(state, mayChangePermission(bridge)), applies: 'now' };
     } finally {
@@ -3683,10 +3685,7 @@ export function createHost({
             state.permission = createPermissionContext(state.permission.profile, state.permission.network, state.permission.capabilities,
               permissionOptionsOf(state.permission, state.permission.partialWorkspaceWriteConfirmed, message.params.trusted));
           }
-          if (!message.params.trusted) await Promise.all([
-            finiteCommands.stopProject(identity),
-            ...affectedSessions.map((state) => state.managedProcesses.stopWorkspaceTrusted()),
-          ]);
+          if (!message.params.trusted) await processOwnership.stopAfterTrustChange(identity, affectedSessions);
           return { projectRoot: environment.projectRoot, trusted: message.params.trusted };
         }
         case 'session.create': {
@@ -4810,8 +4809,7 @@ export function createHost({
           if (state.running === undefined) throw new KernelError('run_not_running', { detail: sessionId });
           // 通过当前循环处理取消，让工具和模型请求收到同一个取消信号。
           state.running.abort();
-          if (state.activeRunId !== undefined) await finiteCommands.stopRun(state.id, state.activeRunId, 'run_cancel');
-          await state.managedProcesses.stopAll();
+          await processOwnership.stopRun(state, 'run_cancel');
           return { cancelled: true };
         }
         case 'operation.start': {
@@ -5316,12 +5314,8 @@ export function createHost({
           const result = await revokeDelegationGrant(
             delegationPathOf(), grantId, requiredString(message.params.version, 'version'),
           );
-          await Promise.all([
-            finiteCommands.stopGrant(grantId),
-            ...[...sessions.values()]
-              .filter((state) => state.managedGrantId === grantId)
-              .map((state) => state.managedProcesses.stopAll()),
-          ]);
+          await processOwnership.stopAfterGrantRevocation(grantId,
+            [...sessions.values()].filter((state) => state.managedGrantId === grantId));
           return result;
         }
         case 'mcp.trust.list': {
