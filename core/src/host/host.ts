@@ -3609,11 +3609,17 @@ export function createHost({
         assertDelegationPermission(activeGrant, state.permission.profile, state.permission.network);
         if (writing && !activeGrant.allowOperator) throw new KernelError('agent_control_operator_required');
       };
-      const requireSubrunParent = async (state: HostSessionState, parentRunId: string): Promise<void> => {
+      // 目标 Run 的可见性只在这里判定：接受记录里的作用域、调用方可见范围与 Grant 作用域。
+      // 处理器只拿得到已经通过判定的会话事件，不再各自复制同一段判定。
+      const requireRunReference = async (state: HostSessionState, runId: string) => {
         const events = await state.session.read();
-        const scope = runAcceptanceScope(events, sessionId, parentRunId);
+        const scope = runAcceptanceScope(events, state.id, runId);
         if (scope === undefined || (runScopes !== undefined && !runScopes.includes(scope))) throw new KernelError('run_not_found');
         if (grant !== undefined) assertGrantSessionScope(grant, state);
+        return { events, scope };
+      };
+      const requireSubrunParent = async (state: HostSessionState, parentRunId: string): Promise<void> => {
+        await requireRunReference(state, parentRunId);
       };
 
       // 方法级准入只在分派前判定一次：Operation Session 能做什么（capabilities.ts）与
@@ -4052,10 +4058,7 @@ export function createHost({
           const state = open(sessionId);
           const runId = requiredString(message.params.runId, 'runId');
           const callId = requiredString(message.params.callId, 'callId');
-          const events = await state.session.read();
-          const scope = runAcceptanceScope(events, sessionId, runId);
-          if (scope === undefined || (runScopes !== undefined && !runScopes.includes(scope))) throw new KernelError('run_not_found');
-          if (grant !== undefined) assertGrantSessionScope(grant, state);
+          const { events } = await requireRunReference(state, runId);
 
           const runOwners = new Map<number, string | undefined>();
           let currentRunId: string | undefined;
@@ -4709,10 +4712,7 @@ export function createHost({
           if (message.params.origin !== undefined && message.params.origin !== 'human' && message.params.origin !== 'controller') {
             throw new KernelError('protocol_args_invalid');
           }
-          const events = await state.session.read();
-          const scope = runAcceptanceScope(events, sessionId, runId);
-          if (scope === undefined) throw new KernelError('run_not_found');
-          if (runScopes !== undefined && !runScopes.includes(scope)) throw new KernelError('run_not_found');
+          const { events, scope } = await requireRunReference(state, runId);
           const receipt = findRunReceipt(events, sessionId, scope, { runId });
           if (receipt === undefined) throw new KernelError('run_not_found');
           if (state.activeRunId === runId && state.operation !== undefined) return await state.operation;
@@ -4912,9 +4912,7 @@ export function createHost({
           const state = open(sessionId);
           const runId = requiredString(message.params.runId, 'runId');
           if (state.activeRunId !== runId) throw new KernelError('run_steer_target_mismatch');
-          const scope = runAcceptanceScope(await state.session.read(), sessionId, runId);
-          if (scope === undefined || (runScopes !== undefined && !runScopes.includes(scope))) throw new KernelError('run_not_found');
-          if (grant !== undefined) assertGrantSessionScope(grant, state);
+          await requireRunReference(state, runId);
           const header = await state.session.header();
           if (header?.formatVersion === undefined || header.formatVersion < 3) throw new KernelError('run_steer_session_format_unsupported');
           const steering = state.runSteering;
