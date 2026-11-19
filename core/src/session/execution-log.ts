@@ -90,8 +90,19 @@ export async function writeExecutionLog(directory: string, executionId: string,
   }
 }
 
-export async function readExecutionLog(directory: string, executionId: string, reference: ExecutionLogReference): Promise<ExecLogSnapshot> {
-  if (!EXECUTION_LOG_NAME.test(reference.name) || reference.name !== safeLogName(executionId)
+/** 只接受记录里能核对的日志引用；形状不对一律丢弃，交给调用方写“未知”。 */
+export function checkedExecutionLogReference(value: unknown): ExecutionLogReference | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const reference = value as Record<string, unknown>;
+  if (Object.keys(reference).some((key) => !['name', 'bytes', 'sha256'].includes(key))
+    || typeof reference.name !== 'string' || !EXECUTION_LOG_NAME.test(reference.name)
+    || !Number.isSafeInteger(reference.bytes) || Number(reference.bytes) < 1
+    || Number(reference.bytes) > MAX_EXECUTION_LOG_FILE_BYTES
+    || typeof reference.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(reference.sha256)) return undefined;
+  return { name: reference.name, bytes: Number(reference.bytes), sha256: reference.sha256 };
+}
+
+export async function readExecutionLog(directory: string, executionId: string, reference: ExecutionLogReference): Promise<ExecLogSnapshot> {  if (!EXECUTION_LOG_NAME.test(reference.name) || reference.name !== safeLogName(executionId)
     || !Number.isSafeInteger(reference.bytes) || reference.bytes < 1 || reference.bytes > MAX_EXECUTION_LOG_FILE_BYTES
     || !/^[a-f0-9]{64}$/u.test(reference.sha256)) throw new KernelRuntimeError('session_execution_log_reference_invalid');
   const root = await realpath(resolve(directory));

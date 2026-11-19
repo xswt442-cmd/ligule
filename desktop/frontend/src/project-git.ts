@@ -1,7 +1,7 @@
 import type { Client } from './protocol';
 
 export type ProjectGitStatus = {
-  readonly state: 'ready' | 'not_repository' | 'unsupported_filter' | 'unavailable' | 'timed_out' | 'output_too_large' | 'invalid_path';
+  readonly state: 'ready' | 'not_repository' | 'unsupported_filter' | 'unsupported_scope' | 'unavailable' | 'timed_out' | 'output_too_large' | 'invalid_path';
   readonly files: readonly ProjectGitStatusEntry[];
   readonly truncated: boolean;
 };
@@ -37,7 +37,7 @@ function checkedPath(value: unknown): value is string {
   return !normalized.startsWith('//') && normalized.split('/').every(part => part !== '' && part !== '.' && part !== '..');
 }
 
-const STATUS_STATES = ['ready', 'not_repository', 'unsupported_filter', 'unavailable', 'timed_out', 'output_too_large', 'invalid_path'];
+const STATUS_STATES = ['ready', 'not_repository', 'unsupported_filter', 'unsupported_scope', 'unavailable', 'timed_out', 'output_too_large', 'invalid_path'];
 const ENTRY_KINDS = ['added', 'modified', 'deleted', 'renamed', 'copied', 'unmerged', 'untracked', 'other'];
 
 function checkedStatus(value: unknown): ProjectGitStatus {

@@ -48,14 +48,29 @@ test('a declared finite check binds its exit, structured report, and scoped file
     assert.deepEqual(check.report, { schema: 'ligule-test-report', version: 1, passed: 2, failed: 0, skipped: 1, todo: 0 });
     assert.equal(check.scopeStatus, 'sampled');
     assert.equal(Object.hasOwn(check, 'stdout'), false, 'check facts reference finite logs and do not duplicate stdout');
+    // 检查事件自己携带命令起止时刻与日志引用，读取方不必再去拼另一条 execution 记录。
+    const checkFields = check as Record<string, unknown>;
+    assert.match(String(checkFields.startedAt), /^\d{4}-\d{2}-\d{2}T/u);
+    assert.match(String(checkFields.endedAt), /^\d{4}-\d{2}-\d{2}T/u);
+    assert.ok(Date.parse(String(checkFields.endedAt)) >= Date.parse(String(checkFields.startedAt)));
+    const logsRef = checkFields.logsRef as { name?: string; bytes?: number; sha256?: string } | undefined;
+    assert.ok(logsRef !== undefined, 'the check carries a reference to its own execution log');
+    assert.match(String(logsRef.name), /^execution-[0-9a-f-]{36}\.log\.json$/u);
+    assert.ok(Number.isSafeInteger(logsRef.bytes) && Number(logsRef.bytes) >= 1);
+    assert.match(String(logsRef.sha256), /^[a-f0-9]{64}$/u);
     const result = await client.request('tool.result', {
       sessionId, runId: command.runId, callId: command.callId, limitBytes: 1_024,
     }) as Record<string, unknown>;
     assert.equal((result.check as Record<string, unknown>).reportStatus, 'reported_pass');
+    assert.equal((result.check as Record<string, unknown>).startedAt, checkFields.startedAt);
+    assert.equal((result.check as Record<string, unknown>).endedAt, checkFields.endedAt);
+    assert.deepEqual((result.check as Record<string, unknown>).logsRef, logsRef);
     const runPage = await client.request('run.result', { projectRoot: projectDirectory, sessionId, runId: command.runId }) as { json: string };
-    const runResult = JSON.parse(runPage.json) as { checks?: { name: string; reportStatus: string }[] };
+    const runResult = JSON.parse(runPage.json) as { checks?: { name: string; reportStatus: string; startedAt?: string; endedAt?: string }[] };
     assert.equal(runResult.checks?.[0]?.name, 'focused test');
     assert.equal(runResult.checks?.[0]?.reportStatus, 'reported_pass');
+    assert.equal(runResult.checks?.[0]?.startedAt, checkFields.startedAt);
+    assert.equal(runResult.checks?.[0]?.endedAt, checkFields.endedAt);
   }, {
     permission,
     permissionControl: true,
@@ -81,9 +96,11 @@ test('a later in-Run file edit makes a sampled check stale in RunResult without 
     await client.request('workspace.trust', { projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true });
     client.onRequest((message) => message.method === 'approval.request' ? { decision: 'allow' } : undefined);
     await client.request('run.start', { sessionId, input: 'execute a check then edit one of its scoped files' });
-    const result = await client.request('run.result', { projectRoot: projectDirectory, sessionId, runId: (await client.request('session.read', { sessionId }) as {
-      events: { kind?: string; run?: { runId?: string } }[];
-    }).events.find((event) => event.kind === 'user')?.run?.runId }) as { json: string };
+    const history = await client.request('session.read', { sessionId }) as {
+      events: { kind?: string; tool?: string; callId?: string; runId?: string; run?: { runId?: string } }[];
+    };
+    const runId = history.events.find((event) => event.kind === 'user')?.run?.runId;
+    const result = await client.request('run.result', { projectRoot: projectDirectory, sessionId, runId }) as { json: string };
     const runResult = JSON.parse(result.json) as { state: string; checks?: { name: string; scopeStatus: string }[];
       fileChanges?: { path: string; operation: string; outcome: string }[] };
     assert.equal(runResult.state, 'completed', 'ordinary Runs still complete without a required check contract');
@@ -92,6 +109,13 @@ test('a later in-Run file edit makes a sampled check stale in RunResult without 
     assert.equal(runResult.fileChanges?.[0]?.path, 'scope.txt');
     assert.equal(runResult.fileChanges?.[0]?.operation, 'edit');
     assert.equal(await readFile(join(projectDirectory, 'scope.txt'), 'utf8'), 'changed scope\n');
+    const execCall = history.events.find((event) => event.kind === 'tool' && event.tool === 'exec');
+    assert.ok(typeof execCall?.callId === 'string' && typeof execCall.runId === 'string');
+    const projected = await client.request('tool.result', {
+      sessionId, runId: execCall.runId, callId: execCall.callId, limitBytes: 1_024,
+    }) as { check?: { scopeStatus?: string } };
+    assert.equal(projected.check?.scopeStatus, 'stale',
+      'the per-call projection and the Run summary must agree on the recomputed scope status');
   }, {
     providerReply: () => {
       step += 1;

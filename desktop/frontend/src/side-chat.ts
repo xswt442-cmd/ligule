@@ -13,6 +13,8 @@ export type SideChatSelection = {
   readonly top: number;
 };
 
+// Host 的 session.side.create 按 UTF-8 字节拒绝超过 8 KiB 的选中内容（core/src/host/protocol.ts 的
+// SIDE_SELECTION_MAX_BYTES）。界面在捕获选区时就用同一个上限挡掉，避免用户提交后才收到错误。
 export const MAX_SIDE_CHAT_CONTEXT_BYTES = 8_192;
 
 export function sideChatContextBytes(text: string): number {

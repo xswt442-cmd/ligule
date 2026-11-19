@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { createPermissionContext } from '../dist/kernel/permission.js';
+import { readProjectGitDiff, readProjectGitStatus } from '../dist/host/project-git.js';
 import { withTuiHost } from './helpers/tui-host.ts';
 
 const readable = createPermissionContext('workspace-write', 'policy', {
@@ -147,6 +148,103 @@ test('Git status disables a repository fsmonitor helper and fails closed on conf
     assert.deepEqual(filtered, { state: 'unsupported_filter', files: [], truncated: false });
     assert.equal(existsSync(marker), false, 'Host refuses unsupported filters before asking Git to inspect the worktree');
   }, { permissionControl: true, permission: readable });
+});
+
+test('Git inspection refuses executable filters defined through include, includeIf, or worktree config', async () => {
+  await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+    await initializeRepository(projectDirectory);
+    const helper = join(projectDirectory, 'include-helper.cjs');
+    const marker = join(projectDirectory, 'include-marker');
+    await writeFile(helper, `require('node:fs').appendFileSync(${JSON.stringify(marker)}, 'called\\n');\n`);
+    const helperCommand = `"${process.execPath.replaceAll('\\', '/')}" "${helper.replaceAll('\\', '/')}"`;
+    const included = join(projectDirectory, 'included-filters.cfg');
+    await writeFile(included, `[filter "included"]\n\tclean = ${helperCommand}\n`);
+    await writeFile(join(projectDirectory, '.gitattributes'), '*.txt filter=included\n');
+    git(projectDirectory, 'add', '--', '.gitattributes');
+    git(projectDirectory, '-c', 'user.name=Ligule test', '-c', 'user.email=ligule-test@example.invalid',
+      'commit', '--quiet', '-m', 'included filter attribute');
+
+    const ordinaryDiff = () => spawnSync('git', ['diff', '--', 'tracked.txt'], {
+      cwd: projectDirectory, windowsHide: true, stdio: 'ignore',
+    });
+
+    // include.path：`--local` 作用域不会展开它，但真正的 Git 读取会。
+    git(projectDirectory, 'config', 'include.path', included);
+    await writeFile(join(projectDirectory, 'tracked.txt'), 'changed through an included filter\n');
+    assert.equal(ordinaryDiff().status, 0);
+    assert.equal(existsSync(marker), true, 'the fixture proves an included clean filter runs for ordinary Git diff');
+    await rm(marker, { force: true });
+    assert.deepEqual(await client.request('project.git.status', { sessionId }), {
+      state: 'unsupported_filter', files: [], truncated: false,
+    });
+    assert.deepEqual(await client.request('project.git.diff', { sessionId, path: 'tracked.txt' }), {
+      state: 'unsupported_filter', path: 'tracked.txt', staged: null, unstaged: null,
+    });
+    assert.equal(existsSync(marker), false, 'Host inspection never runs a filter reached through include.path');
+
+    // includeIf：只有 gitdir 条件成立时才生效的配置同样必须被识别。
+    git(projectDirectory, 'config', '--unset', 'include.path');
+    git(projectDirectory, 'config', `includeIf.gitdir:${projectDirectory.replaceAll('\\', '/')}/.path`, included);
+    assert.deepEqual(await client.request('project.git.status', { sessionId }), {
+      state: 'unsupported_filter', files: [], truncated: false,
+    });
+
+    // worktree config：扩展开启后由 .git/config.worktree 提供的过滤器也要被识别。
+    git(projectDirectory, 'config', '--unset-all', `includeIf.gitdir:${projectDirectory.replaceAll('\\', '/')}/.path`);
+    git(projectDirectory, 'config', 'extensions.worktreeConfig', 'true');
+    await writeFile(join(projectDirectory, '.git', 'config.worktree'), `[filter "worktree"]\n\tclean = ${helperCommand}\n`);
+    assert.deepEqual(await client.request('project.git.status', { sessionId }), {
+      state: 'unsupported_filter', files: [], truncated: false,
+    });
+    assert.equal(existsSync(marker), false, 'Host inspection never runs a filter reached through worktree config');
+  }, { permissionControl: true, permission: readable });
+});
+
+test('Git inspection refuses a file boundary narrower than the repository root', async () => {
+  let projectPath = '';
+  let scopedPath = '';
+  await withTuiHost(async ({ client, sessionId }) => {
+    await initializeRepository(projectPath);
+    assert.equal(existsSync(join(scopedPath, 'inside.txt')), true);
+    assert.deepEqual(await client.request('project.git.status', { sessionId }), {
+      state: 'unsupported_scope', files: [], truncated: false,
+    });
+    assert.deepEqual(await client.request('project.git.diff', { sessionId, path: 'tracked.txt' }), {
+      state: 'unsupported_scope', path: 'tracked.txt', staged: null, unstaged: null,
+    });
+    assert.deepEqual(await client.request('project.git.diff', { sessionId, path: 'sub/inside.txt' }), {
+      state: 'unsupported_scope', path: 'sub/inside.txt', staged: null, unstaged: null,
+    });
+  }, {
+    setup: async ({ projectDirectory }) => {
+      projectPath = projectDirectory;
+      scopedPath = join(projectDirectory, 'sub');
+      await mkdir(scopedPath, { recursive: true });
+      await writeFile(join(scopedPath, 'inside.txt'), 'inside the narrower boundary\n');
+    },
+    config: {
+      get workspaceRoot() { return projectPath; },
+      get boundary() { return scopedPath; },
+    },
+    permissionControl: true,
+    permission: readable,
+  });
+});
+
+test('Git inspection compares the boundary with the repository root case-insensitively on Windows', async () => {
+  const directory = await mkdtemp(join(resolve('testplace'), 'git-scope-'));
+  try {
+    const repository = join(directory, 'repository');
+    await mkdir(repository, { recursive: true });
+    await initializeRepository(repository);
+    await writeFile(join(repository, 'tracked.txt'), 'cased boundary change\n');
+    const status = await readProjectGitStatus(repository, process.platform === 'win32' ? repository.toUpperCase() : repository);
+    assert.equal(status.state, 'ready');
+    const diff = await readProjectGitDiff(repository, process.platform === 'win32' ? repository.toUpperCase() : repository, 'tracked.txt');
+    assert.equal(diff.state, 'ready');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('Git status and diff report their output limits without returning partial results', async () => {

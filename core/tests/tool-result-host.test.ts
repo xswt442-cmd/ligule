@@ -267,3 +267,31 @@ test('a reopened Host reports an interrupted checked call as unknown without rep
     await client.request('session.close', { sessionId });
   }, { permissionControl: true, testDirectory: join(process.cwd(), 'testplace', 'tmp') });
 });
+
+test('a legacy tool result event without recorded sizes reports them as unknown', { timeout: 20_000 }, async () => {
+  await withTuiHost(async ({ client, projectDirectory, sessionDirectory }) => {
+    const sessionId = 'legacy-result-session';
+    const session = createSessionLog({ directory: sessionDirectory, id: sessionId, meta: { projectRoot: projectDirectory } });
+    const acceptance = createRunAcceptance(sessionId, 'read a file that only a legacy record describes', undefined, 'human');
+    const callId = 'call-legacy-result';
+    await writeFile(join(projectDirectory, 'legacy.txt'), 'hello legacy');
+    await session.append({ kind: 'user', text: 'read a file that only a legacy record describes', run: acceptance });
+    await session.append({ kind: 'assistant', text: '', toolCalls: [{ id: callId, name: 'read', args: { path: 'legacy.txt' } }] });
+    // 旧记录：结果事件只有内容，没有 returnedValueBytes/modelVisibleBytes/storedBytes/storedComplete。
+    await session.append({ kind: 'tool', ignorable: true, sessionId, runId: acceptance.runId, callId,
+      tool: 'read', args: { path: 'legacy.txt' }, result: { kind: 'result', failed: false, content: 'hello legacy' },
+      at: new Date().toISOString() } as never);
+    await session.close();
+
+    await client.request('session.open', { sessionId, projectRoot: projectDirectory });
+    const projected = await client.request('tool.result', { sessionId, runId: acceptance.runId, callId, limitBytes: 1_024 }) as Record<string, unknown>;
+    const output = projected.output as Record<string, unknown>;
+    assert.equal(projected.state, 'completed');
+    assert.equal(output.returnedValueBytes, null, 'a legacy record must not imply the returned size');
+    assert.equal(output.modelVisibleBytes, null, 'a legacy record must not imply what the model saw');
+    assert.equal(output.storedBytes, null, 'a legacy record must not imply the stored size');
+    assert.equal(output.storedComplete, null, 'a legacy record must not imply that storage was complete');
+    assert.equal(output.storageStatus, 'inline');
+    await client.request('session.close', { sessionId });
+  }, { permissionControl: true, testDirectory: join(process.cwd(), 'testplace', 'tmp') });
+});

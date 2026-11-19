@@ -7,6 +7,7 @@ import { permissionDenial, type PermissionContext } from '../kernel/permission.j
 import { resolveWithin } from '../capability/paths.js';
 import { versionOf } from '../kernel/observe.js';
 import type { CheckDeclaration, CheckEvent, CheckScopeSample, LiguleTestReport } from '../session/checks.js';
+import type { ExecutionLogReference } from '../session/execution-log.js';
 
 export const CHECK_SCOPE_FILE_BYTES = 256 * 1024;
 export const CHECK_SCOPE_TOTAL_BYTES = 1024 * 1024;
@@ -142,7 +143,7 @@ export function parseCheckReport(declaration: CheckDeclaration, snapshot: ExecLo
 
 export function checkEventOf({
   sessionId, runId, callId, executionId, declaration, executionState, exitCode, errorCode, logs, logUnavailableReason,
-  scopeStart, scopeEnd, knownScopedChange,
+  scopeStart, scopeEnd, knownScopedChange, startedAt, endedAt, logsRef,
 }: {
   readonly sessionId: string;
   readonly runId: string;
@@ -157,6 +158,9 @@ export function checkEventOf({
   readonly scopeStart: readonly CheckScopeSample[];
   readonly scopeEnd: readonly CheckScopeSample[];
   readonly knownScopedChange: boolean;
+  readonly startedAt?: string;
+  readonly endedAt?: string;
+  readonly logsRef?: ExecutionLogReference;
 }): Omit<CheckEvent, 'seq'> {
   const logStatus = checkLogStatus(logs, logUnavailableReason);
   const report = parseCheckReport(declaration, logs, logStatus);
@@ -170,7 +174,11 @@ export function checkEventOf({
     sample.path !== scopeEnd[index]?.path || sample.exists !== scopeEnd[index]?.exists || sample.version !== scopeEnd[index]?.version);
   const scopeStatus = knownScopedChange || changedAtSamples ? 'stale' : samplesAvailable ? 'sampled' : 'unverified';
   return {
-    kind: 'check', sessionId, runId, callId, executionId, at: new Date().toISOString(), declaration,
+    kind: 'check', sessionId, runId, callId, executionId, at: new Date().toISOString(),
+    ...(startedAt === undefined ? {} : { startedAt }),
+    ...(endedAt === undefined ? {} : { endedAt }),
+    ...(logsRef === undefined ? {} : { logsRef }),
+    declaration,
     executionState, exitCode: exitCode ?? null, commandStatus,
     ...(errorCode === undefined ? {} : { errorCode }),
     reportStatus: report.status, ...(report.report === undefined ? {} : { report: report.report }),

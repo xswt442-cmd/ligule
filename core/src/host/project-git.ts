@@ -24,7 +24,7 @@ export type ProjectGitStatusEntry = {
 };
 
 export type ProjectGitStatusResult = {
-  readonly state: 'ready' | 'not_repository' | 'unsupported_filter'
+  readonly state: 'ready' | 'not_repository' | 'unsupported_filter' | 'unsupported_scope'
     | 'unavailable' | 'timed_out' | 'output_too_large' | 'invalid_path';
   readonly files: readonly ProjectGitStatusEntry[];
   readonly truncated: boolean;
@@ -208,11 +208,37 @@ function empty(state: ProjectGitStatusResult['state']): ProjectGitStatusResult {
   return { state, files: [], truncated: false };
 }
 
-export async function readProjectGitStatus(projectRoot: string): Promise<ProjectGitStatusResult> {
+// 仓库配置里的内容过滤器会在 Git 读取工作区内容时启动外部程序。`--local` 作用域不会展开
+// `include`/`includeIf`，而 `git status` 一定会展开它们；因此安全检查必须读取同一份有效配置，
+// 而不是只看 .git/config 里直接写着的键。
+const EXECUTABLE_CONFIG_KEY = /^filter\.[^.]+\.(?:clean|smudge|process)$/u;
+
+function hasExecutableConfigKey(bytes: Buffer): boolean {
+  for (const name of bytes.toString('latin1').split('\0')) {
+    if (name !== '' && EXECUTABLE_CONFIG_KEY.test(name.toLowerCase())) return true;
+  }
+  return false;
+}
+
+async function effectiveConfigNames(root: string): Promise<GitProcessResult> {
+  return boundedGit(['config', '--null', '--name-only', '--list'], root, 64 * 1024);
+}
+
+function configListingFailure(result: GitProcessResult): ProjectGitStatusResult | undefined {
+  if (result.kind === 'timeout') return empty('timed_out');
+  if (result.kind === 'output_too_large') return empty('output_too_large');
+  if (result.kind !== 'exit' || result.code !== 0) return empty('unavailable');
+  return undefined;
+}
+
+export async function readProjectGitStatus(projectRoot: string, boundary: string): Promise<ProjectGitStatusResult> {
   if (GIT_EXECUTABLE === undefined) return empty('unavailable');
   let root: string;
+  let scope: string;
   try { root = realpathSync(projectRoot); }
   catch { return empty('unavailable'); }
+  try { scope = realpathSync(boundary); }
+  catch { return empty('unsupported_scope'); }
   const top = await boundedGit(['rev-parse', '--show-toplevel'], root, 16 * 1024);
   if (top.kind !== 'exit') return empty(top.kind === 'timeout' ? 'timed_out' : top.kind === 'output_too_large' ? 'output_too_large' : 'unavailable');
   if (top.code !== 0) return empty('not_repository');
@@ -222,18 +248,29 @@ export async function readProjectGitStatus(projectRoot: string): Promise<Project
     repositoryRoot = realpathSync(decoder.decode(top.stdout).trim());
   } catch { return empty('unavailable'); }
   if (!samePath(repositoryRoot, root)) return empty('not_repository');
+  // Git 的路径与 diff 都以仓库根为基准；当会话的文件边界更窄时，按仓库根读取会返回边界外的
+  // 路径与内容，因此这里明确拒绝，而不是过滤一个可能漏项的列表。
+  if (!samePath(scope, repositoryRoot)) return empty('unsupported_scope');
 
-  const filters = await boundedGit(['config', '--local', '--null', '--name-only', '--get-regexp', '^filter\\..+\\.(clean|smudge|process)$'], root, 64 * 1024);
-  if (filters.kind === 'timeout') return empty('timed_out');
-  if (filters.kind === 'output_too_large') return empty('output_too_large');
-  if (filters.kind === 'unavailable') return empty('unavailable');
-  if (filters.code !== 0 && filters.code !== 1) return empty('unavailable');
-  if (filters.stdout.length > 0) return empty('unsupported_filter');
+  const config = await effectiveConfigNames(root);
+  const configFailure = configListingFailure(config);
+  if (configFailure !== undefined) return configFailure;
+  if (config.kind !== 'exit') return empty('unavailable');
+  if (hasExecutableConfigKey(config.stdout)) return empty('unsupported_filter');
 
   const status = await boundedGit(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=all', '--renames', '--no-ahead-behind'], root);
   if (status.kind === 'timeout') return empty('timed_out');
   if (status.kind === 'output_too_large') return empty('output_too_large');
   if (status.kind === 'unavailable' || status.code !== 0) return empty('unavailable');
+
+  // 配置可能在预检与读取之间被替换；一旦有效配置真的变了，就丢弃这次结果并拒绝，
+  // 而不是把可能已经启动过外部程序的读取当成安全结果返回。
+  const recheck = await effectiveConfigNames(root);
+  const recheckFailure = configListingFailure(recheck);
+  if (recheckFailure !== undefined) return recheckFailure;
+  if (recheck.kind !== 'exit' || !recheck.stdout.equals(config.stdout) || hasExecutableConfigKey(recheck.stdout)) {
+    return empty('unsupported_filter');
+  }
   const parsed = parseStatus(status.stdout);
   if (parsed.invalid) return empty('invalid_path');
   const truncated = parsed.entries.length > MAX_STATUS_ENTRIES;
@@ -266,9 +303,9 @@ function diffFailure(state: ProjectGitDiffResult['state'], path: string): Projec
   return { state, path, staged: null, unstaged: null };
 }
 
-export async function readProjectGitDiff(projectRoot: string, pathValue: unknown): Promise<ProjectGitDiffResult> {
+export async function readProjectGitDiff(projectRoot: string, boundary: string, pathValue: unknown): Promise<ProjectGitDiffResult> {
   const path = requestedPath(pathValue);
-  const status = await readProjectGitStatus(projectRoot);
+  const status = await readProjectGitStatus(projectRoot, boundary);
   if (status.state !== 'ready') return diffFailure(status.state, path);
   const entry = status.files.find(file => file.path === path || file.sourcePath === path);
   if (entry === undefined) return diffFailure(status.truncated ? 'output_too_large' : 'file_not_changed', path);

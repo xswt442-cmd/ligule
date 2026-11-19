@@ -10,6 +10,12 @@ interface MethodSpec {
   readonly parameters: Record<string, unknown>;
 }
 
+/**
+ * 侧会话选中文本的上限，按 UTF-8 字节计。JSON Schema 只能数字符，所以协议里的 maxLength 也用同一个数字，
+ * 但非 ASCII 文本会更早碰到字节上限；Host 才是最终裁决者，客户端必须按字节预先校验。
+ */
+export const SIDE_SELECTION_MAX_BYTES = 8_192;
+
 export interface HostMethodParams extends Record<string, unknown> {
   readonly sessionId?: string;
   readonly projectRoot?: string;
@@ -172,7 +178,10 @@ export const METHODS = Object.freeze({
       sourceEventSeq: { type: 'integer', minimum: 0 },
       sourcePath: { type: 'string', minLength: 1, maxLength: 4096 },
       sourceVersion: { type: 'string', minLength: 16, maxLength: 16 },
-      selection: { type: 'string', minLength: 1, maxLength: 16384 },
+      selection: {
+        type: 'string', minLength: 1, maxLength: SIDE_SELECTION_MAX_BYTES,
+        description: 'text the user selected; at most 8192 UTF-8 bytes, so text outside ASCII reaches that bound before 8192 characters',
+      },
     }, required: ['sessionId', 'sourceKind', 'selection'] },
   },
   'view.request.ack': {

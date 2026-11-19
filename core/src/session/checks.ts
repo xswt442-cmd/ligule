@@ -1,5 +1,6 @@
-export interface CheckDeclaration {
-  readonly name: string;
+import { checkedExecutionLogReference, type ExecutionLogReference } from './execution-log.js';
+
+export interface CheckDeclaration {  readonly name: string;
   readonly purpose: string;
   readonly expectedExitCodes: readonly number[];
   readonly scope: readonly string[];
@@ -50,6 +51,12 @@ export interface CheckEvent extends Record<string, unknown> {
   readonly callId: string;
   readonly executionId: string;
   readonly at: string;
+  /** 命令实际开始的时刻；旧记录没有这个字段，读取方必须当作未知。 */
+  readonly startedAt?: string;
+  /** 命令结束的时刻；旧记录没有这个字段，读取方必须当作未知。 */
+  readonly endedAt?: string;
+  /** 指向这份检查执行日志的引用；旧记录没有这个字段，读取方必须当作未知。 */
+  readonly logsRef?: ExecutionLogReference;
   readonly declaration: CheckDeclaration;
   readonly executionState: 'exited' | 'cancelled' | 'failed' | 'unknown';
   readonly exitCode: number | null;
@@ -137,11 +144,17 @@ function sameSample(left: CheckScopeSample, right: CheckScopeSample): boolean {
 
 export function checkedCheckEvent(value: unknown): CheckEvent | undefined {
   if (!isRecord(value) || value.kind !== 'check' || value.ignorable === true
-    || Object.keys(value).some(key => !['seq', 'kind', 'sessionId', 'runId', 'callId', 'executionId', 'at', 'declaration',
+    || Object.keys(value).some(key => !['seq', 'kind', 'sessionId', 'runId', 'callId', 'executionId', 'at', 'startedAt', 'endedAt',
+      'logsRef', 'declaration',
       'executionState', 'exitCode', 'commandStatus', 'reportStatus', 'report', 'reportReason', 'logStatus', 'logTotalBytes',
       'errorCode', 'logFirstAvailableOffset', 'scopeStart', 'scopeEnd', 'scopeStatus', 'coverage'].includes(key))
     || !safeId(value.sessionId) || !RUN_UUID.test(String(value.runId)) || !safeId(value.callId) || !RUN_UUID.test(String(value.executionId))
-    || typeof value.at !== 'string' || !Number.isFinite(Date.parse(value.at))) return undefined;
+    || typeof value.at !== 'string' || !Number.isFinite(Date.parse(value.at))
+    || (value.startedAt !== undefined && (typeof value.startedAt !== 'string' || !Number.isFinite(Date.parse(value.startedAt))))
+    || (value.endedAt !== undefined && (typeof value.endedAt !== 'string' || !Number.isFinite(Date.parse(value.endedAt))))
+    || (typeof value.startedAt === 'string' && typeof value.endedAt === 'string'
+      && Date.parse(value.endedAt) < Date.parse(value.startedAt))
+    || (value.logsRef !== undefined && checkedExecutionLogReference(value.logsRef) === undefined)) return undefined;
   const declaration = checkedCheckDeclaration(value.declaration);
   if (declaration === undefined) return undefined;
   if (!['exited', 'cancelled', 'failed', 'unknown'].includes(String(value.executionState))
@@ -186,7 +199,11 @@ export function checkedCheckEvent(value: unknown): CheckEvent | undefined {
   return {
     kind: 'check', sessionId: value.sessionId as string, runId: value.runId as string, callId: value.callId as string,
     executionId: value.executionId as string,
-    at: value.at as string, declaration, executionState: value.executionState as CheckEvent['executionState'], exitCode: value.exitCode as number | null,
+    at: value.at as string,
+    ...(value.startedAt === undefined ? {} : { startedAt: value.startedAt as string }),
+    ...(value.endedAt === undefined ? {} : { endedAt: value.endedAt as string }),
+    ...(value.logsRef === undefined ? {} : { logsRef: checkedExecutionLogReference(value.logsRef)! }),
+    declaration, executionState: value.executionState as CheckEvent['executionState'], exitCode: value.exitCode as number | null,
     ...(value.errorCode === undefined ? {} : { errorCode: value.errorCode as string }),
     commandStatus: value.commandStatus as CheckCommandStatus, reportStatus: value.reportStatus as CheckReportStatus,
     ...(report === undefined ? {} : { report }), ...(value.reportReason === undefined ? {} : { reportReason: value.reportReason as string }),

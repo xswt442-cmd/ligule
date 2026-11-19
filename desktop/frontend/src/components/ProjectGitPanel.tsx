@@ -30,6 +30,8 @@ function statusText(state: ProjectGitStatus['state'], t: (chinese: string, engli
     case 'not_repository': return t('此项目目录不是 Git 仓库根目录。', 'This project directory is not a Git repository root.');
     case 'unsupported_filter': return t('仓库配置了会执行外部程序的内容过滤器；为避免执行它，Git 状态未读取。',
       'This repository configures an external content filter. Git status was not read because that filter could run a program.');
+    case 'unsupported_scope': return t('当前会话的文件边界窄于 Git 仓库根目录；为避免读到边界外的路径与改动，Git 状态未读取。',
+      'This session file boundary is narrower than the Git repository root. Git status was not read because it would expose paths and changes outside the boundary.');
     case 'timed_out': return t('Git 查询超时。', 'The Git query timed out.');
     case 'output_too_large': return t('Git 输出超过工作台上限。', 'Git output exceeds the workbench limit.');
     case 'invalid_path': return t('仓库包含无法安全显示的文件路径。', 'The repository contains a path that cannot be shown safely.');

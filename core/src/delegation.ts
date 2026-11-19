@@ -177,6 +177,11 @@ export interface RunCheckReference {
   readonly commandStatus: 'met' | 'not_met' | 'unknown';
   readonly reportStatus: 'not_requested' | 'reported_pass' | 'reported_fail' | 'zero_tests' | 'unverified';
   readonly scopeStatus: 'sampled' | 'stale' | 'unverified';
+  /** 命令起止时刻；旧记录没有这些字段时保持缺失。 */
+  readonly startedAt?: string;
+  readonly endedAt?: string;
+  /** 指向这次检查执行日志的引用；旧记录没有这个字段时保持缺失。 */
+  readonly logsRef?: { readonly name: string; readonly bytes: number; readonly sha256: string };
   readonly errorCode?: string;
   readonly logStatus?: 'complete' | 'partial' | 'unavailable' | 'unknown';
   readonly report?: { readonly passed: number; readonly failed: number; readonly skipped: number; readonly todo: number };

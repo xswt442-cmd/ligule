@@ -64,7 +64,7 @@ test('the export includes portable file change versions and says when private ba
   assert.doesNotMatch(text, /change-private\.snapshot/);
 });
 
-test('the export records the three independent check results without exporting command logs', () => {
+test('the export records the check results and whether the record carries a log reference without exporting log contents', () => {
   const sample = { path: 'src/example.ts', status: 'available', exists: true, version: 'a'.repeat(16), sampledAt: '2026-11-17T00:00:00.000Z' };
   const record = exportRecordOf({
     seq: 10, kind: 'check', sessionId: 'session-1', runId: '00000000-0000-4000-8000-000000000001',
@@ -82,6 +82,7 @@ test('the export records the three independent check results without exporting c
   assert.match(text, /命令结果：met（exited，退出码 0）/);
   assert.match(text, /结构化报告：reported_fail（通过 2、失败 1、跳过 0、待办 0）/);
   assert.match(text, /文件范围：sampled；日志：complete/);
+  assert.match(text, /- 日志引用：无（这条检查记录没有携带日志引用）/);
   assert.doesNotMatch(text, /stdout|stderr|command log contents/u);
 });
 

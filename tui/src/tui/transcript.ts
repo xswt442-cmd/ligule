@@ -115,9 +115,13 @@ export function projectRecord(record: TuiRecord, locale: Locale = 'zh'): Transcr
       `；通过 ${String(report.passed)}、失败 ${String(report.failed)}、跳过 ${String(report.skipped)}、待办 ${String(report.todo)}`,
       `; passed ${String(report.passed)}, failed ${String(report.failed)}, skipped ${String(report.skipped)}, todo ${String(report.todo)}`,
     );
+    const window = typeof record.startedAt === 'string' || typeof record.endedAt === 'string' ? t(
+      `检查时段：${typeof record.startedAt === 'string' ? record.startedAt : '开始时刻未知'} → ${typeof record.endedAt === 'string' ? record.endedAt : '结束时刻未知'}${isRecord(record.logsRef) && typeof record.logsRef.bytes === 'number' ? `；日志引用 ${record.logsRef.bytes} 字节` : ''}`,
+      `Check window: ${typeof record.startedAt === 'string' ? record.startedAt : 'start unknown'} → ${typeof record.endedAt === 'string' ? record.endedAt : 'end unknown'}${isRecord(record.logsRef) && typeof record.logsRef.bytes === 'number' ? `; log reference ${record.logsRef.bytes} bytes` : ''}`,
+    ) : undefined;
     return [{ kind: 'meta', text: t(
-      `检查 ${String(declaration.name ?? '未知')}：命令 ${String(record.commandStatus)}${typeof record.errorCode === 'string' ? `（${record.errorCode}）` : ''}；报告 ${String(record.reportStatus)}；范围 ${String(record.scopeStatus)}；日志 ${String(record.logStatus)}${counts}`,
-      `Check ${String(declaration.name ?? 'unknown')}: command ${String(record.commandStatus)}${typeof record.errorCode === 'string' ? ` (${record.errorCode})` : ''}; report ${String(record.reportStatus)}; scope ${String(record.scopeStatus)}; logs ${String(record.logStatus)}${counts}`,
+      `检查 ${String(declaration.name ?? '未知')}：命令 ${String(record.commandStatus)}${typeof record.errorCode === 'string' ? `（${record.errorCode}）` : ''}；报告 ${String(record.reportStatus)}；范围 ${String(record.scopeStatus)}；日志 ${String(record.logStatus)}${counts}${window === undefined ? '' : `\n${window}`}`,
+      `Check ${String(declaration.name ?? 'unknown')}: command ${String(record.commandStatus)}${typeof record.errorCode === 'string' ? ` (${record.errorCode})` : ''}; report ${String(record.reportStatus)}; scope ${String(record.scopeStatus)}; logs ${String(record.logStatus)}${counts}${window === undefined ? '' : `\n${window}`}`,
     ) }];
   }
   if (record.kind === 'mode') {

@@ -528,6 +528,11 @@ export function CheckDetailPanel({ client, sessionId, projectRoot, runId, eventS
         <dt>{t('命令退出', 'Command')}</dt><dd>{String(check.commandStatus ?? 'unknown')}</dd>
         <dt>{t('测试报告', 'Report')}</dt><dd>{String(check.reportStatus ?? 'unknown')}</dd>
         <dt>{t('文件范围', 'Scope')}</dt><dd>{String(check.scopeStatus ?? 'unknown')}</dd>
+        <dt>{t('时段', 'Window')}</dt><dd>{typeof check.startedAt === 'string' || typeof check.endedAt === 'string'
+          ? `${typeof check.startedAt === 'string' ? check.startedAt : t('开始时刻未知', 'start unknown')} → ${typeof check.endedAt === 'string' ? check.endedAt : t('结束时刻未知', 'end unknown')}`
+          : t('未知', 'unknown')}</dd>
+        <dt>{t('日志引用', 'Log reference')}</dt><dd>{object(check.logsRef) && typeof check.logsRef.bytes === 'number'
+          ? t(`${check.logsRef.bytes} 字节`, `${check.logsRef.bytes} bytes`) : t('未携带', 'not carried')}</dd>
       </dl>
       <button type="button" onClick={() => onOpenEvent(eventSeq, 'check')}>{t('跳到检查事件', 'Open check event')} {eventSeq}</button>
       {output?.error !== undefined && <p role="alert">{output.error}</p>}

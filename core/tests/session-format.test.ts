@@ -561,6 +561,22 @@ test('check results require Session format 5 and a matching terminal finite exec
   };
   const parsed = parseSessionEvents([header, accepted, started, exited, check] as unknown as SessionEvent[]);
   assert.equal(parsed.events.at(-1)?.kind, 'check');
+  // 新记录可以携带命令起止时刻与日志引用；旧记录缺这些字段时仍然合法，读取方按未知处理。
+  const withWindow = { ...check, startedAt: started.startedAt, endedAt: exited.finishedAt,
+    logsRef: { name: `execution-${executionId}.log.json`, bytes: 728, sha256: 'b'.repeat(64) } };
+  const roundTripped = parseSessionEvents([header, accepted, started, exited, withWindow] as unknown as SessionEvent[]).events.at(-1);
+  assert.equal(roundTripped?.kind, 'check');
+  assert.equal((roundTripped as Record<string, unknown>).startedAt, started.startedAt);
+  assert.equal((roundTripped as Record<string, unknown>).endedAt, exited.finishedAt);
+  assert.deepEqual((roundTripped as Record<string, unknown>).logsRef, withWindow.logsRef);
+  assert.throws(() => parseSessionEvents([header, accepted, started, exited,
+    { ...withWindow, endedAt: '2026-11-17T00:00:00.500Z' }] as unknown as SessionEvent[]), {
+    code: 'session_check_event_invalid',
+  });
+  assert.throws(() => parseSessionEvents([header, accepted, started, exited,
+    { ...withWindow, logsRef: { ...withWindow.logsRef, name: '../escape.log.json' } }] as unknown as SessionEvent[]), {
+    code: 'session_check_event_invalid',
+  });
   assert.throws(() => parseSessionEvents([
     { ...header, formatVersion: 4 }, check,
   ] as unknown as SessionEvent[]), { code: 'session_event_version_unsupported' });

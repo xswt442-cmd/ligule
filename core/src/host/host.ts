@@ -55,7 +55,7 @@ import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
 import { listProjectDirectory, readProjectFile, saveProjectFile, searchProjectFiles } from './project-files.js';
 import { projectGitDiffVersion, readProjectGitDiff, readProjectGitStatus } from './project-git.js';
-import { branchSessionId, exportImageUrl, exportMarkdown, exportRecordOf, MAX_EXPORT_ASSETS, writeExport, type ExportAsset, type ExportRecord } from './export.js';
+import { branchSessionId, exportImageUrl, exportMarkdown, exportRecordOf, MAX_EXPORT_ASSETS, readExportEvidence, writeExport, type ExportAsset, type ExportRecord } from './export.js';
 import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
 export { compactionLimitsOf } from './runtime-limits.js';
 import { createCompaction } from '../session/compaction.js';
@@ -108,7 +108,7 @@ import { apiRoot } from '../model/http.js';
 import { thinkingCapabilityOf } from '../model/thinking.js';
 import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type Connection, type HostRequest } from './connection.js';
-import { APPROVAL_METHOD, QUESTION_METHOD, VIEW_REQUEST_METHOD, validateCall, type HostMethodParams } from './protocol.js';
+import { APPROVAL_METHOD, QUESTION_METHOD, SIDE_SELECTION_MAX_BYTES, VIEW_REQUEST_METHOD, validateCall, type HostMethodParams } from './protocol.js';
 import { createConfig, mergePolicyRules, type ConfigSnapshot } from '../kernel/config.js';
 import { dataRoot, loadConfigLayers } from '../kernel/config-file.js';
 import type { LoggerBackend } from '../kernel/log.js';
@@ -128,7 +128,8 @@ import { runAcceptanceScope, runReceiptView, withinRunWindows } from './run-reco
 import { checkedToolResultSpillReference, decodeToolResultCursor, encodeToolResultCursor, readVerifiedToolResultSpillPage } from '../session/tool-result.js';
 import { checkedFileChangeFact, createFileChangeStore, type FileChangeFact, type FileChangeStore } from '../session/file-changes.js';
 import { checkedCheckDeclaration, type CheckDeclaration } from '../session/checks.js';
-import { runEvidenceReferences } from '../session/run-evidence.js';
+import { checkedExecutionLogReference } from '../session/execution-log.js';
+import { effectiveCheckScopeStatus, runEvidenceReferences } from '../session/run-evidence.js';
 import { checkEventOf, sampleCheckScope } from './checks.js';
 import { parseInitialGenerationSettings } from './session-initial-settings.js';
 import { settingsToolCatalog as buildSettingsToolCatalog } from './tool-catalog.js';
@@ -1203,6 +1204,16 @@ export function createHost({
         const terminalEvent = events.findLast((event) => event.kind === 'execution' && event.executionId === terminal.executionId
           && ['exited', 'cancelled', 'failed'].includes(String(event.state)));
         if (accepted === undefined || terminalEvent === undefined) return;
+        // 检查结果自己带上命令的起止时刻与日志引用；旧记录缺这些字段时保持缺失，由读取方显示未知。
+        const started = events.findLast((event) => event.kind === 'execution' && event.executionId === terminal.executionId
+          && event.state === 'started');
+        const startedFields: Record<string, unknown> = isRecord(started) ? started : {};
+        const acceptedFields: Record<string, unknown> = isRecord(accepted) ? accepted : {};
+        const terminalFields: Record<string, unknown> = isRecord(terminalEvent) ? terminalEvent : {};
+        const startedAt = typeof startedFields.startedAt === 'string' ? startedFields.startedAt
+          : typeof acceptedFields.startedAt === 'string' ? acceptedFields.startedAt : undefined;
+        const endedAt = typeof terminalFields.finishedAt === 'string' ? terminalFields.finishedAt : undefined;
+        const checkLogsRef = checkedExecutionLogReference(terminalFields.logsRef);
         const scoped = new Set(declaration.scope);
         const knownScopedChange = events.some((event) => (event.kind === 'tool' || event.kind === 'workspaceFileChange')
           && event.seq > accepted.seq && event.seq < terminalEvent.seq
@@ -1234,6 +1245,9 @@ export function createHost({
           })),
           scopeEnd,
           knownScopedChange,
+          ...(startedAt === undefined ? {} : { startedAt }),
+          ...(endedAt === undefined ? {} : { endedAt }),
+          ...(checkLogsRef === undefined ? {} : { logsRef: checkLogsRef }),
         }));
       } finally {
         finiteCheckContexts.delete(terminal.executionId);
@@ -2633,7 +2647,7 @@ export function createHost({
         if (args.path === undefined || args.executionId !== undefined || args.subrunId !== undefined) {
           throw new KernelError('view_request_arguments_invalid');
         }
-        const diff = await readProjectGitDiff(env.projectRoot, args.path);
+        const diff = await readProjectGitDiff(env.projectRoot, boundaryOf(env.config), args.path);
         const version = projectGitDiffVersion(diff);
         if (version === undefined) throw new KernelError('view_resource_unavailable');
         target = { kind: 'git', projectRoot: env.projectRoot, path: diff.path, version };
@@ -3651,7 +3665,7 @@ export function createHost({
           if (source.permissionChanging) throw new KernelError('permission_change_in_progress');
           const selection = requiredString(message.params.selection, 'selection');
           const selectionBytes = Buffer.byteLength(selection, 'utf8');
-          if (selectionBytes > 8192 || selection.includes('\u0000')) throw new KernelError('side_context_limit_exceeded');
+          if (selectionBytes > SIDE_SELECTION_MAX_BYTES || selection.includes('\u0000')) throw new KernelError('side_context_limit_exceeded');
           const sourceKind = message.params.sourceKind;
           if (sourceKind !== 'event' && sourceKind !== 'file' && sourceKind !== 'diff') {
             throw new KernelError('side_context_source_kind_invalid');
@@ -3704,7 +3718,7 @@ export function createHost({
               }
             } else {
               if (message.params.sourceVersion !== undefined) throw new KernelError('side_context_reference_invalid');
-              const diff = await readProjectGitDiff(source.environment.projectRoot, sourcePath);
+              const diff = await readProjectGitDiff(source.environment.projectRoot, boundaryOf(source.environment.config), sourcePath);
               const diffText = diff.state === 'ready' ? [diff.staged, diff.unstaged].filter((value): value is string => value !== null).join('\n') : '';
               if (diffText === '' || !diffText.includes(selection)) throw new KernelError('side_context_unverified');
               sourceVersion = createHash('sha256').update(JSON.stringify([diff.path, diff.staged, diff.unstaged])).digest('hex');
@@ -4017,14 +4031,14 @@ export function createHost({
           await requireProjectFileAccess(state);
           const denied = permissionDenial(state.permission, 'read');
           if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
-          return await readProjectGitStatus(state.environment.projectRoot);
+          return await readProjectGitStatus(state.environment.projectRoot, boundaryOf(state.environment.config));
         }
         case 'project.git.diff': {
           const state = open(sessionId);
           await requireProjectFileAccess(state);
           const denied = permissionDenial(state.permission, 'read');
           if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
-          const diff = await readProjectGitDiff(state.environment.projectRoot, message.params.path);
+          const diff = await readProjectGitDiff(state.environment.projectRoot, boundaryOf(state.environment.config), message.params.path);
           const version = projectGitDiffVersion(diff);
           return { ...diff, ...(version === undefined ? {} : { version }) };
         }
@@ -4069,6 +4083,7 @@ export function createHost({
             ?? (isRecord(callArgs?.check) ? callArgs.check : undefined));
           const checkEvent = executionEvent === undefined ? undefined : events.findLast((event) => event.kind === 'check'
             && event.executionId === executionEvent.executionId && event.sessionId === sessionId && event.runId === runId && event.callId === callId);
+          const checkFields: Record<string, unknown> = isRecord(checkEvent) ? checkEvent : {};
           const check = checkEvent === undefined
             ? declaredCheck === undefined ? undefined : {
               status: executionEvent === undefined
@@ -4085,7 +4100,10 @@ export function createHost({
               commandStatus: checkEvent.commandStatus,
               reportStatus: checkEvent.reportStatus,
               logStatus: checkEvent.logStatus,
-              scopeStatus: checkEvent.scopeStatus,
+              scopeStatus: effectiveCheckScopeStatus(events, runId, checkEvent),
+              ...(typeof checkFields.startedAt === 'string' ? { startedAt: checkFields.startedAt } : {}),
+              ...(typeof checkFields.endedAt === 'string' ? { endedAt: checkFields.endedAt } : {}),
+              ...(isRecord(checkFields.logsRef) ? { logsRef: checkFields.logsRef } : {}),
               ...(typeof checkEvent.errorCode === 'string' ? { errorCode: checkEvent.errorCode } : {}),
               ...(isRecord(checkEvent.report) ? { report: checkEvent.report } : {}),
               ...(typeof checkEvent.reportReason === 'string' ? { reportReason: checkEvent.reportReason } : {}),
@@ -4143,17 +4161,19 @@ export function createHost({
             || resultEvent.storageStatus === 'legacy_unverified'
             ? resultEvent.storageStatus
             : reference !== undefined ? 'spill' : isSpilled ? 'legacy_unverified' : 'inline';
+          // 只报事件里真实记录过的数字。旧记录缺少这些字段时保持 null（未知），不从存活内容反推完整性与字节数：
+          // 反推会把“没留下证据”说成“已知完整”，读取路径不同还会给出不同答案。
           const returnedValueBytes = Number.isSafeInteger(resultEvent.returnedValueBytes) && Number(resultEvent.returnedValueBytes) >= 0
-            ? Number(resultEvent.returnedValueBytes) : reference?.bytes ?? (isSpilled ? null : contentBytes.length);
+            ? Number(resultEvent.returnedValueBytes) : null;
           const storedBytes = Number.isSafeInteger(resultEvent.storedBytes) && Number(resultEvent.storedBytes) >= 0
-            ? Number(resultEvent.storedBytes) : reference?.bytes ?? (isSpilled ? null : contentBytes.length);
+            ? Number(resultEvent.storedBytes) : reference?.bytes ?? null;
           const modelVisibleBytes = Number.isSafeInteger(resultEvent.modelVisibleBytes) && Number(resultEvent.modelVisibleBytes) >= 0
-            ? Number(resultEvent.modelVisibleBytes) : contentBytes.length;
+            ? Number(resultEvent.modelVisibleBytes) : null;
           const spillReferenceMatches = reference !== undefined && reference.name === result.spilled
             && reference.bytes === storedBytes;
           const storageStatus = isSpilled && !spillReferenceMatches ? 'legacy_unverified' : recordedStorageStatus;
           let page: Record<string, unknown> | null = null;
-          let storedComplete = !isSpilled && resultEvent.storedComplete !== false;
+          let storedComplete: boolean | null = typeof resultEvent.storedComplete === 'boolean' ? resultEvent.storedComplete : null;
           if (!isSpilled || spillReferenceMatches) {
             const digest = spillReferenceMatches
               ? reference.sha256 : createHash('sha256').update(contentBytes).digest('hex');
@@ -4166,7 +4186,7 @@ export function createHost({
             const nextOffset = offset + bytes.length;
             const completeBytes = spillReferenceMatches ? reference.bytes : contentBytes.length;
             if (offset > completeBytes) throw new KernelError('tool_result_cursor_invalid');
-            storedComplete = spillReferenceMatches || !isSpilled;
+            // 完整与否只由事件自己声明；这里翻页成功不代表当时保存的内容完整。
             const done = nextOffset >= completeBytes;
             page = { offset, bytes: bytes.length, dataBase64: bytes.toString('base64'), done,
               nextCursor: done ? null : encodeToolResultCursor(cursorIdentity, nextOffset),
@@ -4330,14 +4350,17 @@ export function createHost({
             await collectImages(branchId, branchEvents);
             branches.push({ id: branchId, events: branchEvents });
           }
+          // 导出件要能离线读到日志与基线正文；读不到就写明原因，不能静默保留一个悬空引用。
+          const evidence = await readExportEvidence(exportEnvironment.directory,
+            [...exportRecords, ...branches.flatMap((branch) => branch.events)]);
           try {
             // 对每个导出文件分别返回结果，包括路径冲突和写入失败，并附上主文件路径。
             const main = exportMarkdown(exportRecords, {
               id: sessionId, projectRoot: header?.projectRoot, createdAt: header?.createdAt ?? null,
               unfinished: sessions.get(sessionId)?.running !== undefined,
-            }, imageUrls);
+            }, imageUrls, evidence);
             const branchTexts = branches.map(branch => ({ id: branch.id,
-              text: exportMarkdown(branch.events, { id: branch.id, projectRoot: header?.projectRoot }, imageUrls) }));
+              text: exportMarkdown(branch.events, { id: branch.id, projectRoot: header?.projectRoot }, imageUrls, evidence) }));
             const done = await writeExport(path, main, branchTexts, assets);
             return { written: done.written, skipped: [...skipped, ...done.skipped], failed: [...assetFailures, ...done.failed] };
           } catch (cause) {

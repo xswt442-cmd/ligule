@@ -117,6 +117,16 @@ test('a file side chat validates the current file version and keeps the referenc
       && event.sourcePath === 'src/note.md' && event.sourceVersion === current.version));
     assert.equal(providerRequests.length, 0, 'side Session creation does not run an Agent');
 
+    // 上限按 UTF-8 字节计：8400 字节的中文被拒绝，8192 字节的 ASCII 只是没过引用校验，说明边界本身是包含的。
+    await assert.rejects(client.request('session.side.create', {
+      sessionId, sourceKind: 'file', sourcePath: 'src/note.md', sourceVersion: current.version,
+      selection: '汉'.repeat(2800),
+    }), { code: 'side_context_limit_exceeded' });
+    await assert.rejects(client.request('session.side.create', {
+      sessionId, sourceKind: 'file', sourcePath: 'src/note.md', sourceVersion: current.version,
+      selection: 'a'.repeat(8_192),
+    }), { code: 'side_context_unverified' });
+
     await assert.rejects(client.request('session.side.create', {
       sessionId, sourceKind: 'file', sourcePath: '../outside.txt', sourceVersion: current.version,
       selection: 'the parser accepts exact text',

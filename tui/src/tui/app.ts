@@ -442,10 +442,10 @@ interface TuiToolResult {
   readonly eventSeq?: number;
   readonly output?: {
     readonly returnedValueBytes: number | null;
-    readonly modelVisibleBytes: number;
+    readonly modelVisibleBytes: number | null;
     readonly storageStatus: string;
     readonly storedBytes: number | null;
-    readonly storedComplete: boolean;
+    readonly storedComplete: boolean | null;
     readonly page: { readonly bytes: number; readonly dataBase64: string; readonly done: boolean; readonly nextCursor: string | null } | null;
   };
   readonly fileChanges?: readonly {
@@ -467,6 +467,9 @@ interface TuiToolResult {
     readonly reportStatus?: string;
     readonly logStatus?: string;
     readonly scopeStatus?: string;
+    readonly startedAt?: string;
+    readonly endedAt?: string;
+    readonly logsRef?: { readonly name: string; readonly bytes: number; readonly sha256: string };
     readonly report?: { readonly passed: number; readonly failed: number; readonly skipped: number; readonly todo: number };
   };
 }
@@ -3285,8 +3288,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const page = output?.page;
         const pageText = page === null || page === undefined ? '' : Buffer.from(page.dataBase64, 'base64').toString('utf8');
         const notes = output === undefined ? [] : [
-          t(`返回 ${output.returnedValueBytes ?? '未知'} 字节；模型可见 ${output.modelVisibleBytes} 字节；保存 ${output.storageStatus}${output.storedComplete ? '（完整）' : '（未确认完整）'}。`,
-            `Returned ${output.returnedValueBytes ?? 'unknown'} bytes; ${output.modelVisibleBytes} visible to the model; storage ${output.storageStatus}${output.storedComplete ? ' (complete)' : ' (not verified complete)'}.`),
+          t(`返回 ${output.returnedValueBytes ?? '未知'} 字节；模型可见 ${output.modelVisibleBytes ?? '未知'} 字节；保存 ${output.storageStatus}${output.storedComplete === null ? '（未知是否完整）' : output.storedComplete ? '（完整）' : '（未确认完整）'}。`,
+            `Returned ${output.returnedValueBytes ?? 'unknown'} bytes; ${output.modelVisibleBytes ?? 'unknown'} visible to the model; storage ${output.storageStatus}${output.storedComplete === null ? ' (completeness unknown)' : output.storedComplete ? ' (complete)' : ' (not verified complete)'}.`),
           ...(page?.nextCursor === null || page?.nextCursor === undefined ? [] : [t(`下一页游标：${page.nextCursor}`, `Next page cursor: ${page.nextCursor}`)]),
           ...(page === null ? [t('没有可验证的完整输出页。', 'No complete, verifiable output page is available.')] : []),
         ];
@@ -3298,7 +3301,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           `检查 ${result.check.declaration.name}：命令 ${result.check.commandStatus ?? result.check.status}${result.check.errorCode === undefined ? '' : `（${result.check.errorCode}）`}；报告 ${result.check.reportStatus ?? '未核实'}；范围 ${result.check.scopeStatus ?? '未核实'}；日志 ${result.check.logStatus ?? '未知'}${result.check.report === undefined ? '' : `；通过 ${result.check.report.passed}、失败 ${result.check.report.failed}、跳过 ${result.check.report.skipped}、待办 ${result.check.report.todo}`}`,
           `Check ${result.check.declaration.name}: command ${result.check.commandStatus ?? result.check.status}${result.check.errorCode === undefined ? '' : ` (${result.check.errorCode})`}; report ${result.check.reportStatus ?? 'unverified'}; scope ${result.check.scopeStatus ?? 'unverified'}; logs ${result.check.logStatus ?? 'unknown'}${result.check.report === undefined ? '' : `; passed ${result.check.report.passed}, failed ${result.check.report.failed}, skipped ${result.check.report.skipped}, todo ${result.check.report.todo}`}`,
         )];
-        push({ kind: 'meta', text: [summary, ...notes, ...fileChanges, ...checkLine, ...(pageText === '' ? [] : [pageText])].join('\n') });
+        const checkWindow = result.check === undefined
+          || (result.check.startedAt === undefined && result.check.endedAt === undefined) ? [] : [t(
+          `检查时段：${result.check.startedAt ?? '开始时刻未知'} → ${result.check.endedAt ?? '结束时刻未知'}${result.check.logsRef === undefined ? '' : `；日志引用 ${result.check.logsRef.bytes} 字节`}`,
+          `Check window: ${result.check.startedAt ?? 'start unknown'} → ${result.check.endedAt ?? 'end unknown'}${result.check.logsRef === undefined ? '' : `; log reference ${result.check.logsRef.bytes} bytes`}`,
+        )];
+        push({ kind: 'meta', text: [summary, ...notes, ...fileChanges, ...checkLine, ...checkWindow, ...(pageText === '' ? [] : [pageText])].join('\n') });
       })();
       return;
     }

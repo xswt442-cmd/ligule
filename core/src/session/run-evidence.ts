@@ -17,6 +17,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** 采样范围在同一个 Run 里被后续改动碰过就过期；按调用投影与 Run 摘要必须得到同一个答案。 */
+export function laterScopeChangesTouch(events: readonly SessionEvent[], runId: string, check: CheckEvent, eventSeq: number): boolean {
+  return events.some((event) =>
+    ((event.kind === 'tool' && event.runId === runId) || (event.kind === 'workspaceFileChange' && event.source === 'desktop'))
+      && event.seq > eventSeq
+      && Array.isArray(event.fileChanges) && event.fileChanges.some((value) => {
+        const change = checkedFileChangeFact(value);
+        return change !== undefined && check.declaration.scope.includes(change.path) && change.outcome !== 'unchanged';
+      }));
+}
+
+/** 读取一条 check 事件时重算它此刻的范围状态，而不是照抄写入时的快照。 */
+export function effectiveCheckScopeStatus(events: readonly SessionEvent[], runId: string, event: SessionEvent): string {
+  const check = checkedCheckEvent(event);
+  if (check === undefined) return String(event.scopeStatus ?? 'unknown');
+  if (typeof event.seq !== 'number') return check.scopeStatus;
+  return check.scopeStatus === 'sampled' && laterScopeChangesTouch(events, runId, check, event.seq) ? 'stale' : check.scopeStatus;
+}
+
 export function runEvidenceReferences(events: readonly SessionEvent[], runId: string): RunEvidenceReferences {
   const fileChanges: RunFileChangeReference[] = [];
   let fileChangesTruncated = false;
@@ -44,13 +63,8 @@ export function runEvidenceReferences(events: readonly SessionEvent[], runId: st
         observedStatus: change.observedStatus, changedFromBaseline: change.changedFromBaseline });
     }
   }
-  const laterChangesByCheck = (check: CheckEvent, eventSeq: number): boolean => events.some((event) =>
-    (event.kind === 'tool' && event.runId === runId || event.kind === 'workspaceFileChange' && event.source === 'desktop')
-      && event.seq > eventSeq
-      && Array.isArray(event.fileChanges) && event.fileChanges.some((value) => {
-        const change = checkedFileChangeFact(value);
-        return change !== undefined && check.declaration.scope.includes(change.path) && change.outcome !== 'unchanged';
-      }));
+  const laterChangesByCheck = (check: CheckEvent, eventSeq: number): boolean =>
+    laterScopeChangesTouch(events, runId, check, eventSeq);
   const declarationCalls = events.flatMap((event) => {
     if (event.kind !== 'tool' || event.runId !== runId || typeof event.callId !== 'string' || !isRecord(event.args)) return [];
     const declaration = checkedCheckDeclaration(event.args.check);
@@ -73,6 +87,9 @@ export function runEvidenceReferences(events: readonly SessionEvent[], runId: st
         ...(typeof recorded.event.seq === 'number' ? { eventSeq: recorded.event.seq } : {}),
         executionId: check.executionId, callId, name: check.declaration.name, status: 'completed',
         commandStatus: check.commandStatus, reportStatus: check.reportStatus, scopeStatus, logStatus: check.logStatus,
+        ...(check.startedAt === undefined ? {} : { startedAt: check.startedAt }),
+        ...(check.endedAt === undefined ? {} : { endedAt: check.endedAt }),
+        ...(check.logsRef === undefined ? {} : { logsRef: check.logsRef }),
         ...(check.errorCode === undefined ? {} : { errorCode: check.errorCode }),
         ...(check.report === undefined ? {} : { report: {
           passed: check.report.passed, failed: check.report.failed, skipped: check.report.skipped, todo: check.report.todo,

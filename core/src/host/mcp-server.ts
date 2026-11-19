@@ -78,6 +78,9 @@ const runResultOutput = object({
     errorCode: { type: 'string', maxLength: 80 },
     scopeStatus: { type: 'string', enum: ['sampled', 'stale', 'unverified'] },
     logStatus: { type: 'string', enum: ['complete', 'partial', 'unavailable', 'unknown'] },
+    startedAt: { type: 'string' }, endedAt: { type: 'string' },
+    logsRef: object({ name: { type: 'string', maxLength: 128 }, bytes: { type: 'integer', minimum: 0 },
+      sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, ['name', 'bytes', 'sha256']),
     report: object({ passed: { type: 'integer', minimum: 0 }, failed: { type: 'integer', minimum: 0 },
       skipped: { type: 'integer', minimum: 0 }, todo: { type: 'integer', minimum: 0 },
     }, ['passed', 'failed', 'skipped', 'todo']),
@@ -234,6 +237,10 @@ const checkSummaryOutput = object({
   errorCode: { type: 'string', maxLength: 80 },
   logStatus: { type: 'string', enum: ['complete', 'partial', 'unavailable', 'unknown'] },
   scopeStatus: { type: 'string', enum: ['sampled', 'stale', 'unverified'] },
+  startedAt: { type: 'string' },
+  endedAt: { type: 'string' },
+  logsRef: object({ name: { type: 'string', maxLength: 128 }, bytes: { type: 'integer', minimum: 0 },
+    sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, ['name', 'bytes', 'sha256']),
 }, ['status', 'declaration']);
 const toolResultOutput = object({
   sessionId: id, runId: id, callId,
@@ -247,10 +254,10 @@ const toolResultOutput = object({
   }, required: ['kind'] },
   output: { type: ['object', 'null'], additionalProperties: false, properties: {
     returnedValueBytes: { type: ['integer', 'null'], minimum: 0 },
-    modelVisibleBytes: { type: 'integer', minimum: 0 },
+    modelVisibleBytes: { type: ['integer', 'null'], minimum: 0 },
     storageStatus: { type: 'string', enum: ['inline', 'spill', 'legacy_unverified'] },
     storedBytes: { type: ['integer', 'null'], minimum: 0 },
-    storedComplete: { type: 'boolean' },
+    storedComplete: { type: ['boolean', 'null'] },
     page: { type: ['object', 'null'], additionalProperties: false, properties: {
       offset: { type: 'integer', minimum: 0 }, bytes: { type: 'integer', minimum: 0 },
       dataBase64: { type: 'string', maxLength: 5464 }, done: { type: 'boolean' },
