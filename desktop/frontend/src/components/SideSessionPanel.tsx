@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Client } from '../protocol';
 import { code } from '../protocol';
 import { useText } from '../locale';
+import { object } from '../guards.ts';
 
 type SideOrigin = {
   readonly sourceKind: 'event' | 'file' | 'diff';
@@ -11,10 +12,6 @@ type SideOrigin = {
   readonly selectionBytes: number;
   readonly sourceRunId?: string;
 };
-
-function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 export function SideSessionPanel({ client, sessionId, projectRoot, sideSessionId, originSessionId,
   onOpenOrigin, onOpenSideSession, onSendToRun, onPrepareFollowup }: {

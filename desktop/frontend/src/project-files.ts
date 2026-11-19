@@ -1,4 +1,5 @@
 import type { Client } from './protocol';
+import { object } from './guards.ts';
 
 export type ProjectFileEntry = {
   readonly name: string;
@@ -48,10 +49,6 @@ export const MAX_PROJECT_FILE_BYTES = 256 * 1024;
 const MAX_PAGE_BYTES = 64_000;
 const MAX_FILE_PAGES = 64;
 const MAX_IMAGE_PREVIEW_BYTES = 256 * 1024;
-
-function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function relativePath(value: unknown, allowDot = false): string | undefined {
   if (typeof value !== 'string' || value.length === 0 || value.length > 4096

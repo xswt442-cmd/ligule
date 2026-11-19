@@ -1,4 +1,5 @@
 import type { Client } from './protocol';
+import { object } from './guards.ts';
 
 export type ProjectGitStatus = {
   readonly state: 'ready' | 'not_repository' | 'unsupported_filter' | 'unsupported_scope' | 'unavailable' | 'timed_out' | 'output_too_large' | 'invalid_path';
@@ -25,10 +26,6 @@ export type ProjectGitDiff = {
 
 const MAX_STATUS_ENTRIES = 500;
 const MAX_DIFF_BYTES = 128 * 1024;
-
-function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function checkedPath(value: unknown): value is string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 4096

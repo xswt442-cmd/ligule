@@ -42,3 +42,6 @@ export { pushHistory, flushHistory, historyPathOf, loadHistory, rememberHistory 
 export { clipboardPayload, copyToClipboard, writeClipboard, type ClipboardResult } from './capability/clipboard.js';
 export { editInExternalEditor } from './capability/editor.js';
 export { createMemoryConnectionPair } from './host/memory.js';
+
+export type { AgentPresetPage, AgentPresetSummary } from './kernel/agent-presets.js';
+export type { AgentPresetPreview } from './tools/subagent.js';

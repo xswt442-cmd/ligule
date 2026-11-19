@@ -1,4 +1,5 @@
 import type { Client } from './protocol';
+import { object } from './guards.ts';
 
 const PAGE_CHARACTERS = 8_192;
 const MAX_RESULT_CHARACTERS = 16 * 1024 * 1024;
@@ -22,10 +23,6 @@ export type RunResultView = {
 
 function failure(code: string): Error & { code: string } {
   return Object.assign(new Error(code), { code });
-}
-
-function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function checkedRunResult(value: unknown, sessionId: string, runId: string): RunResultView {

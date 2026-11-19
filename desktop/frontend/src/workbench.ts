@@ -1,3 +1,5 @@
+import { object } from './guards.ts';
+
 export type WorkbenchResource =
   | { readonly kind: 'file'; readonly projectRoot: string; readonly path: string; readonly line?: number; readonly version?: string }
   | { readonly kind: 'directory'; readonly projectRoot: string; readonly path: string }
@@ -59,10 +61,6 @@ export const DEFAULT_WORKBENCH_STATE: WorkbenchState = {
   commandTabs: [],
   activeCommandKey: null,
 };
-
-function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function safeString(value: unknown, max: number): string | undefined {
   return typeof value === 'string' && value.length > 0 && value.length <= max

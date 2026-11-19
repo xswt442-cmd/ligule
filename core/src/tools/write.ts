@@ -10,6 +10,7 @@ import { relativePathWithin, resolveWithin } from '../capability/paths.js';
 import { resolveRecycler } from '../capability/recycle.js';
 import { versionOf } from '../kernel/observe.js';
 import { errorCode, errorMessage } from './common.js';
+import { recordFileChange } from './record-file-change.js';
 
 interface CreateArguments { path: string; content: string }
 interface WriteArguments { path: string; content: string }
@@ -47,11 +48,6 @@ interface MatchedEdit extends EditChange {
   readonly start: number;
   readonly end: number;
   readonly line: number;
-}
-
-function fileChangeReadbackAllowed(context: { readonly permission?: ToolContext['permission'] }): boolean {
-  const read = context.permission?.capabilities.filesystemRead;
-  return read !== undefined && read !== 'unavailable';
 }
 
 function isUnicodeScalarText(text: string): boolean {
@@ -305,15 +301,13 @@ export const createTool = {
       const expected = Buffer.from(args.content, 'utf8');
       const outcome = await outcomeAfterWriteError(target, undefined, expected);
       if (outcome !== 'written') {
-        await context.fileChanges?.record({ path: relativePath, target, operation: 'create', outcome,
-          beforeExists: false, expectedAfterExists: true, expectedAfterBytes: expected,
-          allowReadback: fileChangeReadbackAllowed(context) });
+        await recordFileChange(context, { path: relativePath, target, operation: 'create', outcome,
+          beforeExists: false, expectedAfterExists: true, expectedAfterBytes: expected });
         throw writeFailure('create', args.path, error, outcome);
       }
     }
-    await context.fileChanges?.record({ path: relativePath, target, operation: 'create', outcome: 'written',
-      beforeExists: false, expectedAfterExists: true, expectedAfterBytes: Buffer.from(args.content, 'utf8'),
-      allowReadback: fileChangeReadbackAllowed(context) });
+    await recordFileChange(context, { path: relativePath, target, operation: 'create', outcome: 'written',
+      beforeExists: false, expectedAfterExists: true, expectedAfterBytes: Buffer.from(args.content, 'utf8'), });
     observations?.observe(target, versionOf(Buffer.from(args.content, 'utf8')));
     return { text: `created ${relativePath} (${Buffer.byteLength(args.content, 'utf8')} bytes)` };
   },
@@ -359,15 +353,13 @@ export const writeTool = {
     catch (error) {
       const outcome = await outcomeAfterWriteError(target, before, expected);
       if (outcome !== 'written') {
-        await context.fileChanges?.record({ path: relativePath, target, operation: 'write', outcome,
-          beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
-          allowReadback: fileChangeReadbackAllowed(context) });
+        await recordFileChange(context, { path: relativePath, target, operation: 'write', outcome,
+          beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected });
         throw writeFailure('write', args.path, error, outcome);
       }
     }
-    await context.fileChanges?.record({ path: relativePath, target, operation: 'write', outcome: 'written',
-      beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
-      allowReadback: fileChangeReadbackAllowed(context) });
+    await recordFileChange(context, { path: relativePath, target, operation: 'write', outcome: 'written',
+      beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected });
     observations?.observe(target, versionOf(expected));
     return { text: `wrote ${relativePath} (${Buffer.byteLength(args.content, 'utf8')} bytes)` };
   },
@@ -481,15 +473,13 @@ export const editTool = {
       catch (error) {
         const outcome = await outcomeAfterWriteError(target, before, expected);
         if (outcome !== 'written') {
-          await context.fileChanges?.record({ path: relativePath, target, operation: 'edit', outcome,
-            beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
-            allowReadback: fileChangeReadbackAllowed(context) });
+          await recordFileChange(context, { path: relativePath, target, operation: 'edit', outcome,
+            beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected });
           throw writeFailure('edit', args.path, error, outcome);
         }
       }
-      await context.fileChanges?.record({ path: relativePath, target, operation: 'edit', outcome: 'written',
-        beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
-        allowReadback: fileChangeReadbackAllowed(context) });
+      await recordFileChange(context, { path: relativePath, target, operation: 'edit', outcome: 'written',
+        beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected });
       observations?.observe(target, versionOf(expected));
       return { text: `edited ${relativePath}` };
     }
@@ -507,15 +497,13 @@ export const editTool = {
     catch (error) {
       const outcome = await outcomeAfterWriteError(target, before, expected);
       if (outcome !== 'written') {
-        await context.fileChanges?.record({ path: relativePath, target, operation: 'edit', outcome,
-          beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
-          allowReadback: fileChangeReadbackAllowed(context) });
+        await recordFileChange(context, { path: relativePath, target, operation: 'edit', outcome,
+          beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected });
         throw writeFailure('edit', args.path, error, outcome);
       }
     }
-    await context.fileChanges?.record({ path: relativePath, target, operation: 'edit', outcome: 'written',
-      beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected,
-      allowReadback: fileChangeReadbackAllowed(context) });
+    await recordFileChange(context, { path: relativePath, target, operation: 'edit', outcome: 'written',
+      beforeExists: true, beforeBytes: before, expectedAfterExists: true, expectedAfterBytes: expected });
     observations?.observe(target, versionOf(expected));
     return result;
   },

@@ -3,13 +3,10 @@ import { code, type Client } from '../protocol';
 import { useText } from '../locale';
 import type { Status } from '../status';
 import { Group, Row } from './ui';
+import { object, objectOrEmpty } from '../guards.ts';
 
 type RequestDiagnostics = { enabled: boolean; entries: Record<string, unknown>[] };
 type CompactionFact = { seq: number; reason: string; blockId?: number; fromSeq?: number; toSeq?: number; tokensBefore?: number; tokensAfter?: number };
-
-function object(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
 
 function number(value: unknown): number {
   return typeof value === 'number' ? value : 0;
@@ -62,10 +59,10 @@ export function DiagnosticsPanel({ client, sessionId, status, counts, waiting, l
     setCompactionError('');
     if (sessionId === null) return () => { compactionGeneration.current += 1; };
     void client.call('session.read', { sessionId, limit: 1000 }, 15_000).then(value => {
-      const events = object(value).events;
+      const events = objectOrEmpty(value).events;
       if (!Array.isArray(events)) throw Object.assign(new Error('session_read_response_invalid'), { code: 'session_read_response_invalid' });
       const facts = events.flatMap((item): CompactionFact[] => {
-        if (!object(item) || item.kind !== 'compaction' || item.ignorable !== true || !Number.isSafeInteger(item.seq)) return [];
+        if (!!object(item) ? false : true || item.kind !== 'compaction' || item.ignorable !== true || !Number.isSafeInteger(item.seq)) return [];
         return [{ seq: Number(item.seq), reason: typeof item.reason === 'string' ? item.reason : 'unknown',
           ...(Number.isSafeInteger(item.blockId) ? { blockId: Number(item.blockId) } : {}),
           ...(Number.isSafeInteger(item.fromSeq) ? { fromSeq: Number(item.fromSeq) } : {}),
@@ -142,16 +139,16 @@ export function DiagnosticsPanel({ client, sessionId, status, counts, waiting, l
       {requestDiagnostics !== null && <>
         <p>{requestDiagnostics.enabled ? t(`已开启 · ${requestDiagnostics.entries.length} 条最近请求（最多 32 条）`, `Enabled · ${requestDiagnostics.entries.length} recent requests (maximum 32)`) : t('已关闭', 'Disabled')}</p>
         {requestDiagnostics.entries.map((entry, index) => {
-          const components = object(entry.components);
-          const truncation = object(entry.truncation);
-          const compaction = object(entry.compaction);
-          const resolvedImages = object(entry.resolvedImages);
-          const cache = object(entry.cache);
+          const components = objectOrEmpty(entry.components);
+          const truncation = objectOrEmpty(entry.truncation);
+          const compaction = objectOrEmpty(entry.compaction);
+          const resolvedImages = objectOrEmpty(entry.resolvedImages);
+          const cache = objectOrEmpty(entry.cache);
           const id = typeof entry.requestId === 'string' ? entry.requestId.slice(0, 8) : 'request';
           const model = [entry.provider, entry.model].filter((part): part is string => typeof part === 'string').join('/');
           const usage = (value: unknown) => typeof value === 'number' ? String(value) : t('未知', 'unknown');
           const ranges = Array.isArray(compaction.blocks) ? compaction.blocks.flatMap((block) => {
-            const item = object(block);
+            const item = objectOrEmpty(block);
             return typeof item.fromSeq === 'number' && typeof item.toSeq === 'number' ? [`${item.fromSeq}–${item.toSeq}`] : [];
           }) : [];
           return <details key={`${id}:${String(entry.attempt)}:${index}`}>

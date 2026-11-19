@@ -30,6 +30,7 @@ import { controlPresets, textOf as chooseText, VIEW_REQUEST_METHOD, type Locale 
 import type { TerminalAction } from './keymap.js';
 import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type ControlWizardValues } from './control-wizard.js';
 import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionHeader, SessionSummary, UsageBucket, UsageSummary } from '@ligule/core/tui.js';
+import type { AgentPresetPage, AgentPresetPreview } from '@ligule/core/tui.js';
 import type { PresetCommand, SubrunCommand, TemplateCommand } from './commands.js';
 import type { EditorOutcome } from './editor.js';
 import type { SavedInput } from './input-store.js';
@@ -371,23 +372,7 @@ interface TuiSubrunStatus extends TuiSubrunReference {
   readonly errorCode?: string;
 }
 
-interface TuiPresetSummary {
-  readonly id: string;
-  readonly layer: 'shipped' | 'user' | 'project';
-  readonly description?: string;
-  readonly errorCode?: string;
-}
-
-interface TuiPresetList {
-  readonly presets: readonly TuiPresetSummary[];
-  readonly nextCursor?: string;
-  readonly truncated: boolean;
-}
-
-interface TuiPresetPreview {
-  readonly presetId: string;
-  readonly layer: 'shipped' | 'user' | 'project';
-  readonly description: string;
+interface TuiPresetPreview extends Pick<AgentPresetPreview, 'presetId' | 'layer' | 'description'> {
   readonly instruction: string;
   readonly executable: boolean;
   readonly mode: { readonly name: string; readonly tools: readonly string[] | '*'; readonly prompt: readonly string[] | '*' };
@@ -487,7 +472,7 @@ interface TuiRequestResults {
   readonly 'approval.details': { readonly requestId: string; readonly sessionId: string; readonly argumentSha256: string; readonly args: Record<string, unknown> };
   readonly 'session.export': Exported;
   readonly 'session.branch': BranchResult;
-  readonly 'preset.list': TuiPresetList;
+  readonly 'preset.list': AgentPresetPage;
   readonly 'preset.preview': TuiPresetPreview;
   readonly 'session.label': { readonly sessionId: string; readonly name: string; readonly archived: boolean };
   readonly 'sessions.list': { readonly sessions: SessionSummary[] };

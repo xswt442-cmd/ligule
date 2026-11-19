@@ -5,6 +5,7 @@ import { readRunResult, type RunResultView } from '../run-result';
 import type { FileDelivery, Record_ } from '../rows';
 import { useText } from '../locale';
 import { FileArtifactCard } from './FileArtifactCard';
+import { object } from '../guards.ts';
 
 type RunReceipt = {
   readonly runId: string;
@@ -19,10 +20,6 @@ type RunReceipt = {
 type ArtifactRecord = { readonly artifactKey: string; readonly artifact: FileDelivery };
 type CheckLog = { readonly events: readonly { readonly stream: string; readonly text: string }[]; readonly cursor?: string;
   readonly hasMore: boolean; readonly gap: boolean; readonly error?: string };
-
-function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function isFileArtifact(value: unknown): value is FileDelivery {
   return object(value) && value.kind === 'file' && typeof value.sessionId === 'string' && typeof value.path === 'string'
