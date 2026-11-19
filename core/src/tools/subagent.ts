@@ -1030,7 +1030,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
         name: 'subagent',
         access: 'inherit',
         execution: 'parallel',
-        description: `Delegate independent work to child runs with the parent policy and separate session records. Use subagent_preset_list and subagent_preset_preview to discover task presets. Optional presetId selects a Host-resolved bounded task preset; explicit settings cannot widen its limits. Up to ${maxConcurrentSubagents} children can run at once; children cannot create more children. Check result.state because a failed or cancelled child still returns its saved Session reference. When outputSchema is provided, the child must submit its final value with ligule_delegation_result.`,
+        description: `Delegate independent work to child runs with the parent policy and separate session records. Optional presetId names a bounded task preset the user or controller already selected; explicit settings cannot widen its limits. Up to ${maxConcurrentSubagents} children can run at once; children cannot create more children. Check result.state because a failed or cancelled child still returns its saved Session reference. When outputSchema is provided, the child must submit its final value with ligule_delegation_result.`,
         parameters: {
           type: 'object',
           properties: {
@@ -1461,39 +1461,9 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
         },
       };
       executeSubagent = subagentTool.run;
+      // 预设发现属于客户端与控制器（`preset.list` / `preset.preview` RPC），不注册成模型工具：
+      // 模型只拿到用户或控制器已经选定的 presetId。
       const unregister = [
-        kernel.register({
-          name: 'subagent_preset_list',
-          access: 'read',
-          readOnly: true,
-          execution: 'parallel',
-          description: 'List bounded Host-resolved child task presets and safe error codes. Read a specific preset with subagent_preset_preview before selecting it.',
-          parameters: { type: 'object', properties: {
-            limit: { type: 'integer', minimum: 1, maximum: 64 },
-            cursor: { type: 'string', minLength: 1, maxLength: 128 },
-          }, additionalProperties: false },
-          run: async (args: { limit?: number; cursor?: string }) => await listPresets(args),
-        }),
-        kernel.register({
-          name: 'subagent_preset_preview',
-          access: 'read',
-          readOnly: true,
-          execution: 'parallel',
-          description: 'Resolve one child task preset through the Host and show its effective mode, Permission, generation, limits, output schema digest, required checks, and restrictions.',
-          parameters: { type: 'object', properties: {
-            presetId: { type: 'string', minLength: 1, maxLength: 64 },
-            mode: MODE_SELECTION_SCHEMA,
-            outputTokens: { type: 'integer', minimum: 1 },
-            thinkingEffort: { type: 'string', enum: ['none', 'low', 'high', 'max'] },
-            loopIterations: { type: 'integer', minimum: 1 },
-            modelCalls: { type: 'integer', minimum: 1 },
-            outputSchema: { type: 'object' },
-          }, required: ['presetId'], additionalProperties: false },
-          run: async (args: { presetId: string } & Omit<SubagentRunArguments, 'task' | 'presetId'>, context: SubagentCallContext) => {
-            const { presetId, ...overrides } = args;
-            return await previewPreset(presetId, overrides, context);
-          },
-        }),
         kernel.register({
           ...subagentTool,
           run: async (args: SubagentRunArguments, context: SubagentCallContext) => {

@@ -328,9 +328,9 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
     const everything = await capture(undefined);
     assert.ok(everything.tools.some((entry) => entry.name === 'skill'), 'the disclosure entry is offered');
     assert.ok(everything.tools.some((entry) => entry.name === 'open_resource'));
-    assert.equal(everything.tools.length, 27);
+    assert.equal(everything.tools.length, 25);
     assert.deepEqual(everything.tools.map((entry) => entry.name).filter((name) => name.startsWith('subagent_')),
-      ['subagent_cancel', 'subagent_message', 'subagent_preset_list', 'subagent_preset_preview', 'subagent_start', 'subagent_status', 'subagent_wait']);
+      ['subagent_cancel', 'subagent_message', 'subagent_start', 'subagent_status', 'subagent_wait']);
     assert.ok(everything.tools.some((entry) => entry.name === 'present'));
     assert.ok(everything.tools.some((entry) => entry.name === 'todo_write'));
     assert.ok(everything.tools.some((entry) => entry.name === 'read_image'));
