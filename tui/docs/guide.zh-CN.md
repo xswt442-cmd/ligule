@@ -197,9 +197,9 @@ prompt = []
 
 `permissionProfile`、`network`、`outputTokens`、`thinkingEffort`、`loopIterations`、`modelCalls`、`outputSchema`、`requiredChecks` 都是可选字段；它们只能收窄当前父任务允许的能力和限制。预设的 Mode 和显式 Mode 覆盖只取子任务已注册工具、父任务工具清单和两份 Mode 的交集。预览会列出最终限制；启动时 Host 重新核对活动父 Run，过期 Run 不能启动孩子。
 
-TUI 使用 `/preset list` 列出预设，`/preset preview <id>` 查看当前生效设置，`/preset start <id> <任务>` 在活动父任务下启动子任务。主 Agent 可通过 `subagent_preset_list`、`subagent_preset_preview` 发现并检查预设，再在 `subagent` 或 `subagent_start` 请求中给出 `presetId`。MCP 控制器通过 `ligule_preset_list`、`ligule_preset_preview` 和带 `presetId` 的 `ligule_subrun_start` 使用相同 Host 解析；`subrun.list` 可从 Session 的已校验 parentage 找回 Host 启动和模型启动的子任务。
+TUI 使用 `/preset list` 列出预设，`/preset preview <id>` 查看当前生效设置，`/preset start <id> <任务>` 在活动父任务下启动子任务。主 Agent 只会收到用户或控制器已经选定的 `presetId`，并在 `subagent` 或 `subagent_start` 请求中直接给出；预设发现本身留在客户端。MCP 控制器通过 `ligule_preset_list`、`ligule_preset_preview` 和带 `presetId` 的 `ligule_subrun_start` 使用相同 Host 解析；`subrun.list` 可从 Session 的已校验 parentage 找回 Host 启动和模型启动的子任务。
 
-每个已启动子任务在 Session 中保存一份有界配置快照，包含说明文本、来源层、摘要、Mode、有效 Permission、预算和输出 Schema 摘要。修改同名文件只影响之后启动的任务。设置 `requiredChecks = ["verification"]` 会要求最新同名 P13 检查同时满足退出码、结构化报告、完整日志和未过期的范围采样；至少有一个测试通过。Ligule 不会自动运行检查命令。随包 `research`、`implement`、`verify` 分别示范只读研究、受现有权限限制的实现和基于 P13 检查事实的验证。
+每个已启动子任务在 Session 中保存一份有界配置快照，包含说明文本、来源层、摘要、Mode、有效 Permission、预算和输出 Schema 摘要。修改同名文件只影响之后启动的任务。设置 `requiredChecks = ["verification"]` 会要求最新同名检查同时满足退出码、结构化报告、完整日志和未过期的范围采样；至少有一个测试通过。Ligule 不会自动运行检查命令。随包 `research`、`implement`、`verify` 分别示范只读研究、受现有权限限制的实现和基于检查事实的验证。
 
 #### 用户 DIY 最小示例
 
