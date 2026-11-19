@@ -61,7 +61,8 @@ export { compactionLimitsOf } from './runtime-limits.js';
 import { createCompaction } from '../session/compaction.js';
 import { sessionWriterActive } from '../session/lock.js';
 import { requestAgentControl, TRUSTED_AGENT_CONTROL_ORIGIN, type AgentControlRequest } from './agent-control-runtime.js';
-import { controllerScopeOf, mayRecordHumanRun, maySetPermission, operationSessionDenial, requirePermissionControl, requireTrustedUi, runChannelOf, runOriginBasis, runScopesOf, type ControlTrust } from './capabilities.js';
+import { controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissionControl, requireTrustedUi, runChannelOf, runOriginBasis, runScopesOf, type ControlTrust } from './capabilities.js';
+import { admitEntry } from './entry.js';
 import { usageEvent } from '../session/usage.js';
 import { summarizeUsage } from '../session/usage-summary.js';
 import { readSessionRecord } from '../session/record.js';
@@ -3403,7 +3404,6 @@ export function createHost({
     confirmWorkspaceTrust: unknown,
     bridge: boolean,
   ): Promise<Record<string, unknown>> {
-    if (state.operationOnly === true) throw new KernelError('operation_session_control_unavailable');
     const grant = await activeDelegation();
     // 权限变更是可信 UI、经过认证的桥连接或 Grant operator 的能力；普通 MCP 客户端不接受。
     if (!maySetPermission(controlTrust, bridge)) {
@@ -3616,19 +3616,13 @@ export function createHost({
         if (grant !== undefined) assertGrantSessionScope(grant, state);
       };
 
-      // Operation Session 只承载这一条命令的记录与控制：它不因为来源会话曾有权限就继续接受写文件、
-      // 创建 Run、导出或再委派的请求。能力表在 capabilities.ts，避免每个入口各写一份 if。
+      // 方法级准入只在分派前判定一次：Operation Session 能做什么（capabilities.ts）与
+      // 哪些方法整方法要求可信本地 UI（entry.ts）各自只有一份声明，业务分支不再重复。
       const targeted = sessionId === '' ? undefined : sessions.get(sessionId);
-      const operationDenial = targeted?.operationOnly === true ? operationSessionDenial(message.method) : undefined;
-      if (operationDenial !== undefined) {
-        throw new KernelError(operationDenial, {
-          detail: `an operation session does not carry the capability for ${message.method}`,
-        });
-      }
+      admitEntry({ method: message.method, trust: controlTrust, operationSession: targeted?.operationOnly === true });
 
       switch (message.method) {
         case 'workspace.trust': {
-          requireTrustedUi('workspace-trust', controlTrust);
           if (typeof message.params.trusted !== 'boolean') throw new KernelError('protocol_args_invalid', { detail: 'trusted must be a boolean' });
           if (message.params.trusted && message.params.confirmWorkspaceTrust !== true) {
             throw new KernelError('workspace_trust_confirmation_required');
@@ -3669,7 +3663,6 @@ export function createHost({
           return hasInitialSettings ? { ...created, settingsApplied: true } : created;
         }
         case 'session.side.create': {
-          requireTrustedUi('side-session', controlTrust);
           const source = open(sessionId);
           if (source.operationOnly === true) throw new KernelError('side_session_source_invalid');
           if (source.permissionChanging) throw new KernelError('permission_change_in_progress');
@@ -3784,7 +3777,6 @@ export function createHost({
             ...(sourceRunId === undefined ? {} : { sourceRunId }), ...context, createdAt };
         }
         case 'view.request.ack': {
-          requireTrustedUi('view-request', controlTrust);
           const source = open(sessionId);
           if (source.operationOnly === true) throw new KernelError('view_request_scope_invalid');
           const runId = requiredString(message.params.runId, 'runId');
@@ -3879,7 +3871,6 @@ export function createHost({
           return { sessionId };
         }
         case 'screen-capture.set': {
-          requireTrustedUi('screen-capture', controlTrust);
           const state = open(sessionId);
           const enabled = message.params.enabled === true;
           if (enabled && message.params.confirmScreenCapture !== true) throw new KernelError('screen_capture_confirmation_required');
@@ -4258,7 +4249,6 @@ export function createHost({
         }
         case 'browser.stop':
         case 'browser.resume': {
-          requireTrustedUi('browser', controlTrust);
           return await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
             if (message.method === 'browser.resume') {
@@ -4292,7 +4282,6 @@ export function createHost({
         }
         case 'session.export': {
           // 导出会把完整 RunResult 与图片写到用户选择的路径，只允许可信本地 UI 发起。
-          requireTrustedUi('session-export', controlTrust);
           // Host 负责读取和排版完整记录并写出文件，客户端只选择目标路径。
           // 用户通过保存对话框选择的导出路径不属于模型工具写入，不受项目边界限制。
           const record = await readRecord(sessionId, { fullResults: true });
@@ -4382,7 +4371,6 @@ export function createHost({
         case 'run.start': {
           const started = await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
-            if (state.operationOnly === true) throw new KernelError('operation_session_model_run_unavailable');
             const origin = runOriginOf(message.params.origin, 'human', mayRecordHumanRun(controlTrust, bridge));
             const scope = origin === 'controller' ? controllerScope : 'human';
             if (grant !== undefined) assertGrantSessionScope(grant, state);
@@ -4448,7 +4436,6 @@ export function createHost({
         case 'storage.inspect':
         case 'storage.cleanup.preview':
         case 'storage.cleanup.apply': {
-          requireTrustedUi('storage', controlTrust);
           const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
           try {
             const info = await stat(await realpath(env.projectRoot));
@@ -4661,7 +4648,6 @@ export function createHost({
         case 'run.submit': {
           const submission = await serializeSessionConfiguration(sessionId, async () => {
             const state = open(sessionId);
-            if (state.operationOnly === true) throw new KernelError('operation_session_model_run_unavailable');
             const origin = runOriginOf(message.params.origin, 'controller', mayRecordHumanRun(controlTrust, bridge));
             const scope = origin === 'controller' ? controllerScope : 'human';
             if (grant !== undefined) assertGrantSessionScope(grant, state);
@@ -4817,7 +4803,6 @@ export function createHost({
         }
         case 'run.cancel': {
           const state = open(sessionId);
-          if (state.operationOnly === true) throw new KernelError('operation_session_run_cancel_unavailable');
           if (state.running === undefined) throw new KernelError('run_not_running', { detail: sessionId });
           // 通过当前循环处理取消，让工具和模型请求收到同一个取消信号。
           state.running.abort();
@@ -4826,7 +4811,6 @@ export function createHost({
           return { cancelled: true };
         }
         case 'operation.start': {
-          requireTrustedUi('operation-run', controlTrust);
           const command = requiredString(message.params.command, 'command');
           const cwd = message.params.cwd === undefined ? undefined : requiredString(message.params.cwd, 'cwd');
           const operationId = randomUUID();
@@ -4834,7 +4818,6 @@ export function createHost({
           const callId = randomUUID();
           const prepared = await serializeSessionConfiguration(sessionId, async () => {
             const source = open(sessionId);
-            if (source.operationOnly === true) throw new KernelError('operation_session_start_unavailable');
             if (source.permissionChanging) throw new KernelError('permission_change_in_progress');
             const denied = permissionDenial(source.permission, 'exec');
             if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
@@ -5125,7 +5108,6 @@ export function createHost({
           return { sessionId, summary: summarizeUsage(record.events) };
         }
         case 'usage.diagnostics': {
-          requireTrustedUi('request-diagnostics', controlTrust);
           const state = open(sessionId);
           const action = requiredString(message.params.action, 'action');
           if (action === 'enable') return configureRequestDiagnostics(state.requestDiagnostics, true);
@@ -5275,11 +5257,9 @@ export function createHost({
           return await savePrefs(prefsPathOf(), value, { version: requiredString(message.params.version, 'version') });
         }
         case 'agent-control.list': {
-          requireTrustedUi('agent-control', controlTrust);
           return await listDelegationGrants(delegationPathOf());
         }
         case 'agent-control.create': {
-          requireTrustedUi('agent-control', controlTrust);
           if (message.params.confirmWorkspaceTrust !== true) throw new KernelError('workspace_trust_confirmation_required');
           if (permission.partialWorkspaceWriteConfirmationRequired
             && (message.params.maxPermissionProfile === 'workspace-write' || message.params.maxPermissionProfile === 'full-access')
@@ -5330,7 +5310,6 @@ export function createHost({
           return await createDelegationGrant(delegationPathOf(), input, requiredString(message.params.version, 'version'));
         }
         case 'agent-control.revoke': {
-          requireTrustedUi('agent-control', controlTrust);
           const grantId = requiredString(message.params.grantId, 'grantId');
           const result = await revokeDelegationGrant(
             delegationPathOf(), grantId, requiredString(message.params.version, 'version'),
@@ -5344,7 +5323,6 @@ export function createHost({
           return result;
         }
         case 'mcp.trust.list': {
-          requireTrustedUi('mcp-trust', controlTrust);
           const env = await environmentFor(message.params.projectRoot);
           const session = message.params.sessionId === undefined ? undefined : open(requiredString(message.params.sessionId, 'sessionId'));
           if (session !== undefined && session.environment !== env) throw new KernelError('session_project_forbidden');
@@ -5381,7 +5359,6 @@ export function createHost({
           return { version: store.version, servers };
         }
         case 'settings.catalog': {
-          requireTrustedUi('settings', controlTrust);
           const env = await environmentFor(message.params.projectRoot);
           const session = message.params.sessionId === undefined ? undefined : open(requiredString(message.params.sessionId, 'sessionId'));
           if (session !== undefined && session.environment !== env) throw new KernelError('session_project_forbidden');
@@ -5475,7 +5452,6 @@ export function createHost({
           };
         }
         case 'mcp.trust.set': {
-          requireTrustedUi('mcp-trust', controlTrust);
           const env = await environmentFor(message.params.projectRoot);
           const serverName = requiredString(message.params.server, 'server');
           const expectedIdentity = requiredString(message.params.identityDigest, 'identityDigest');
@@ -5528,7 +5504,6 @@ export function createHost({
         }
         case 'extensions.set': {
           // 启停登记是用户范围的持久状态；只有可信界面可以修改。
-          requireTrustedUi('extensions', controlTrust);
           const env = await environmentFor(message.params.projectRoot);
           const name = requiredString(message.params.name, 'name');
           if (typeof message.params.enabled !== 'boolean') {
@@ -5555,7 +5530,6 @@ export function createHost({
           return { name, enabled: message.params.enabled, applies: 'next-start' };
         }
         case 'mcp.trust.tools': {
-          requireTrustedUi('mcp-trust', controlTrust);
           const env = await environmentFor(message.params.projectRoot);
           const serverName = requiredString(message.params.server, 'server');
           const configuredServers = await currentMcpConfigs(env);
