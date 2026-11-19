@@ -15,14 +15,15 @@ import { createManagedProcessRegistry, managedProcessPlugin } from '../capabilit
 import type { FileWriteQueue } from '../kernel/file-write-queue.js';
 import { createLoop, type LoopLimits, type LoopProgressEvent } from '../kernel/loop.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
-import { createSessionLog, type SessionLog } from '../session/session.js';
-import { createRunAcceptance, isRunAcceptance, publishRunResult, readRunResult, runReceipts } from '../session/run.js';
+import type { SessionLog } from '../session/session.js';
+import { isRunAcceptance, publishRunResult, readRunResult, runReceipts } from '../session/run.js';
 import { runEvidenceReferences } from '../session/run-evidence.js';
 import { readSessionRecord } from '../session/record.js';
 import { checkedCheckDeclaration, checkedCheckEvent } from '../session/checks.js';
 import { checkedFileChangeFact } from '../session/file-changes.js';
 import type { SessionEvent } from '../session/format.js';
-import { createRunSteeringInbox, type RunSteeringInbox } from '../kernel/run-steering.js';
+import { beginChildRun, childRunDelegation } from './subagent-run.js';
+import type { RunSteeringInbox } from '../kernel/run-steering.js';
 import { currentKernelExecutionContext } from '../kernel/execution-context.js';
 import type { RequestDiagnostic } from '../kernel/request-diagnostics.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
@@ -773,33 +774,24 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
               tools?: string[];
               prompt?: string[];
             } | undefined;
-            const session = createSessionLog({
-              directory: deps.directory,
-              id,
-              meta: () => ({
-                projectRoot: typeof deps.config.workspaceRoot === 'string'
-                  ? deps.config.workspaceRoot
-                  : typeof deps.config.boundary === 'string' ? deps.config.boundary : undefined,
-                mode: modeIdentity,
-              }),
-            });
-          const source = lifecycle?.source ?? 'controller';
-          const acceptance = createRunAcceptance(id, childTask, {
-            parentRunId: runId ?? null,
-            parentCallId: callId ?? null,
-            mode: prepared.preset === undefined ? args.mode ?? null : prepared.resolvedMode?.application ?? null,
-            ...(prepared.preset === undefined ? {} : { presetId: prepared.preset.id, presetDigest: prepared.preset.digest }),
-            outputTokens: args.outputTokens ?? null,
-            thinkingEffort: args.thinkingEffort ?? null,
-            loopIterations: args.loopIterations ?? null,
-            modelCalls: args.modelCalls ?? null,
-            outputSchema: args.outputSchema ?? null,
-          }, source === 'human' ? 'human' : 'controller:subagent', undefined, undefined,
-          runId === undefined ? undefined : {
-            sessionId: deps.sessionId, runId, subrunId,
-            ...(callId === undefined ? {} : { callId }),
-          });
-          const steering = createRunSteeringInbox(session, acceptance.runId);
+            const source = lifecycle?.source ?? 'controller';
+const { session, acceptance, steering } = beginChildRun({
+  directory: deps.directory,
+  sessionId: id,
+  task: childTask,
+  source,
+  delegation: childRunDelegation(args, prepared, runId, callId),
+  parentage: runId === undefined ? undefined : {
+    sessionId: deps.sessionId, runId, subrunId,
+    ...(callId === undefined ? {} : { callId }),
+  },
+  meta: () => ({
+    projectRoot: typeof deps.config.workspaceRoot === 'string'
+      ? deps.config.workspaceRoot
+      : typeof deps.config.boundary === 'string' ? deps.config.boundary : undefined,
+    mode: modeIdentity,
+  }),
+});
           let childRunResult: RunResult | undefined;
             let disposeAssembly: (() => void) | undefined;
             let closeMcp: (() => Promise<void>) | undefined;
