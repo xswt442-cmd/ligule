@@ -1,6 +1,14 @@
 import { isRunAcceptance, type DurableRunReceipt } from '../session/run.js';
 import type { SessionEvent } from '../session/format.js';
 
+/** A Run is alive only while it is the session's active Run and a turn is still running. */
+export function runLivenessOf(
+  state: { activeRunId?: string; running?: unknown } | undefined,
+  runId: string,
+): boolean {
+  return state !== undefined && state.activeRunId === runId && state.running !== undefined;
+}
+
 /** Map persisted Run receipts and current Host liveness to the public status. */
 export function runReceiptView(receipt: DurableRunReceipt, live: boolean): DurableRunReceipt & { liveness: 'alive' | 'unknown' } {
   return { ...receipt, state: live ? 'running' : receipt.state, liveness: live ? 'alive' : 'unknown' };

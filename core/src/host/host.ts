@@ -126,7 +126,7 @@ import { createSessionReviewer, narrowReviewerSettings, reviewerRouteFields, rev
 import type { PolicyReviewRecord, PolicyReviewRequest } from '../kernel/policy.js';
 import type { ReviewFacts } from '../kernel/reviewer.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
-import { runAcceptanceScope, runReceiptView, withinRunWindows } from './run-records.js';
+import { runAcceptanceScope, runLivenessOf, runReceiptView, withinRunWindows } from './run-records.js';
 import { checkedToolResultSpillReference, decodeToolResultCursor, encodeToolResultCursor, readVerifiedToolResultSpillPage } from '../session/tool-result.js';
 import { checkedFileChangeFact, createFileChangeStore, type FileChangeFact, type FileChangeStore } from '../session/file-changes.js';
 import { checkedCheckDeclaration, type CheckDeclaration } from '../session/checks.js';
@@ -4129,9 +4129,9 @@ export function createHost({
           const check = checkEvent === undefined
             ? declaredCheck === undefined ? undefined : {
               status: executionEvent === undefined
-                ? state.activeRunId === runId && activity !== undefined ? 'running' : 'not_run'
+                ? runLivenessOf(state, runId) && activity !== undefined ? 'running' : 'not_run'
                 : ['accepted', 'started'].includes(String(executionEvent.state))
-                  ? state.activeRunId === runId && state.running !== undefined ? 'running' : 'unknown'
+                  ? runLivenessOf(state, runId) ? 'running' : 'unknown'
                   : 'unknown',
               declaration: declaredCheck,
             }
@@ -4175,7 +4175,7 @@ export function createHost({
             ...(logUnavailableReason === undefined ? {} : { logUnavailableReason }),
           };
           if (resultEvent === undefined) {
-            const live = state.activeRunId === runId && activity !== undefined;
+            const live = runLivenessOf(state, runId) && activity !== undefined;
             const phase = live ? activity.phase : undefined;
             return { sessionId, runId, callId, tool: assistantToolCall?.name,
             state: phase === 'awaiting_approval' ? 'awaiting_approval' : phase === 'awaiting_user' ? 'awaiting_user'
@@ -4684,7 +4684,7 @@ export function createHost({
             if (begun.kind === 'pending') {
               requireMatchingSubmission(begun.pending, scope, key, digest);
               return {
-                wait: begun.pending.receipt.then((receipt) => ({ ...runReceiptView(receipt, state.activeRunId === receipt.runId), reused: true })),
+                wait: begun.pending.receipt.then((receipt) => ({ ...runReceiptView(receipt, runLivenessOf(state, receipt.runId)), reused: true })),
               };
             }
             const { accepted, cleanup: cleanupSubmission } = begun;
@@ -4692,7 +4692,7 @@ export function createHost({
               const previous = replaySubmission(await state.session.read(), sessionId, scope, key, digest);
               if (previous !== undefined) {
                 accepted.resolve(previous);
-                const live = state.activeRunId === previous.runId;
+                const live = runLivenessOf(state, previous.runId);
                 return { wait: Promise.resolve({ ...runReceiptView(previous, live), reused: true }), cleanup: cleanupSubmission };
               }
               runContextOf(state, message.params.delegation);
@@ -4705,7 +4705,7 @@ export function createHost({
               });
               void work.catch(error => accepted.reject(error));
               return {
-                wait: accepted.promise.then((receipt) => ({ ...runReceiptView(receipt, state.activeRunId === receipt.runId), reused: false })),
+                wait: accepted.promise.then((receipt) => ({ ...runReceiptView(receipt, runLivenessOf(state, receipt.runId)), reused: false })),
                 cleanup: cleanupSubmission,
               };
             } catch (error) {
@@ -4782,7 +4782,7 @@ export function createHost({
             const matching = visibleReceipts.filter(item => before === undefined || item.userSeq < before).reverse();
             const page = matching.slice(0, limit);
             return { sessionId, receipts: page.map(receipt =>
-              runReceiptView(receipt, sessions.get(sessionId)?.activeRunId === receipt.runId)),
+              runReceiptView(receipt, runLivenessOf(sessions.get(sessionId), receipt.runId))),
               hasMore: matching.length > page.length,
               nextBefore: matching.length > page.length ? page.at(-1)?.userSeq ?? null : null };
           }
@@ -4799,7 +4799,7 @@ export function createHost({
           const receipt = matches[0];
           if (receipt === undefined) throw new KernelError('run_not_found');
           if (message.method === 'run.receipt') {
-            const live = sessions.get(sessionId)?.activeRunId === receipt.runId;
+            const live = runLivenessOf(sessions.get(sessionId), receipt.runId);
             return runReceiptView(receipt, live);
           }
           const result = await readRunResult(env.directory, workspace, sessionId, receipt);
