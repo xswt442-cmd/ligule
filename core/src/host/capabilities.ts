@@ -118,7 +118,7 @@ export function runOriginBasis(trust: ControlTrust, bridge: boolean): RunResolve
 // Operation Session 的完整能力矩阵：operation.start 只授权"这一条已批准的命令及其记录与控制"。
 // 它不继承来源会话的通用能力，历史查看也不复活执行授权；不在表里的方法一律拒绝。
 // 断言来源权限/信任/Grant 变化本来就应停止命令，这里保证停止之后这些会话也无法借旧授权做事。
-const OPERATION_SESSION_METHODS: ReadonlySet<string> = new Set([
+export const OPERATION_SESSION_METHODS: ReadonlySet<string> = new Set([
   'session.open',
   'session.close',
   'session.read',
@@ -129,6 +129,11 @@ const OPERATION_SESSION_METHODS: ReadonlySet<string> = new Set([
   'execution.wait',
   'execution.cancel',
 ]);
+
+/** Operation Session 可以调用的方法；表外方法一律拒绝。 */
+export function isOperationSessionMethod(method: string): boolean {
+  return OPERATION_SESSION_METHODS.has(method);
+}
 
 /** Operation Session 被拒绝的方法对应的错误码，保留模型 Run / 取消 / 再启动三类语义。 */
 export function operationSessionDenial(method: string): string | undefined {
