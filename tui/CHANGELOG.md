@@ -16,6 +16,12 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 **修复**
 
 - 外控事件发生缺口后，从 Host 刷新持久转录并按 Session 序号显示尚未见过的记录；过期刷新不会回退当前游标，也不会伪造未持久化的实时增量。
+- 检查记录带有开始/结束时间与执行日志引用；导出与会话展示这些事实，旧记录把缺失字段显示为未知，不再推断完整性。
+- 导出件包含每条执行命令的引用、时段、退出结果、有界日志摘录与基线正文；无法导出时写明原因。
+- 通过 include、includeIf 或 worktree 配置定义的仓库过滤器会被识别并拒绝执行；会话文件边界窄于 Git 仓库根目录时，Git 状态与 diff 明确拒绝读取，不再返回边界外的内容。
+- Side Chat 用同一版本的有界快照核对选中内容，来自后续页的选择不再被误判为无法验证。
+- Operation Session 只保留其手动命令的记录与控制；来源权限收窄后，写文件、导出或启动新 Run 仍然被拒绝。
+- 随包指南不再出现内部阶段编号。
 
 ### English
 
@@ -27,6 +33,12 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 **Fixed**
 
 - After an external-control event gap, TUI refreshes the persisted transcript from the Host and displays unseen records by Session sequence. A stale refresh cannot rewind the cursor, and missing live deltas are never fabricated.
+- Check records carry their start and end times and the execution log reference; exports and sessions show these facts, and older records display missing fields as unknown instead of inferring completeness.
+- Exports include each execution command reference, window, outcome, bounded log excerpt, and baseline text; when something cannot be exported, the reason is written down.
+- Repository filters defined through include, includeIf, or worktree config are detected and refused; when the Session file boundary is narrower than the Git repository root, Git status and diff are refused instead of returning content from outside the boundary.
+- Side Chat verifies selected text against a bounded snapshot of the same file version, so a selection from a later page is no longer reported as unverifiable.
+- An Operation Session keeps only the record and controls of its manual command; after the source Permission narrows, writing files, exporting, or starting a new Run is still refused.
+- Packaged guides no longer mention internal stage numbers.
 
 ## [0.1.2] - 2026-11-05
 

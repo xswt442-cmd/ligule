@@ -18,6 +18,14 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 - 慢速冷启动期间，Host 偏好设置读取与写入使用独立的等待期限，避免读取在 Host 完成初始化前提前失败。
 - Linux AppImage/deb 明确包含 MIT 许可证，并设置匹配 `ligule.desktop` 的窗口标识，保证启动器条目可识别运行中的窗口。
+- 检查记录带有开始/结束时间与执行日志引用；导出与会话展示这些事实，旧记录把缺失字段显示为未知，不再推断完整性。
+- 导出件包含每条执行命令的引用、时段、退出结果、有界日志摘录与基线正文；无法导出时写明原因。
+- 通过 include、includeIf 或 worktree 配置定义的仓库过滤器会被识别并拒绝执行；会话文件边界窄于 Git 仓库根目录时，Git 状态与 diff 明确拒绝读取，不再返回边界外的内容。
+- Side Chat 用同一版本的有界快照核对选中内容，来自后续页的选择不再被误判为无法验证。
+- Operation Session 只保留其手动命令的记录与控制；来源权限收窄后，写文件、导出或启动新 Run 仍然被拒绝。
+- 随包指南不再出现内部阶段编号。
+- Project Git 面板会说明「当前会话文件边界窄于仓库根目录」并停止读取状态与改动。
+- 交付面板展示每次检查的时段与执行日志引用（字节数与 SHA-256）；旧记录显示为未知。
 
 ### English
 
@@ -31,6 +39,14 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 - Host preference reads now have a separate startup allowance from writes, preventing a slow cold start from failing before the Host finishes initializing.
 - Linux AppImage/deb packages include the MIT license and use a window identity matching `ligule.desktop`, so desktop launchers can associate the running window with its entry.
+- Check records carry their start and end times and the execution log reference; exports and sessions show these facts, and older records display missing fields as unknown instead of inferring completeness.
+- Exports include each execution command reference, window, outcome, bounded log excerpt, and baseline text; when something cannot be exported, the reason is written down.
+- Repository filters defined through include, includeIf, or worktree config are detected and refused; when the Session file boundary is narrower than the Git repository root, Git status and diff are refused instead of returning content from outside the boundary.
+- Side Chat verifies selected text against a bounded snapshot of the same file version, so a selection from a later page is no longer reported as unverifiable.
+- An Operation Session keeps only the record and controls of its manual command; after the source Permission narrows, writing files, exporting, or starting a new Run is still refused.
+- Packaged guides no longer mention internal stage numbers.
+- The Project Git panel explains that the Session file boundary is narrower than the repository root and stops reading status and changes.
+- The delivery panel shows each check window and its execution log reference (bytes and SHA-256); older records display unknown.
 
 ## [0.1.2] - 2026-11-05
 
