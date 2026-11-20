@@ -42,6 +42,22 @@ let heldSessionReadFrame = null;
 const sessionReadFrameLog = [];
 const sessionReadRequestIds = new Set();
 
+// status.get 的保持门：切换会话时压住旧会话的状态响应，放行后它不得覆盖新会话。
+let statusFrameHold = null;
+let statusFrameHeld = false;
+const statusFrameRequestIds = new Set();
+const statusFrameLog = [];
+
+function armStatusFrameHold(sessionId) {
+  if (statusFrameHold !== null) throw Object.assign(new Error('status_frame_hold_already_set'), { code: 'status_frame_hold_already_set' });
+  let release;
+  const released = new Promise(resolvePromise => { release = resolvePromise; });
+  statusFrameHold = { sessionId, released };
+  statusFrameHeld = false;
+  statusFrameRequestIds.clear();
+  return { captured: () => statusFrameHeld, release: () => release() };
+}
+
 async function waitForDriver(predicate, timeoutMs, failureCode) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -268,6 +284,16 @@ async function createApplication() {
               if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.webContents.send('ligule:host-frame', frame);
             });
           }
+          if (statusFrameHold !== null && statusFrameRequestIds.delete(response.id)) {
+            const hold = statusFrameHold;
+            statusFrameLog.push(`captured ${response.id}`);
+            statusFrameHold = null;
+            statusFrameHeld = true;
+            heldResponse = true;
+            void hold.released.then(() => {
+              if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.webContents.send('ligule:host-frame', frame);
+            });
+          }
         }
       } catch {}
       if (!heldResponse && mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.webContents.send('ligule:host-frame', frame);
@@ -284,6 +310,11 @@ async function createApplication() {
           && sessionReadFrameHold !== null && request.params?.sessionId === sessionReadFrameHold.sessionId) {
           sessionReadRequestIds.add(request.id);
           sessionReadFrameLog.push(`armed-send ${request.id} ${request.params.sessionId}`);
+        }
+        if (request.method === 'status.get' && typeof request.id === 'string'
+          && statusFrameHold !== null && request.params?.sessionId === statusFrameHold.sessionId) {
+          statusFrameRequestIds.add(request.id);
+          statusFrameLog.push(`armed-send ${request.id} ${request.params.sessionId}`);
         }
         hostRequests.push({
           id: request.id,
@@ -894,22 +925,45 @@ async function verifyExternalSessionControl() {
       return true;
     })()`);
     await waitFor(`(() => [...document.querySelectorAll('.external-control-head button')].some(item => /停止本轮|Stop turn/u.test(item.textContent ?? '')))()`, 15_000, 'external_control_cancel_button_missing');
-    await evaluate(`(() => {
+    const cancelPhaseStopped = async () => evaluate(`document.querySelector('.external-control .external-control-state')?.textContent.includes('已停止') === true
+      || document.querySelector('.external-control .external-control-state')?.textContent.includes('Stopped') === true`);
+    const cancelNotePresent = async () => evaluate(`document.querySelector('.external-control')?.innerText.includes('已请求停止外控会话当前轮次') === true
+      || document.querySelector('.external-control')?.innerText.includes('Requested cancellation of the active external turn') === true`);
+    // 以持久转录里的终态为准；面板的阶段文字只作界面观察。
+    const turnCancelled = async () => {
+      const record = await host.request('session.read', { sessionId: observerSessionId, fullResults: true }).catch(() => null);
+      const turns = Array.isArray(record?.events) ? record.events.filter(event => event.kind === 'turn') : [];
+      return turns.at(-1)?.status === 'cancelled';
+    };
+    const clickStop = () => evaluate(`(() => {
       const button = [...document.querySelectorAll('.external-control-head button')].find(item => /停止本轮|Stop turn/u.test(item.textContent ?? ''));
-      button?.click();
-      return button !== undefined;
+      if (button === undefined || button.disabled) return false;
+      button.click();
+      return true;
     })()`);
-    try {
-      await waitFor(`document.querySelector('.external-control .external-control-state')?.textContent.includes('已停止') === true
-        || document.querySelector('.external-control .external-control-state')?.textContent.includes('Stopped') === true`, 20_000, 'external_control_cancel_not_confirmed');
-    } catch (error) {
+    const clicked = await clickStop();
+    const cancelDeadline = Date.now() + 20_000;
+    let cancelClicks = clicked === true ? 1 : 0;
+    let cancelConfirmed = false;
+    while (Date.now() < cancelDeadline) {
+      if (await cancelPhaseStopped()) { cancelConfirmed = true; break; }
+      // 取消请求已提交、持久转录也已到 cancelled：只剩面板阶段文字滞后，不把它算作失败。
+      if (await cancelNotePresent() && await turnCancelled()) { cancelConfirmed = true; break; }
+      // 合成点击可能落在重排中的按钮上；取消是幂等的，只补一次。
+      if (cancelClicks === 0 && Date.now() > cancelDeadline - 16_000) {
+        if (await clickStop()) cancelClicks += 1;
+      }
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 250));
+    }
+    if (!cancelConfirmed) {
       const diagnostic = await evaluate(`(() => ({
         state: document.querySelector('.external-control .external-control-state')?.textContent ?? null,
         panel: document.querySelector('.external-control')?.innerText.slice(0, 300) ?? null,
         buttons: [...document.querySelectorAll('.external-control-head button')].map(button => button.textContent),
       }))()`);
-      error.diagnostic = `external-control-cancel:${JSON.stringify(diagnostic)}`;
-      throw error;
+      const hostCancelled = await turnCancelled();
+      const code = hostCancelled ? 'external_control_cancel_ui_not_updated' : 'external_control_cancel_not_confirmed';
+      throw Object.assign(new Error(code), { code, diagnostic: `external-control-cancel:${JSON.stringify({ ...diagnostic, hostCancelled, clicks: cancelClicks })}` });
     }
     await fetch(`${process.env.LIGULE_STUB_CONTROL}/hang`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hang: false }) });
 
@@ -1272,6 +1326,79 @@ async function verifySessionSnapshotLiveInterleave() {
   }
 }
 
+async function verifyLateStatusFrameOwnership() {
+  if (typeof sessionId !== 'string') throw Object.assign(new Error('status_hold_session_missing'), { code: 'status_hold_session_missing' });
+  const owner = sessionId;
+  const railRefresh = 'button[aria-label="刷新会话列表"], button[aria-label="Refresh conversations"]';
+  const itemOf = target => `[...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(' · ' + ${JSON.stringify(target)}))`;
+  const permissionLabel = () => evaluate(`document.querySelector('button.permission-trigger')?.textContent ?? ''`);
+  const ownerItem = () => `[...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(' · ' + ${JSON.stringify(owner)}))`;
+  let otherSessionId;
+  let hold;
+  try {
+    await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${owner}`)}) === true`, 10_000, 'status_hold_owner_not_active');
+    const ownerLabel = await permissionLabel();
+    if (!/只读|Read only|工作区可写|Workspace write/u.test(ownerLabel)) {
+      throw Object.assign(new Error('status_hold_owner_label_missing'), { code: 'status_hold_owner_label_missing', diagnostic: ownerLabel });
+    }
+    // 另一会话用只读权限：owner 是工作区可写，两者的 status 在权限标签上可直接区分。
+    const created = await requestHost('session.create', {
+      projectRoot: workspaceRoot,
+      initialPermissionProfile: 'read-only',
+    });
+    otherSessionId = created.createdSessionId;
+    if (typeof otherSessionId !== 'string') throw Object.assign(new Error('status_hold_other_session_missing'), { code: 'status_hold_other_session_missing' });
+    await evaluate(`document.querySelector('${railRefresh}')?.click(); true`);
+    await waitFor(`${itemOf(otherSessionId)} !== undefined`, 10_000, 'status_hold_other_not_listed');
+    await evaluate(`${itemOf(otherSessionId)}.click(); true`);
+    await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${otherSessionId}`)}) === true`, 10_000, 'status_hold_other_not_active');
+    await waitFor(`(() => { const label = document.querySelector('button.permission-trigger')?.textContent ?? ''; return label.includes('只读') || label.includes('Read only'); })()`, 10_000, 'status_hold_other_label_missing');
+
+    // 回到 owner，压住它下一次 status.get 的响应。
+    await evaluate(`${ownerItem()}.click(); true`);
+    await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${owner}`)}) === true`, 10_000, 'status_hold_owner_restore_failed');
+    await waitFor(`(() => { const label = document.querySelector('button.permission-trigger')?.textContent ?? ''; return label === ${JSON.stringify(ownerLabel)}; })()`, 10_000, 'status_hold_owner_label_restore_failed');
+    hold = armStatusFrameHold(owner);
+    await waitForDriver(hold.captured, 15_000, 'status_frame_not_held');
+
+    // 压住期间切到另一会话：新会话的状态必须正常显示。
+    await evaluate(`${itemOf(otherSessionId)}.click(); true`);
+    await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${otherSessionId}`)}) === true`, 10_000, 'status_hold_switch_failed');
+    await waitFor(`(() => { const label = document.querySelector('button.permission-trigger')?.textContent ?? ''; return label.includes('只读') || label.includes('Read only'); })()`, 10_000, 'status_hold_other_status_not_applied');
+
+    // 放行旧会话的状态响应：它不属于当前视图，不能把权限标签改回 owner 的值。
+    hold.release();
+    hold = undefined;
+    const deadline = Date.now() + 3_000;
+    let wrongLabel = null;
+    while (Date.now() < deadline) {
+      const activeTitle = await evaluate(`document.querySelector('.session-item.active')?.title ?? null`);
+      if (typeof activeTitle !== 'string' || !activeTitle.endsWith(` · ${otherSessionId}`)) {
+        throw Object.assign(new Error('status_hold_active_session_changed'), { code: 'status_hold_active_session_changed', diagnostic: String(activeTitle) });
+      }
+      const label = await permissionLabel();
+      if (label === ownerLabel) { wrongLabel = label; break; }
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 100));
+    }
+    if (wrongLabel !== null) {
+      throw Object.assign(new Error('late_status_overwrote_current_view'), {
+        code: 'late_status_overwrote_current_view',
+        diagnostic: JSON.stringify({ wrongLabel, held: statusFrameLog.slice(-4) }),
+      });
+    }
+    return `status.get 响应被压住后切换会话；放行旧响应没有覆盖当前会话的权限状态（压帧 ${statusFrameLog.length} 次）`;
+  } finally {
+    hold?.release();
+    if (typeof otherSessionId === 'string') {
+      await requestHost('session.close', { sessionId: otherSessionId }).catch(() => undefined);
+      await evaluate(`document.querySelector('${railRefresh}')?.click(); true`).catch(() => undefined);
+      await evaluate(`${ownerItem()}.click(); true`).catch(() => undefined);
+      await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${owner}`)}) === true`,
+        5_000, 'status_hold_owner_cleanup_failed').catch(() => undefined);
+    }
+  }
+}
+
 async function recordReport(exitCode) {
   const prefsReadRequest = hostRequests.find(request => request.method === 'prefs.read');
   const prefsReadResponse = prefsReadRequest === undefined ? undefined : hostResponses.findLast(response => response.id === prefsReadRequest.id);
@@ -1520,6 +1647,7 @@ async function runChecks() {
 
   if (typeof stubControl === 'string' && stubControl !== '') {
     await check(`${providerLabel}会话快照与实时记录交错`, verifySessionSnapshotLiveInterleave);
+    await check(`${providerLabel}会话切换后的迟到状态响应`, verifyLateStatusFrameOwnership);
   }
 
   if (process.env.LIGULE_EXTERNAL_CONTROL_TEST === '1') {
