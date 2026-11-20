@@ -26,6 +26,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - 随包指南不再出现内部阶段编号。
 - Project Git 面板会说明「当前会话文件边界窄于仓库根目录」并停止读取状态与改动。
 - 交付面板展示每次检查的时段与执行日志引用（字节数与 SHA-256）；旧记录显示为未知。
+- 切换会话、关闭面板或 Host 重启后，命令工作台与交付面板的迟到读取不再写入当前视图。
 
 ### English
 
@@ -47,6 +48,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - Packaged guides no longer mention internal stage numbers.
 - The Project Git panel explains that the Session file boundary is narrower than the repository root and stops reading status and changes.
 - The delivery panel shows each check window and its execution log reference (bytes and SHA-256); older records display unknown.
+- After a session switch, a closed panel, or a Host restart, late command-workbench and delivery reads no longer write into the current view.
 
 ## [0.1.2] - 2026-11-05
 
