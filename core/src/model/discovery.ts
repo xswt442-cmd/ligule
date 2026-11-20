@@ -1,6 +1,6 @@
 import { KernelError } from '../kernel/error.js';
 import { resolveCredential } from '../kernel/credentials.js';
-import { apiRoot } from './http.js';
+import { apiRoot, cancelOnAbort } from './http.js';
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 
@@ -32,11 +32,12 @@ export async function discoverModels(input: { api: unknown; baseURL: unknown; re
   }
   const apiKey = input.temporaryKey === undefined ? await resolveCredential(input.reference) : input.temporaryKey;
   if (apiKey === undefined) throw new KernelError('provider_credential_missing');
+  const signal = AbortSignal.timeout(15_000);
   let response: Response;
   try {
     response = await fetch(`${root}/models`, {
       headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
-      signal: AbortSignal.timeout(15_000),
+      signal,
       redirect: 'error',
     });
   } catch {
@@ -53,6 +54,7 @@ export async function discoverModels(input: { api: unknown; baseURL: unknown; re
   if (reader === undefined) throw new KernelError('model_discovery_response_invalid');
   const chunks: Uint8Array[] = [];
   let length = 0;
+  const stopCancel = cancelOnAbort(reader, signal);
   try {
     while (true) {
       const next = await reader.read();
@@ -65,10 +67,12 @@ export async function discoverModels(input: { api: unknown; baseURL: unknown; re
       }
       chunks.push(next.value);
     }
+    if (signal.aborted) throw new KernelError('model_discovery_failed', { detail: 'request timed out' });
   } catch (cause) {
     if (cause instanceof KernelError) throw cause;
     throw new KernelError('model_discovery_failed', { cause });
   } finally {
+    stopCancel();
     reader.releaseLock();
   }
   const bytes = new Uint8Array(length);

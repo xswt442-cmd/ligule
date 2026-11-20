@@ -205,7 +205,7 @@ async function sessionSummary() {
   const record = await requestHost('session.read', { sessionId, fullResults: true });
   return {
     running: status.running,
-    turns: record.events.filter(event => event.kind === 'turn').map(event => ({ status: event.status, code: event.code })),
+    turns: record.events.filter(event => event.kind === 'turn').map(event => ({ status: event.status, code: event.code, userSeq: event.userSeq })),
     tools: record.events.filter(event => event.kind === 'tool').map(event => ({ tool: event.tool, kind: event.resultKind, code: event.resultCode })),
     deltaCount: await evaluate(`window.__realModelFrames.filter(frame => frame.notify === 'delta' && frame.sessionId === ${JSON.stringify(sessionId)}).length`),
   };
@@ -929,8 +929,21 @@ async function verifyExternalSessionControl() {
       || document.querySelector('.external-control .external-control-state')?.textContent.includes('Stopped') === true`);
     const cancelNotePresent = async () => evaluate(`document.querySelector('.external-control')?.innerText.includes('已请求停止外控会话当前轮次') === true
       || document.querySelector('.external-control')?.innerText.includes('Requested cancellation of the active external turn') === true`);
-    // 以持久转录里的终态为准；面板的阶段文字只作界面观察。
-    const turnCancelled = async () => {
+    // 以目标操作的终态为准；面板的阶段文字只作界面观察。
+    const controlSnapshot = async () => {
+      try {
+        return await host.request('session.control', {
+          projectRoot: workspaceRoot, sessionId: observerSessionId,
+          request: { action: 'status', after: 0, limit: 1, waitMs: 0 },
+        });
+      } catch { return null; }
+    };
+    const cancelTargetOperationId = (await controlSnapshot())?.operationId;
+    const targetCancelled = async () => {
+      const snapshot = await controlSnapshot();
+      if (typeof cancelTargetOperationId === 'string') {
+        return snapshot?.operationId === cancelTargetOperationId && snapshot?.state === 'cancelled';
+      }
       const record = await host.request('session.read', { sessionId: observerSessionId, fullResults: true }).catch(() => null);
       const turns = Array.isArray(record?.events) ? record.events.filter(event => event.kind === 'turn') : [];
       return turns.at(-1)?.status === 'cancelled';
@@ -946,9 +959,9 @@ async function verifyExternalSessionControl() {
     let cancelClicks = clicked === true ? 1 : 0;
     let cancelConfirmed = false;
     while (Date.now() < cancelDeadline) {
-      if (await cancelPhaseStopped()) { cancelConfirmed = true; break; }
-      // 取消请求已提交、持久转录也已到 cancelled：只剩面板阶段文字滞后，不把它算作失败。
-      if (await cancelNotePresent() && await turnCancelled()) { cancelConfirmed = true; break; }
+      if (await targetCancelled()) {
+        if (await cancelPhaseStopped() || await cancelNotePresent()) { cancelConfirmed = true; break; }
+      }
       // 合成点击可能落在重排中的按钮上；取消是幂等的，只补一次。
       if (cancelClicks === 0 && Date.now() > cancelDeadline - 16_000) {
         if (await clickStop()) cancelClicks += 1;
@@ -961,9 +974,12 @@ async function verifyExternalSessionControl() {
         panel: document.querySelector('.external-control')?.innerText.slice(0, 300) ?? null,
         buttons: [...document.querySelectorAll('.external-control-head button')].map(button => button.textContent),
       }))()`);
-      const hostCancelled = await turnCancelled();
+      const hostSnapshot = await controlSnapshot();
+      const hostCancelled = typeof cancelTargetOperationId === 'string'
+        ? hostSnapshot?.operationId === cancelTargetOperationId && hostSnapshot?.state === 'cancelled'
+        : await targetCancelled();
       const code = hostCancelled ? 'external_control_cancel_ui_not_updated' : 'external_control_cancel_not_confirmed';
-      throw Object.assign(new Error(code), { code, diagnostic: `external-control-cancel:${JSON.stringify({ ...diagnostic, hostCancelled, clicks: cancelClicks })}` });
+      throw Object.assign(new Error(code), { code, diagnostic: `external-control-cancel:${JSON.stringify({ ...diagnostic, hostCancelled, targetOperationId: cancelTargetOperationId ?? null, hostState: hostSnapshot?.state ?? null, clicks: cancelClicks })}` });
     }
     await fetch(`${process.env.LIGULE_STUB_CONTROL}/hang`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hang: false }) });
 
@@ -1274,7 +1290,21 @@ async function verifySessionSnapshotLiveInterleave() {
       });
     }
     const summary = await waitForSessionIdle(30_000, 'interleave_turn_did_not_finish');
-    assert.equal(summary.turns.at(-1)?.status, 'completed', 'interleave_turn_terminal_status_invalid');
+    // running 变成 false 与终态 turn 落盘之间有一个窗口；按接受的 userSeq 找到本次 Run 的 turn，等它落定。
+    const acceptedUserSeq = accepted.result?.userSeq;
+    const turnFor = turns => turns.filter(turn => typeof acceptedUserSeq !== 'number' || turn.userSeq === acceptedUserSeq).at(-1);
+    let lastTurn = turnFor(summary.turns);
+    const turnDeadline = Date.now() + 10_000;
+    while (Date.now() < turnDeadline && (lastTurn === undefined || lastTurn.status === 'running')) {
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 100));
+      lastTurn = turnFor((await sessionSummary()).turns);
+    }
+    if (lastTurn?.status !== 'completed') {
+      throw Object.assign(new Error('interleave_turn_terminal_status_invalid'), {
+        code: 'interleave_turn_terminal_status_invalid',
+        diagnostic: JSON.stringify({ acceptedUserSeq: acceptedUserSeq ?? null, lastTurn: lastTurn ?? null, turns: summary.turns.slice(-3) }),
+      });
+    }
     await new Promise(resolvePromise => setTimeout(resolvePromise, 800));
     const settled = await evaluate(occurrences());
     if (settled !== 1) {
@@ -1354,14 +1384,20 @@ async function verifyLateStatusFrameOwnership() {
     await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${otherSessionId}`)}) === true`, 10_000, 'status_hold_other_not_active');
     await waitFor(`(() => { const label = document.querySelector('button.permission-trigger')?.textContent ?? ''; return label.includes('只读') || label.includes('Read only'); })()`, 10_000, 'status_hold_other_label_missing');
 
-    // 回到 owner，压住它下一次 status.get 的响应。
+    // 回到 owner，确认标签恢复；再切到只读会话，让 owner 处于非活动状态，避免心跳占用帧门。
     await evaluate(`${ownerItem()}.click(); true`);
     await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${owner}`)}) === true`, 10_000, 'status_hold_owner_restore_failed');
     await waitFor(`(() => { const label = document.querySelector('button.permission-trigger')?.textContent ?? ''; return label === ${JSON.stringify(ownerLabel)}; })()`, 10_000, 'status_hold_owner_label_restore_failed');
+    await evaluate(`${itemOf(otherSessionId)}.click(); true`);
+    await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${otherSessionId}`)}) === true`, 10_000, 'status_hold_other_reactivate_failed');
+    await waitFor(`(() => { const label = document.querySelector('button.permission-trigger')?.textContent ?? ''; return label.includes('只读') || label.includes('Read only'); })()`, 10_000, 'status_hold_other_label_restore_failed');
     hold = armStatusFrameHold(owner);
+    // 只有切回 owner 才会触发写状态的那次 refreshStatus；心跳不会更新状态，不能作为被测目标。
+    await evaluate(`${ownerItem()}.click(); true`);
     await waitForDriver(hold.captured, 15_000, 'status_frame_not_held');
+    await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${owner}`)}) === true`, 5_000, 'status_hold_owner_reopen_failed');
 
-    // 压住期间切到另一会话：新会话的状态必须正常显示。
+    // 旧响应仍被压住，切到只读会话：它的状态必须正常显示。
     await evaluate(`${itemOf(otherSessionId)}.click(); true`);
     await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${otherSessionId}`)}) === true`, 10_000, 'status_hold_switch_failed');
     await waitFor(`(() => { const label = document.querySelector('button.permission-trigger')?.textContent ?? ''; return label.includes('只读') || label.includes('Read only'); })()`, 10_000, 'status_hold_other_status_not_applied');

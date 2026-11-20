@@ -160,6 +160,8 @@ function cancelOnAbort(reader: ReadableStreamDefaultReader<Uint8Array>, signal: 
   return () => signal.removeEventListener('abort', cancel);
 }
 
+export { cancelOnAbort };
+
 async function httpFailureDetail(
   response: Response,
   context: ProviderResponseContext,
@@ -185,6 +187,7 @@ async function httpFailureDetail(
       text += decoder.decode(bytes, { stream: true });
       remaining -= bytes.length;
     }
+    if (signal?.aborted) throw abortFailure(signal.reason, signal, context, streamReceived);
   } catch (error) {
     if (signal?.aborted || isAbortError(error)) {
       throw abortFailure(error, signal, context, streamReceived);

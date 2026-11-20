@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { open, parseSse, DEFAULT_RETRY } from '../dist/model/http.js';
+import { open, parseSse, readJson, DEFAULT_RETRY } from '../dist/model/http.js';
 import { listenFetchable } from './helpers/port.ts';
 
 const SENTINEL = 'PLAN2_SYNTHETIC_PRIVATE_SENTINEL_NEVER_LOG';
@@ -110,6 +110,73 @@ test('parseSse settles a pending read when the stream itself ignores the abort s
   assert.notEqual(settled, 'timed-out', 'cancelling must settle the pending read even if the stream ignores the signal');
   assert.equal((settled as ProviderFailure).code, 'provider_cancelled');
   assert.equal(cancelled, true, 'the response body must be cancelled on abort');
+});
+
+test('Aborting while reading an HTTP error body reports cancellation, not an HTTP error', async () => {
+  await endpoint((request, response) => {
+    response.writeHead(400, { 'content-type': 'application/json' });
+    response.write('{"error":"partial');
+  }, async (url) => {
+    const controller = new AbortController();
+    const pending = open(url, { method: 'POST', signal: controller.signal }, RETRY);
+    setTimeout(() => controller.abort(), 100);
+    const settled = await Promise.race([
+      pending.then(() => 'resolved' as const, (error: unknown) => error),
+      new Promise<'timed-out'>(resolve => setTimeout(() => resolve('timed-out'), 5_000)),
+    ]);
+    assert.notEqual(settled, 'timed-out', 'an aborted error body must settle');
+    assert.equal((settled as ProviderFailure).code, 'provider_cancelled');
+  });
+});
+
+test('Aborting a JSON body read settles and reports cancellation', async () => {
+  await endpoint((request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.write('{"partial":');
+  }, async (url) => {
+    const controller = new AbortController();
+    const response = await open(url, { method: 'POST', signal: controller.signal }, RETRY);
+    const reading = readJson(response, controller.signal);
+    setTimeout(() => controller.abort(), 100);
+    const settled = await Promise.race([
+      reading.then(() => 'resolved' as const, (error: unknown) => error),
+      new Promise<'timed-out'>(resolve => setTimeout(() => resolve('timed-out'), 5_000)),
+    ]);
+    assert.notEqual(settled, 'timed-out', 'an aborted JSON body must settle');
+    assert.equal((settled as ProviderFailure).code, 'provider_cancelled');
+  });
+});
+
+test('A TimeoutError abort is classified as a provider timeout', async () => {
+  const stream = new ReadableStream<Uint8Array>({});
+  const controller = new AbortController();
+  const iteration = (async () => {
+    for await (const event of parseSse(stream, { signal: controller.signal })) assert.fail(`unexpected event ${typeof event}`);
+  })();
+  setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), 50);
+  const settled = await Promise.race([
+    iteration.then(() => 'resolved' as const, (error: unknown) => error),
+    new Promise<'timed-out'>(resolve => setTimeout(() => resolve('timed-out'), 5_000)),
+  ]);
+  assert.notEqual(settled, 'timed-out', 'a timed-out stream must settle');
+  assert.equal((settled as ProviderFailure).code, 'provider_timeout');
+});
+
+test('A rejecting cancel still settles the aborted stream', async () => {
+  const stream = new ReadableStream<Uint8Array>({
+    cancel() { return Promise.reject(new Error('cancel rejected')); },
+  });
+  const controller = new AbortController();
+  const iteration = (async () => {
+    for await (const event of parseSse(stream, { signal: controller.signal })) assert.fail(`unexpected event ${typeof event}`);
+  })();
+  setTimeout(() => controller.abort(), 50);
+  const settled = await Promise.race([
+    iteration.then(() => 'resolved' as const, (error: unknown) => error),
+    new Promise<'timed-out'>(resolve => setTimeout(() => resolve('timed-out'), 5_000)),
+  ]);
+  assert.notEqual(settled, 'timed-out', 'a rejecting cancel must not keep the stream pending');
+  assert.equal((settled as ProviderFailure).code, 'provider_cancelled');
 });
 
 test('context overflow remains recognizable without disclosing the upstream diagnostic', async () => {
