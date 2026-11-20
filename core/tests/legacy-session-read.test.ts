@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { branchSession, createSessionLog, listSessions, searchSessions } from '../dist/index.js';
-import { exportMarkdown } from '../dist/host/export.js';
+import { exportMarkdown, exportRecordOf } from '../dist/host/export.js';
 import { SESSION_FORMAT_VERSION } from '../dist/session/format.js';
 
 async function withDirectory<TResult>(run: (directory: string) => TResult | Promise<TResult>): Promise<TResult> {
@@ -51,7 +51,8 @@ test('a version 3 record reads, lists, searches and exports without inventing mi
     const found = await searchSessions(directory, { query: 'old request' });
     assert.equal(found.length, 1);
 
-    const markdown = exportMarkdown(events, { id: 'legacy-3', projectRoot: '/repo' });
+    const records = events.map((event) => exportRecordOf(event)).filter((record) => record !== undefined);
+    const markdown = exportMarkdown(records, { id: 'legacy-3', projectRoot: '/repo' });
     assert.match(markdown, /old request/u);
     assert.match(markdown, /old contents/u);
   });
