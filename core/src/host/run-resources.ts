@@ -1,6 +1,10 @@
 // 一次 Run 结束时需要收口的外部资源：子 Run 与有限命令各自拥有自己的登记表，
-// 这里拥有它们共同的生命周期阶段与失败合并，Host 只按阶段调用一次。
+// 这里拥有它们共同的生命周期阶段、失败合并与失败归属，Host 只按阶段调用一次。
+import { KernelError } from '../kernel/error.js';
+
 export type RunResourceParticipant = {
+  /** 出现在收口失败诊断里的资源名。 */
+  readonly name: string;
   /** 关闭新的工作准入：此后再到达的子 Run 或有限命令不再属于这一轮。 */
   readonly beginCompletionCandidate: () => void;
   /** 重新开放准入：完成候选未成立时恢复接收工作。 */
@@ -11,7 +15,17 @@ export type RunResourceParticipant = {
   readonly finish: () => Promise<void>;
 };
 
-export type RunResources = RunResourceParticipant;
+export type RunResources = Omit<RunResourceParticipant, 'name'>;
+
+class ParticipantFailureError extends Error {
+  readonly participant: string;
+
+  constructor(participant: string, error: unknown) {
+    super(participant, { cause: error });
+    this.name = 'ParticipantFailureError';
+    this.participant = participant;
+  }
+}
 
 // 阶段内的每个资源都必须被执行；同步失败保留第一个原因，异步失败合并成一条领域错误。
 function applyToAll(participants: readonly RunResourceParticipant[], action: (participant: RunResourceParticipant) => void): void {
@@ -30,16 +44,31 @@ function applyToAll(participants: readonly RunResourceParticipant[], action: (pa
   if (failed) throw failure;
 }
 
+function codeOf(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string' && error.code !== '') return error.code;
+  if (error instanceof Error) return error.name;
+  return 'unknown';
+}
+
 async function settleAll(
   participants: readonly RunResourceParticipant[],
   action: (participant: RunResourceParticipant) => Promise<void>,
-  code: string,
+  code: 'run_resources_settle_failed' | 'run_resources_finish_failed',
 ): Promise<void> {
-  const outcomes = await Promise.allSettled(participants.map((participant) => action(participant)));
-  const failures = outcomes
-    .filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
-    .map((outcome) => outcome.reason);
-  if (failures.length > 0) throw new AggregateError(failures, code);
+  // 逆序无关；每个参与者在一个 async 包装里执行，同步抛错也会变成被汇总的拒绝。
+  const outcomes = await Promise.allSettled(participants.map(async (participant) => {
+    try {
+      await action(participant);
+    } catch (error) {
+      throw new ParticipantFailureError(participant.name, error);
+    }
+  }));
+  const failures = outcomes.flatMap((outcome) => outcome.status === 'rejected' ? [outcome.reason as ParticipantFailureError] : []);
+  if (failures.length === 0) return;
+  throw new KernelError(code, {
+    detail: failures.map((failure) => `${failure.participant}: ${codeOf(failure.cause)}`).join('; '),
+    cause: new AggregateError(failures.map((failure) => failure.cause), code),
+  });
 }
 
 export function runResourcesOf(participants: readonly RunResourceParticipant[]): RunResources {

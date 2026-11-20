@@ -3004,12 +3004,14 @@ export function createHost({
         const acceptedRunId = options.acceptance?.runId;
         const runResources = acceptedRunId === undefined ? undefined : runResourcesOf([
           {
+            name: 'subagents',
             beginCompletionCandidate: () => subagents.beginCompletionCandidate(acceptedRunId),
             resume: () => subagents.resumeParent(acceptedRunId),
             settle: async (status) => await subagents.settleParent(acceptedRunId, status),
             finish: async () => await subagents.finishParent(acceptedRunId),
           },
           {
+            name: 'finite-commands',
             beginCompletionCandidate: () => finiteCommands.beginCompletionCandidate(state.id, acceptedRunId),
             resume: () => finiteCommands.resumeRun(state.id, acceptedRunId),
             settle: async (status) => await finiteCommands.settleRun(state.id, acceptedRunId, status),
