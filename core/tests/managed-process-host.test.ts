@@ -13,6 +13,7 @@ import { createPermissionContext } from '../dist/kernel/permission.js';
 import type { PermissionContext } from '../dist/kernel/permission.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 import { fetchablePort } from './helpers/port.ts';
+import { waitForUnavailable } from './helpers/wait.ts';
 
 type ManagedContent = { id: string; status: string; port: number; logs: string };
 
@@ -42,20 +43,6 @@ async function availableLoopbackPort(): Promise<number> {
     if (fetchablePort(port)) return port;
   }
   throw new Error('managed_process_test_port_unavailable');
-}
-
-async function waitForUnavailable(url: string): Promise<void> {
-  const deadline = Date.now() + 3_000;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      await response.body?.cancel();
-    } catch {
-      return;
-    }
-    await delay(20);
-  }
-  assert.fail(`server at ${url} remained reachable`);
 }
 
 async function waitForRequest(url: string): Promise<Response> {

@@ -5,8 +5,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createConnection } from '../core/dist/host/connection.js';
-import type { Connection } from '../core/dist/host/connection.js';
 import { loadHostEnvironment } from '../core/dist/host/environment.js';
+import { ready } from './helpers/readiness.ts';
 
 // 协议回复没有生成类型；测试按自己读取的字段声明所需形状，再用窄转换标注。
 type Named = { sessionId: string };
@@ -61,25 +61,6 @@ function deadline<T>(pending: Promise<T>, label: string): Promise<T> {
     timer = setTimeout(() => reject(new Error(`${label} did not finish`)), 10_000);
   });
   return Promise.race([pending, expired]).finally(() => clearTimeout(timer));
-}
-
-// A host finishes sandbox and permission probing before it answers the first request. On Windows
-// that costs seconds to tens of seconds depending on the workspace size (measured here: about
-// 6.4s for a small workspace, about 25s for this repository). The readiness phase gets its own
-// allowance while every protocol request after it keeps the 10s deadline, which tells "the host
-// never started" apart from "the request is slow" without enlarging the product timeout.
-const STARTUP_READY_MS = 60_000;
-
-async function ready(client: Connection, label = 'Host') {
-  const limit = Date.now() + STARTUP_READY_MS;
-  for (;;) {
-    const answered = await Promise.race([
-      client.request('prefs.read', {}).then(() => true, () => false),
-      new Promise(resolve => setTimeout(() => resolve(false), 1_000)),
-    ]);
-    if (answered) return;
-    if (Date.now() > limit) throw new Error(`${label} did not answer within ${STARTUP_READY_MS}ms`);
-  }
 }
 
 function startDesktop(projectRoot: string, dataRoot: string) {

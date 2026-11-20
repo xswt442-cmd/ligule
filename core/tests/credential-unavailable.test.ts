@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { randomReference, restoreEnvironment } from './helpers/credentials.ts';
 
 const execFile = promisify(callbackExecFile);
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -33,15 +34,6 @@ try {
   await host.release();
 }
 `;
-
-function randomReference() {
-  return `LIGULE_TEST_${randomUUID().replaceAll('-', '_').toUpperCase()}`;
-}
-
-function restoreEnvironment(name: string, value: string | undefined) {
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
-}
 
 type CredentialFixture = { directory: string; home: string; reference: string };
 

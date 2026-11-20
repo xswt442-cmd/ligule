@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { createChatCompletionsProvider, DEFAULT_RETRY } from '../dist/index.js';
 import { listenFetchable } from './helpers/port.ts';
+import { collect } from './helpers/streams.ts';
 
 const ARGUMENT_SENTINEL = 'synthetic-tool-argument-sentinel-not-a-credential';
 const API_KEY_ENV = `LIGULE_PLAN2_DIAGNOSTIC_${randomUUID().replaceAll('-', '')}`;
@@ -36,12 +37,6 @@ async function withEndpoint(run: (baseUrl: string) => Promise<void>) {
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
-  }
-}
-
-async function collect(stream: AsyncIterable<unknown>) {
-  for await (const _event of stream) {
-    // The malformed tool call is reported after the provider has assembled the response.
   }
 }
 

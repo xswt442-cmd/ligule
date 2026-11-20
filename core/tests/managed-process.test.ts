@@ -11,6 +11,7 @@ import type { TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createConfig, createDecisionChain, createKernel, createManagedProcessRegistry, createPermissionContext, managedProcessPlugin, managedProcessTool } from '../dist/index.js';
 import { isTrusted, setTrusted } from '../dist/kernel/workspace-trust.js';
+import { waitForUnavailable } from './helpers/wait.ts';
 
 // Kernel 调用与 Registry 的公开结果都是不透明记录，这里按测试实际读取的字段声明其形状。
 type ManagedProcessResult = {
@@ -56,20 +57,6 @@ async function waitForRequest(url: string): Promise<Response> {
     }
   }
   assert.fail(`server at ${url} did not accept an HTTP request`);
-}
-
-async function waitForUnavailable(url: string): Promise<void> {
-  const deadline = Date.now() + 3_000;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      await response.body?.cancel();
-    } catch {
-      return;
-    }
-    await delay(20);
-  }
-  assert.fail(`server at ${url} remained reachable`);
 }
 
 async function waitForFile(path: string, within = 5_000): Promise<void> {

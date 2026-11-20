@@ -7,9 +7,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createConnection } from '../core/dist/host/connection.js';
-import type { Connection } from '../core/dist/host/connection.js';
 import { sessionDirectory } from '../core/dist/session/list.js';
 import { listenFetchable } from './helpers/port.ts';
+import { ready } from './helpers/readiness.ts';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 
@@ -26,25 +26,6 @@ async function within(work: Promise<unknown>, label: string) {
       timer = setTimeout(() => reject(new Error(`timed out: ${label}`)), 10000);
     })]);
   } finally { clearTimeout(timer); }
-}
-
-// A host finishes sandbox and permission probing before it answers the first request. On
-// Windows that costs seconds to tens of seconds depending on the workspace size (measured
-// here: about 6.4s for a small workspace, about 25s for this repository). Readiness gets its
-// own allowance; every protocol request after it keeps the 10s deadline, so the product
-// timeout is not enlarged and a failure still points at the phase that was actually slow.
-const STARTUP_READY_MS = 60_000;
-
-async function ready(client: Connection, label = 'Host') {
-  const limit = Date.now() + STARTUP_READY_MS;
-  for (;;) {
-    const answered = await Promise.race([
-      client.request('prefs.read', {}).then(() => true, () => false),
-      new Promise(resolve => setTimeout(() => resolve(false), 1_000)),
-    ]);
-    if (answered) return;
-    if (Date.now() > limit) throw new Error(`${label} did not answer within ${STARTUP_READY_MS}ms`);
-  }
 }
 
 async function startHost(project: string, home: string, flags: string[] = []) {

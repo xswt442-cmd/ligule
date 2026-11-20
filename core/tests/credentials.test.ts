@@ -5,20 +5,12 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { hasCode } from './helpers/assertions.ts';
+import { randomReference, restoreEnvironment } from './helpers/credentials.ts';
 import {
   credentialStatus, deleteCredential, resolveCredential, storeCredential,
 } from '../dist/kernel/credentials.js';
 
 const temporaryRoot = fileURLToPath(new URL('../testplace/tmp/', import.meta.url));
-
-function randomReference() {
-  return `LIGULE_TEST_${randomUUID().replaceAll('-', '_').toUpperCase()}`;
-}
-
-function restoreEnvironment(name: string, value: string | undefined) {
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
-}
 
 function assertSecret(actual: unknown, expected: unknown, message: string) {
   assert.equal(actual === expected, true, message);
