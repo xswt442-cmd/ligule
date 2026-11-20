@@ -86,6 +86,18 @@ test('the ripgrep runtime uses the upstream platform-selecting dependency', () =
 test('the public CLI separates its bundled JavaScript parser from consumer-platform dependencies', () => {
   const core = JSON.parse(read('../core/package.json'));
   const release = releaseManifest();
+  // 发行 manifest 把外部依赖钉在本次构建实际安装的版本上；这里核对钉住的正是消费者要安装的那一个。
+  const installedVersion = (name: string) => {
+    for (const directory of ['core', 'tui']) {
+      try {
+        const manifest = JSON.parse(read(`../${directory}/node_modules/${name}/package.json`));
+        return manifest.version as string;
+      } catch {
+        continue;
+      }
+    }
+    throw new Error(`${name} is not installed in the workspace`);
+  };
   for (const field of ['dependencies', 'optionalDependencies']) {
     for (const [name, version] of Object.entries(core[field] ?? {})) {
       if (release.bundledDependencies.includes(name)) {
@@ -93,7 +105,8 @@ test('the public CLI separates its bundled JavaScript parser from consumer-platf
         const fromCore = createRequire(new URL('../core/package.json', import.meta.url));
         assert.equal(release[field]?.[name], fromCore(name).version);
       } else {
-        assert.equal(release[field]?.[name], version, `${name} must be installed by the consumer for its own platform`);
+        assert.equal(release[field]?.[name], installedVersion(name), `${name} must be installed by the consumer for its own platform`);
+        assert.equal(typeof version, 'string');
       }
     }
   }
