@@ -1001,8 +1001,16 @@ export function createLoop({
         } catch (closeError) {
           cleanupErrors.push(closeError);
         }
-        const failure = cleanupErrors[0] ?? error;
-        const diagnostics = failure instanceof KernelError ? failure.diagnostics : undefined;
+        // 清理失败仍决定终态码：未收口的资源比原始失败更需要被看见。
+        // 原始运行失败保留在 detail 与 cause 里，两个原因都不会被丢掉。
+        const cleanupFailure = cleanupErrors[0];
+        const diagnostics = (cleanupFailure instanceof KernelError ? cleanupFailure.diagnostics : undefined)
+          ?? (error instanceof KernelError ? error.diagnostics : undefined);
+        const failure = cleanupFailure === undefined ? error : new KernelError(failureCode(cleanupFailure), {
+          detail: `${cleanupFailure instanceof KernelError && cleanupFailure.detail !== undefined ? `${cleanupFailure.detail}; ` : ''}the run ended with ${failureCode(error)}`,
+          ...(diagnostics === undefined ? {} : { diagnostics }),
+          cause: error,
+        });
         const code = failureCode(failure);
         try {
           await markTurn(TURN_CANCEL_CODES.has(code) ? 'cancelled' : 'failed', {

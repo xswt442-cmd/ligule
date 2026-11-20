@@ -147,6 +147,31 @@ test('a subrun cleanup failure still closes steering and records the failed turn
   }
 });
 
+test('a cleanup failure keeps the original run failure in detail and cause', async () => {
+  const root = await loopFailureDirectory();
+  const session = createSessionLog({ directory: root, id: 'subrun-cleanup-detail' });
+  try {
+    const provider = { async *stream() { throw new KernelError('provider_http_error'); } };
+    await assert.rejects(createLoop({ kernel: kernelWith([]), provider, session }).run('fail in cleanup', {
+      settleSubruns: async () => {
+        throw new KernelError('run_resources_settle_failed', { detail: 'subagents: subagent_parent_cancelled' });
+      },
+    }), (error: unknown) => {
+      assert.ok(error instanceof KernelError);
+      assert.equal(error.code, 'run_resources_settle_failed');
+      assert.equal(error.detail, 'subagents: subagent_parent_cancelled; the run ended with provider_http_error');
+      assert.equal((error.cause as { code?: string }).code, 'provider_http_error');
+      return true;
+    });
+    assert.deepEqual((await session.read()).filter((event) => event.kind === 'turn').map((event) => [event.status, event.code]), [
+      ['failed', 'run_resources_settle_failed'],
+    ]);
+  } finally {
+    await session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('a steering cleanup failure still records the failed turn', async () => {
   const root = await loopFailureDirectory();
   const session = createSessionLog({ directory: root, id: 'steering-cleanup-failure' });
