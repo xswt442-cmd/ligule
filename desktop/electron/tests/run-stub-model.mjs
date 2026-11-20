@@ -35,7 +35,7 @@ const electronModules = ['secure-window.js', 'security.js', 'ipc.js', 'host.js',
   .map(name => join(electronDirectory, 'dist', name));
 const required = [executable, harness, node, cli, hostEntry, frontend, ...electronModules, join(desktopDirectory, 'assets', 'app-icon.png')];
 const missing = required.filter(path => !existsSync(path));
-if (missing.length > 0) throw new Error(`stub_model_prerequisite_missing:${missing.map(basename).join(',')}`);
+if (missing.length > 0) throw new Error(`stub_model_prerequisite_missing:${missing.map(item => basename(item)).join(',')}`);
 
 const PROOF_FILES = [
   { name: 'model-denial-proof.txt', content: 'DENIED' },
