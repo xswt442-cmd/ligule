@@ -147,22 +147,29 @@ test('a subrun cleanup failure still closes steering and records the failed turn
   }
 });
 
-test('a cleanup failure keeps the original run failure in detail and cause', async () => {
+test('a cleanup failure keeps every failure reason without borrowing provider diagnostics', async () => {
   const root = await loopFailureDirectory();
   const session = createSessionLog({ directory: root, id: 'subrun-cleanup-detail' });
   try {
     const provider = { async *stream() { throw new KernelError('provider_http_error'); } };
+    let steeringClosed = 0;
     await assert.rejects(createLoop({ kernel: kernelWith([]), provider, session }).run('fail in cleanup', {
+      steering: steeringInbox(async () => {
+        steeringClosed += 1;
+        throw new KernelError('steering_close_failed');
+      }),
       settleSubruns: async () => {
         throw new KernelError('run_resources_settle_failed', { detail: 'subagents: subagent_parent_cancelled' });
       },
     }), (error: unknown) => {
       assert.ok(error instanceof KernelError);
       assert.equal(error.code, 'run_resources_settle_failed');
-      assert.equal(error.detail, 'subagents: subagent_parent_cancelled; the run ended with provider_http_error');
-      assert.equal((error.cause as { code?: string }).code, 'provider_http_error');
+      assert.equal(error.detail, 'subagents: subagent_parent_cancelled; additional cleanup failures: steering_close_failed; the run ended with provider_http_error');
+      assert.equal(error.diagnostics, undefined, 'cleanup failure must not inherit provider diagnostics');
+      assert.equal((error.cause as { code?: string }).code, 'run_resources_settle_failed');
       return true;
     });
+    assert.equal(steeringClosed, 1, 'steering cleanup runs after subrun cleanup fails');
     assert.deepEqual((await session.read()).filter((event) => event.kind === 'turn').map((event) => [event.status, event.code]), [
       ['failed', 'run_resources_settle_failed'],
     ]);

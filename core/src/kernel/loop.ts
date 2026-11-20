@@ -1002,20 +1002,29 @@ export function createLoop({
           cleanupErrors.push(closeError);
         }
         // 清理失败仍决定终态码：未收口的资源比原始失败更需要被看见。
-        // 原始运行失败保留在 detail 与 cause 里，两个原因都不会被丢掉。
+        // 原始运行失败与其他清理失败都写进 detail；cause 保留清理错误自己的原因链。
         const cleanupFailure = cleanupErrors[0];
-        const diagnostics = (cleanupFailure instanceof KernelError ? cleanupFailure.diagnostics : undefined)
-          ?? (error instanceof KernelError ? error.diagnostics : undefined);
+        const cleanupDiagnostics = cleanupFailure instanceof KernelError ? cleanupFailure.diagnostics : undefined;
+        // 没有清理失败时，诊断属于原始运行失败；有清理失败时不借用 Provider 诊断，
+        // 避免把“可重试的模型请求失败”错误地挂到资源收口错误上。
+        const failureDiagnostics = cleanupFailure === undefined
+          ? (error instanceof KernelError ? error.diagnostics : undefined)
+          : cleanupDiagnostics;
+        const extraCleanup = cleanupErrors.slice(1).map(code => failureCode(code));
         const failure = cleanupFailure === undefined ? error : new KernelError(failureCode(cleanupFailure), {
-          detail: `${cleanupFailure instanceof KernelError && cleanupFailure.detail !== undefined ? `${cleanupFailure.detail}; ` : ''}the run ended with ${failureCode(error)}`,
-          ...(diagnostics === undefined ? {} : { diagnostics }),
-          cause: error,
+          detail: [
+            cleanupFailure instanceof KernelError && cleanupFailure.detail !== undefined ? cleanupFailure.detail : undefined,
+            extraCleanup.length > 0 ? `additional cleanup failures: ${extraCleanup.join(', ')}` : undefined,
+            `the run ended with ${failureCode(error)}`,
+          ].filter((part): part is string => part !== undefined).join('; '),
+          ...(cleanupDiagnostics === undefined ? {} : { diagnostics: cleanupDiagnostics }),
+          cause: cleanupFailure,
         });
         const code = failureCode(failure);
         try {
           await markTurn(TURN_CANCEL_CODES.has(code) ? 'cancelled' : 'failed', {
             code,
-            ...(diagnostics === undefined ? {} : { diagnostics }),
+            ...(failureDiagnostics === undefined ? {} : { diagnostics: failureDiagnostics }),
           });
         } catch (turnError) {
           const turnCode = failureCode(turnError);
