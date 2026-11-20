@@ -33,6 +33,14 @@ const hostResponses = [];
 let nextExternalSendResponseGate = null;
 let workspaceReadinessMs = null;
 
+// 会话快照帧的保持门：让 `session.read` 的回复在 Host 读取之后才抵达界面，
+// 以便在一个确定的窗口里观察快照与实时记录交错。
+let sessionReadFrameHold = null;
+// 会话快照帧被真正压住过，说明交错路径被实际执行，而不是碰巧没有重叠。
+let sessionReadFrameHeld = false;
+const sessionReadFrameLog = [];
+const sessionReadRequestIds = new Set();
+
 function holdNextExternalSendResponse() {
   if (nextExternalSendResponseGate !== null) throw Object.assign(new Error('external_send_response_gate_already_set'), { code: 'external_send_response_gate_already_set' });
   let resolveHeld;
@@ -239,6 +247,16 @@ async function createApplication() {
               if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.webContents.send('ligule:host-frame', frame);
             });
           }
+          if (sessionReadFrameHold !== null && sessionReadRequestIds.delete(response.id)) {
+            const holdMs = sessionReadFrameHold.ms;
+            sessionReadFrameLog.push(`captured ${response.id} ${holdMs}`);
+            sessionReadFrameHold = null;
+            sessionReadFrameHeld = true;
+            heldResponse = true;
+            setTimeout(() => {
+              if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.webContents.send('ligule:host-frame', frame);
+            }, holdMs);
+          }
         }
       } catch {}
       if (!heldResponse && mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.webContents.send('ligule:host-frame', frame);
@@ -251,6 +269,11 @@ async function createApplication() {
       const request = JSON.parse(frame);
       if (['session.open', 'session.read', 'session.observe', 'session.control', 'prefs.read', 'prefs.write', 'status.get'].includes(request.method)) {
         const projectRoot = request.params?.projectRoot;
+        if (request.method === 'session.read' && typeof request.id === 'string'
+          && sessionReadFrameHold !== null && request.params?.sessionId === sessionReadFrameHold.sessionId) {
+          sessionReadRequestIds.add(request.id);
+          sessionReadFrameLog.push(`armed-send ${request.id} ${request.params.sessionId}`);
+        }
         hostRequests.push({
           id: request.id,
           method: request.method,
@@ -1084,6 +1107,129 @@ async function verifyQuestionDraftSurvivesSessionSwitchAndSubmission() {
   }
 }
 
+async function verifySessionSnapshotLiveInterleave() {
+  if (typeof sessionId !== 'string') throw Object.assign(new Error('interleave_session_missing'), { code: 'interleave_session_missing' });
+  const owner = sessionId;
+  const unique = `desktop-interleave-proof-${Date.now()}`;
+  const railButton = 'button[aria-label="刷新会话列表"], button[aria-label="Refresh conversations"]';
+  const itemOf = id => `[...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(' · ' + ${JSON.stringify(id)}))`;
+  const occurrences = () => `[...document.querySelectorAll('.conversation .row')]
+    .filter(row => row.textContent.includes(${JSON.stringify(unique)})).length`;
+  let awaySessionId;
+  try {
+    await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${owner}`)}) === true`, 10_000, 'interleave_owner_not_active');
+    const away = await requestHost('session.create', { projectRoot: workspaceRoot });
+    awaySessionId = away.createdSessionId;
+    if (typeof awaySessionId !== 'string') throw Object.assign(new Error('interleave_away_session_missing'), { code: 'interleave_away_session_missing' });
+    await requestHost('session.close', { sessionId: awaySessionId });
+    await waitFor(`document.querySelector('${railButton}') !== null`, 10_000, 'interleave_rail_refresh_missing');
+    await evaluate(`document.querySelector('${railButton}').click(); true`);
+    await waitFor(`${itemOf(awaySessionId)} !== undefined`, 10_000, 'interleave_away_session_not_listed');
+    await evaluate(`${itemOf(awaySessionId)}.click(); true`);
+    await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${awaySessionId}`)}) === true`, 10_000, 'interleave_away_open_failed');
+
+    // 从另一个会话切回时，Host 已读出的快照帧被压住；压住期间写入的记录只能经实时通知到达界面。
+    sessionReadFrameHeld = false;
+    sessionReadFrameHold = { ms: 1_500, sessionId: owner };
+    sessionReadFrameLog.push(`armed owner=${owner}`);
+    await evaluate(`${itemOf(owner)}.click(); true`);
+    // 用接受回执确认这一条记录已落盘，再检查界面是否在同一次打开里显示它。
+    const accepted = await requestHost('run.submit', { sessionId: owner, input: unique }, 20_000).catch(error => {
+      error.diagnostic = `interleave-submit:${String(error.code ?? error.message)}`;
+      throw error;
+    });
+    const persisted = await host.request('session.read', { sessionId: owner, fullResults: true });
+    const persistedHits = Array.isArray(persisted?.events) ? persisted.events.filter(event => JSON.stringify(event).includes(unique)).length : -1;
+    if (persistedHits !== 1) {
+      throw Object.assign(new Error('interleave_record_not_persisted'), {
+        code: 'interleave_record_not_persisted',
+        diagnostic: JSON.stringify({
+          persistedHits,
+          owner,
+          accepted: accepted.result === undefined ? accepted : accepted.result,
+          tail: Array.isArray(persisted?.events) ? persisted.events.slice(-6).map(event => `${event.kind}:${String(event.text ?? '').slice(0, 40)}`) : persisted,
+        }),
+      });
+    }
+    try {
+      await waitFor(occurrences() + ' === 1', 15_000, 'interleave_live_record_not_rendered');
+    } catch (error) {
+      const state = await evaluate(`(() => ({
+        conversation: document.querySelector('.conversation')?.innerText.slice(-400) ?? null,
+        rows: document.querySelectorAll('.conversation .row').length,
+        events: window.__realModelFrames.filter(frame => frame.notify === 'event').length,
+      }))()`);
+      error.diagnostic = `interleave-dom:${JSON.stringify(state)}`;
+      throw error;
+    }
+    const summary = await waitForSessionIdle(30_000, 'interleave_turn_did_not_finish');
+    assert.equal(summary.turns.at(-1)?.status, 'completed', 'interleave_turn_terminal_status_invalid');
+    // 保证被压住的快照帧已经抵达并应用。
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 2_500));
+    if (!sessionReadFrameHeld) {
+      const view = await evaluate(`(() => ({
+        active: document.querySelector('.session-item.active')?.title ?? null,
+        tail: document.querySelector('.conversation')?.innerText.slice(-200) ?? null,
+      }))()`);
+      throw Object.assign(new Error('interleave_snapshot_frame_was_not_held'), {
+        code: 'interleave_snapshot_frame_was_not_held',
+        diagnostic: JSON.stringify({ log: sessionReadFrameLog.slice(-12), view }),
+      });
+    }
+    const afterSnapshot = await evaluate(occurrences());
+    if (afterSnapshot !== 1) {
+      const detail = await evaluate(`(() => ({
+        active: document.querySelector('.session-item.active')?.title ?? null,
+        rows: [...document.querySelectorAll('.conversation .row')].slice(-8).map(row => row.textContent.slice(0, 90)),
+      }))()`);
+      throw Object.assign(new Error('interleave_stale_snapshot_mismatch'), {
+        code: 'interleave_stale_snapshot_mismatch',
+        diagnostic: JSON.stringify({ afterSnapshot, held: sessionReadFrameLog.slice(-6), detail }),
+      });
+    }
+
+    // 干净重开同一会话：快照重建后的视图必须同样只包含这条记录一次。
+    await evaluate(`${itemOf(awaySessionId)}.click(); true`);
+    await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${awaySessionId}`)}) === true`, 10_000, 'interleave_reopen_away_failed');
+    await evaluate(`${itemOf(owner)}.click(); true`);
+    await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${owner}`)}) === true`, 10_000, 'interleave_reopen_owner_failed');
+    // 视图可能停在旧范围；回到最新后再判断记录是否完整显示。
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 800));
+    if (await evaluate(`document.querySelector('.jump-latest') !== null`)) {
+      await clickWithMouse('.jump-latest', 'interleave_jump_latest_failed');
+    }
+    await waitFor(occurrences() + ' === 1', 15_000, 'interleave_clean_reopen_lost_the_record').catch(async (error) => {
+      const state = await evaluate(`(() => ({
+        active: document.querySelector('.session-item.active')?.title ?? null,
+        rows: document.querySelectorAll('.conversation .row').length,
+        placeholder: document.querySelector('.conversation .placeholder')?.textContent ?? null,
+        tail: document.querySelector('.conversation')?.innerText.slice(-500) ?? null,
+      }))()`);
+      error.diagnostic = `interleave-reopen:${JSON.stringify(state)}`;
+      throw error;
+    });
+    const reopened = await evaluate(occurrences());
+    if (reopened !== 1) {
+      throw Object.assign(new Error('interleave_clean_reopen_mismatch'), {
+        code: 'interleave_clean_reopen_mismatch',
+        diagnostic: JSON.stringify({ reopened }),
+      });
+    }
+    return 'session.read 快照帧被延迟 1.5 s；压住期间写入的记录只出现一次，重新打开后仍只出现一次';
+  } finally {
+    if (typeof awaySessionId === 'string') {
+      await evaluate(`(() => {
+        const item = ${itemOf(owner)};
+        item?.click();
+        return item !== undefined;
+      })()`).catch(() => undefined);
+      await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${owner}`)}) === true`,
+        5_000, 'interleave_owner_restore_failed').catch(() => undefined);
+      await requestHost('session.close', { sessionId: awaySessionId }).catch(() => undefined);
+    }
+  }
+}
+
 async function recordReport(exitCode) {
   const prefsReadRequest = hostRequests.find(request => request.method === 'prefs.read');
   const prefsReadResponse = prefsReadRequest === undefined ? undefined : hostResponses.findLast(response => response.id === prefsReadRequest.id);
@@ -1328,6 +1474,10 @@ async function runChecks() {
     assert.equal(summary.turns.at(-1)?.status, 'cancelled', 'cancelled_turn_terminal_status_invalid');
     return `收到真实 text 增量 ${summary.deltaCount ?? 1} 次后按界面停止；Host 写入 cancelled 终态`;
   });
+
+  if (typeof stubControl === 'string' && stubControl !== '') {
+    await check(`${providerLabel}会话快照与实时记录交错`, verifySessionSnapshotLiveInterleave);
+  }
 
   if (process.env.LIGULE_EXTERNAL_CONTROL_TEST === '1') {
     await check('MCP 外控会话的人类观察、干预与接管', verifyExternalSessionControl);

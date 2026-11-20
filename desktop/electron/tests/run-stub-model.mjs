@@ -438,7 +438,7 @@ try {
   child.stderr.setEncoding('utf8');
   child.stdout.on('data', chunk => { standardOutput += chunk; });
   child.stderr.on('data', chunk => { standardError += chunk; });
-  const timeout = setTimeout(() => child.kill(), 240_000);
+  const timeout = setTimeout(() => child.kill(), Number(process.env.LIGULE_DESKTOP_TEST_WINDOW_TIMEOUT_MS ?? 240_000));
   const exit = await new Promise((resolvePromise, reject) => {
     child.once('error', reject);
     child.once('close', (exitCode, exitSignal) => resolvePromise({ exitCode, exitSignal }));
