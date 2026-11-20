@@ -888,8 +888,18 @@ async function verifyExternalSessionControl() {
       button?.click();
       return button !== undefined;
     })()`);
-    await waitFor(`document.querySelector('.external-control .external-control-state')?.textContent.includes('已停止') === true
-      || document.querySelector('.external-control .external-control-state')?.textContent.includes('Stopped') === true`, 20_000, 'external_control_cancel_not_confirmed');
+    try {
+      await waitFor(`document.querySelector('.external-control .external-control-state')?.textContent.includes('已停止') === true
+        || document.querySelector('.external-control .external-control-state')?.textContent.includes('Stopped') === true`, 20_000, 'external_control_cancel_not_confirmed');
+    } catch (error) {
+      const diagnostic = await evaluate(`(() => ({
+        state: document.querySelector('.external-control .external-control-state')?.textContent ?? null,
+        panel: document.querySelector('.external-control')?.innerText.slice(0, 300) ?? null,
+        buttons: [...document.querySelectorAll('.external-control-head button')].map(button => button.textContent),
+      }))()`);
+      error.diagnostic = `external-control-cancel:${JSON.stringify(diagnostic)}`;
+      throw error;
+    }
     await fetch(`${process.env.LIGULE_STUB_CONTROL}/hang`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hang: false }) });
 
     await evaluate(`(() => {
@@ -1152,6 +1162,11 @@ async function verifySessionSnapshotLiveInterleave() {
       });
     }
     try {
+      // 切回会话时视图可能停在旧范围，虚拟化窗口不包含末尾；先回到最新再判断行数。
+      // jump-latest 只滚动，不重新读取，因此不会掩盖“实时记录丢失”。
+      if (await evaluate(`document.querySelector('.jump-latest') !== null`)) {
+        await clickWithMouse('.jump-latest', 'interleave_jump_latest_failed');
+      }
       await waitFor(occurrences() + ' === 1', 15_000, 'interleave_live_record_not_rendered');
     } catch (error) {
       const state = await evaluate(`(() => ({
