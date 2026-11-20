@@ -96,6 +96,23 @@ try {
   ], fixtureRoot);
   assertStatus(clientPublicImport, 0, 'client_public_core_entry_positive_fixture');
 
+  await writeFixture(fixtureRoot, 'core/src/host/host.ts', 'export const createHost = (): void => {};\n');
+  await writeFixture(fixtureRoot, 'core/src/session/leak.ts', "import { createHost } from '../host/host.js';\nexport const build = createHost;\n");
+  const sessionIntoHost = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'core/src/session/leak.ts',
+  ], fixtureRoot);
+  assertStatus(sessionIntoHost, 1, 'core_internal_host_import_negative_fixture', 'core-entry-owns-host');
+
+  await writeFixture(fixtureRoot, 'core/src/index.ts', "import { createHost } from './host/host.js';\nexport const host = createHost;\n");
+  const entryIntoHost = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'core/src/index.ts',
+  ], fixtureRoot);
+  assertStatus(entryIntoHost, 0, 'core_entry_host_import_positive_fixture');
+
   await writeFixture(fixtureRoot, 'core/src/dev-runtime.ts', "import * as ts from 'typescript';\nexport const version = ts.version;\n");
   const developmentRuntime = dependencyCruiser([
     '--config', config,
@@ -169,7 +186,7 @@ try {
   ], fixtureRoot);
   assertStatus(typeCycle, 0, 'type_only_cycle_positive_fixture');
 
-  process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev, client deep core imports and runtime cycles rejected; Electron host API, the @ligule/core entry, type-only npm-dev imports/references and type-only cycles allowed\n');
+  process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev, client deep core imports, internal host imports and runtime cycles rejected; Electron host API, Core entry -> host, the @ligule/core entry, type-only npm-dev imports/references and type-only cycles allowed\n');
 } finally {
   const currentTempRoot = await realpath(tempRoot);
   const currentFixtureRoot = await realpath(fixtureRoot);

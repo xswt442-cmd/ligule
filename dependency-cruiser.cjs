@@ -63,6 +63,15 @@ module.exports = {
       },
     },
     {
+      name: 'core-entry-owns-host',
+      severity: 'error',
+      from: {
+        path: '^core/src/',
+        pathNot: '^core/src/(index|tui)[.]ts$|^core/src/host/',
+      },
+      to: { path: '^core/src/host/' },
+    },
+    {
       name: 'clients-use-core-entry',
       severity: 'error',
       from: { path: '^(tui/src/|desktop/frontend/src/)' },
