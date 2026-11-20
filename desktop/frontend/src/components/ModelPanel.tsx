@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { CredentialStatus } from '@ligule/core/tui.js';
 import { code, type Client } from '../protocol';
 import { useText } from '../locale';
 import { encodeModelRows, legacyService, mergeModelRows, modelName, modelRows, newModelRow, presetService, type ModelCatalog, type ModelRow, type ModelService, uniqueModelIds } from '../model-catalog';
@@ -9,7 +10,7 @@ import { HoldSheet } from './HoldSheet';
 
 type Editor = { service: ModelService; rows: ModelRow[]; key: string; original: string };
 const editorSignature = (service: ModelService, rows: ModelRow[]) => JSON.stringify({ service, rows: rows.map(({ id, name, contextTokens, outputTokens, imageInput }) => ({ id, name, contextTokens, outputTokens, imageInput })) });
-type Credential = { source: 'environment' | 'keyring' | 'missing'; configured: boolean };
+type Credential = CredentialStatus;
 const PRESETS = {
   deepseek: { name: 'DeepSeek', api: 'chat-completions' as const, baseURL: 'https://api.deepseek.com/v1' },
   openai: { name: 'OpenAI', api: 'chat-completions' as const, baseURL: 'https://api.openai.com/v1' },
@@ -171,7 +172,7 @@ export function ModelPanel({ client, projectRoot, onEdit }: {
     try {
       if (confirm.type === 'key') {
         await client.call('credentials.delete', { reference: confirm.service.apiKeyEnv }, 15_000);
-        setCredential({ source: 'missing', configured: false });
+        setCredential({ source: 'missing', configured: false, reference: confirm.service.apiKeyEnv });
         setNote(t('密钥已删除。', 'API key deleted.'));
       } else {
         const result = await write('model.services', (catalog.services ?? []).filter(item => item.id !== confirm.service.id), catalog);

@@ -34,7 +34,7 @@ export type { PathListing } from './host/paths.js';
 export type { Exported } from './host/export.js';
 export type { BranchResult } from './session/branch.js';
 export type { SearchHit } from './session/search.js';
-export type { ModelSelection, ModelService } from './kernel/model-services.js';
+export type { ModelSelection, ModelService, ModelServiceModelSettings } from './kernel/model-services.js';
 export type { LoopResult } from './kernel/loop.js';
 export type { CredentialStatus } from './kernel/credentials.js';
 export { controlPresets } from './host/control-presets.js';

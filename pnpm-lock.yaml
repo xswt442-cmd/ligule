@@ -379,6 +379,9 @@ importers:
       '@codemirror/view':
         specifier: ^6.43.15
         version: 6.43.15
+      '@ligule/core':
+        specifier: workspace:*
+        version: link:../../core
       dompurify:
         specifier: ^3.4.17
         version: 3.4.17

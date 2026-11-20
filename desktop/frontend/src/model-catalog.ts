@@ -1,6 +1,8 @@
-export type ModelSettings = { id: string; name?: string; contextTokens?: number; outputTokens?: number; imageInput?: boolean };
-export type ModelService = { id: string; name: string; api: 'messages' | 'chat-completions'; baseURL: string; apiKeyEnv: string; models: string[]; modelSettings?: ModelSettings[] };
-export type ModelSelection = { provider: string; model: string };
+// 模型服务与选择的字段由 Host 定义；这里只补充界面使用的编辑行与思考档。
+import type { ModelSelection, ModelService, ModelServiceModelSettings } from '@ligule/core/tui.js';
+
+export type ModelSettings = ModelServiceModelSettings;
+export type { ModelSelection, ModelService };
 // 会话级思考档：Host 只对声明了该能力的模型下发 available；'default' 表示继承模型默认值。
 export type ThinkingView = { available: readonly string[]; defaultEffort: string | null; effective: string; pending: string | null };
 // 规范顺序只用于展示；未知档位排在已记录档位之后，避免新档位被静默丢弃。

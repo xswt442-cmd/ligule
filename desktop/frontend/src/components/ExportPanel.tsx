@@ -1,10 +1,10 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import type { Exported } from '@ligule/core/tui.js';
 import { saveExportPath } from '../bridge';
 import { code, type Client } from '../protocol';
 import { Icon } from './Icon';
 import { useText } from '../locale';
 
-type Exported = { written: string[]; skipped: { id: string; path?: string; code: string }[]; failed: { path: string; code: string }[] };
 type Notice = { text: string; bad: boolean; code?: string };
 
 export function ExportPanel({ client, sessionId }: { client: Client; sessionId: string | null }) {
@@ -53,7 +53,7 @@ export function ExportPanel({ client, sessionId }: { client: Client; sessionId: 
     try {
       const done = await client.call('session.export', { sessionId, path: destination }, 60_000) as Exported;
       if (!isCurrent()) return;
-      setWritten(done.written);
+      setWritten([...done.written]);
       setSkipped(done.skipped);
       setFailed(done.failed);
       setNote({ text: t('导出处理已完成。', 'Export request finished.'), bad: false });

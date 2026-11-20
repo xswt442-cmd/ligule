@@ -212,7 +212,7 @@ const menuPanels: Panel<PanelProps>[] = [
     view: ({ client, sessionId, projectRoot, status, openProjectFile, openProjectGit, openArtifact, openCheck, openDiagnostics, openHit }) => (
       <DeliveryPanel client={client} sessionId={sessionId} projectRoot={projectRoot} status={status}
         onOpenFile={path => openProjectFile(projectRoot, path)}
-        onOpenEvent={(seq, kind) => sessionId !== null && openHit({ sessionId, seq, kind, text: '' }, projectRoot)}
+        onOpenEvent={(seq, kind) => sessionId !== null && openHit({ sessionId, name: '', seq, kind, text: '' }, projectRoot)}
         onOpenArtifact={openArtifact} onOpenCheck={openCheck} onOpenProjectChanges={() => openProjectGit(projectRoot)}
         onOpenDiagnostics={openDiagnostics} />
     ),
@@ -2795,7 +2795,7 @@ export function App({ transport }: { transport: Transport }) {
                       client={client} sessionId={activeCheckResource.sessionId} projectRoot={activeCheckResource.projectRoot ?? projectRoot}
                       runId={activeCheckResource.runId} eventSeq={activeCheckResource.eventSeq}
                       onOpenEvent={(seq, kind) => void openSession(activeCheckResource.sessionId,
-                        { sessionId: activeCheckResource.sessionId, seq, kind, text: '' }, false, activeCheckResource.projectRoot ?? projectRoot)} />
+                        { sessionId: activeCheckResource.sessionId, name: '', seq, kind, text: '' }, false, activeCheckResource.projectRoot ?? projectRoot)} />
                       : activeSubrunResource !== undefined
                         ? activeSubrunResource.sessionId !== sessionId
                           ? <p className="stub" role="status">{t('这个子任务属于另一个会话。', 'This subtask belongs to another Session.')}</p>

@@ -1,25 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
+import type { PolicyMode, PolicyRule } from '@ligule/core/tui.js';
 import { code, type Client } from '../protocol';
 import { WRITABLE_LAYERS } from '../config-layers';
 import { Icon } from './Icon';
 import { Modal, Row } from './ui';
 import { useText } from '../locale';
 
-type Rule = {
-  tool: string;
-  match?: string;
-  decision: 'allow' | 'ask' | 'deny';
-  reason?: string;
-  target?: 'file' | 'workspace';
-  path?: string;
-  argsHash?: string;
-};
-type PolicySelection = 'always' | 'ask' | 'auto' | 'never';
 type Shown = {
-  rules?: Rule[];
+  rules?: PolicyRule[];
   rulesSource?: string;
   ruleSources?: string[];
-  ruleLayers?: Record<string, Rule[]>;
+  ruleLayers?: Record<string, PolicyRule[]>;
   // 配置中的默认策略；未配置时由 Host 返回空值，界面不自行推断。
   policyMode?: string;
   sources?: Record<string, string>;
@@ -46,7 +37,7 @@ const matchKind = (pattern: string, t: (chinese: string, english: string) => str
   ? t('整段命令匹配', 'matches the whole command')
   : t('命令开头匹配', 'matches the start of the command');
 const matchText = (pattern: string, t: (chinese: string, english: string) => string) => `${matchKind(pattern, t)} ${pattern}`;
-const scopeText = (rule: Rule, t: (chinese: string, english: string) => string) => rule.target === 'file'
+const scopeText = (rule: PolicyRule, t: (chinese: string, english: string) => string) => rule.target === 'file'
   ? t(`仅此文件 · ${rule.path ?? ''}`, `This file only · ${rule.path ?? ''}`)
   : rule.target === 'workspace'
     ? t(`此工作区中的此类操作 · ${rule.path ?? ''}`, `This operation type in this workspace · ${rule.path ?? ''}`)
@@ -55,10 +46,10 @@ const scopeText = (rule: Rule, t: (chinese: string, english: string) => string) 
       : rule.match === undefined || rule.match === ''
         ? t('每次调用', 'Every call')
         : matchText(rule.match, t);
-const decisionText = (decision: Rule['decision'], t: (chinese: string, english: string) => string) =>
+const decisionText = (decision: PolicyRule['decision'], t: (chinese: string, english: string) => string) =>
   decision === 'allow' ? t('放行', 'Allow') : decision === 'ask' ? t('询问', 'Ask') : t('不允许', 'Deny');
 
-const blankRule = (): Rule => ({ tool: '', match: '', decision: 'allow', reason: '' });
+const blankRule = (): PolicyRule => ({ tool: '', match: '', decision: 'allow', reason: '' });
 
 export function PolicyRules({ client, projectRoot, onEdit }: {
   client: Client;
@@ -71,7 +62,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
   const [note, setNote] = useState<Notice | null>(null);
   const [layer, setLayer] = useState('user');
   const [saving, setSaving] = useState(false);
-  const [editing, setEditing] = useState<{ index: number; rule: Rule } | null>(null);
+  const [editing, setEditing] = useState<{ index: number; rule: PolicyRule } | null>(null);
   const [confirmNever, setConfirmNever] = useState(false);
   const held = saving
     ? t('“审批规则”正在保存；尚未收到结果。', 'Approval rules are saving; the result has not arrived yet.')
@@ -123,7 +114,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
     if (fresh !== null) setNote({ text: `${saved} ${describe(fresh.rules?.length ?? 0)}`, bad: false });
   };
 
-  const setMode = async (mode: PolicySelection) => {
+  const setMode = async (mode: PolicyMode) => {
     setSaving(true);
     try {
       await client.call('config.set', { field: 'policy.mode', value: mode, layer, version: versionOf(), ...target }, 30_000);
@@ -137,7 +128,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
 
   const saveRule = async () => {
     if (editing === null || editing.rule.tool === '') return;
-    const rule: Rule = {
+    const rule: PolicyRule = {
       tool: editing.rule.tool,
       ...(editing.rule.match === '' ? {} : { match: editing.rule.match }),
       decision: editing.rule.decision,
@@ -255,7 +246,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
             <input disabled={editing.rule.target !== undefined || editing.rule.argsHash !== undefined} value={editing.rule.match} onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, match: event.target.value } })} />
           </Row>
           <Row label={t('判定', 'Decision')}>
-            <select value={editing.rule.decision} onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, decision: event.target.value as Rule['decision'] } })}>
+            <select value={editing.rule.decision} onChange={(event) => setEditing({ ...editing, rule: { ...editing.rule, decision: event.target.value as PolicyRule['decision'] } })}>
               <option value="allow">{t('放行', 'Allow')}</option>
               <option value="ask">{t('询问', 'Ask')}</option>
               <option value="deny">{t('不允许', 'Deny')}</option>
