@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, readdirSync } from 'node:fs';
 import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -54,6 +54,45 @@ async function writeFixture(root, path, source) {
   const target = join(root, path);
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, source, 'utf8');
+}
+
+// dependency-cruiser 无法解析 workspace 的 `@ligule/core/tui.js`（exports + 符号链接），
+// 这条边会以 unknown/couldNotResolve 出现，npm-dev 规则看不到它。这里直接扫描源码，
+// 保证 renderer 对 Core 的导入只能是 type-only；相对路径指到 core/src 或 core/dist 同样拒绝。
+function scanRendererCoreRuntimeImports(root) {
+  const sourceRoot = join(root, 'desktop', 'frontend', 'src');
+  if (!existsSync(sourceRoot)) return [];
+  const files = [];
+  const walk = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (/\.tsx?$/.test(entry.name)) files.push(path);
+    }
+  };
+  walk(sourceRoot);
+  const isCoreSpecifier = (path, specifier) => {
+    if (!specifier.startsWith('.')) return /^@ligule\/core(?:\/|$)/.test(specifier);
+    const target = resolve(dirname(path), specifier);
+    const normalized = target.split(sep).join('/');
+    return /\/core\/(?:src|dist)(?:\/|$)/.test(normalized);
+  };
+  const violations = [];
+  for (const path of files) {
+    const text = readFileSync(path, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    for (const match of text.matchAll(/\b(?:import|export)\b([^;'"]*?)from\s+['"]([^'"]+)['"]/g)) {
+      const clause = match[1];
+      const specifier = match[2];
+      const typeOnly = /^\s*type\b/.test(clause) || /\{\s*type\b/.test(clause);
+      if (!typeOnly && isCoreSpecifier(path, specifier)) violations.push(`${path}: ${specifier}`);
+    }
+    for (const match of text.matchAll(/\b(?:import|require)\s*\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+      if (isCoreSpecifier(path, match[1])) violations.push(`${path}: ${match[1]} (dynamic)`);
+    }
+  }
+  return violations;
 }
 
 await mkdir(tempRoot, { recursive: true });
@@ -193,25 +232,20 @@ try {
   ], fixtureRoot);
   assertStatus(rendererDevelopmentRuntime, 1, 'desktop_renderer_dev_dependency_negative_fixture', 'desktop-renderer-no-runtime-dev-dependencies');
 
-  // Renderer 只允许从 Core 取类型；运行时导入必须被门禁拒绝。
-  await writeFixture(fixtureRoot, 'desktop/frontend/package.json', '{"name":"fixture-frontend","devDependencies":{"@ligule/core":"workspace:*","vite":"8.3.2"}}\n');
-  await writeFixture(fixtureRoot, 'node_modules/@ligule/core/package.json', '{"name":"@ligule/core","version":"0.0.0","type":"module","exports":{"./tui.js":"./dist/tui.js"}}\n');
-  await writeFixture(fixtureRoot, 'node_modules/@ligule/core/dist/tui.js', 'export const createHost = () => {};\n');
+  // Renderer 只允许从 Core 取类型。dependency-cruiser 解析不了 workspace 的 Core 入口，
+  // 因此这里用同一份源码扫描验证：运行时导入（含相对 core/src、core/dist）必须被判违规。
   await writeFixture(fixtureRoot, 'desktop/frontend/src/core-runtime.ts', "import { createHost } from '@ligule/core/tui.js';\nexport const host = createHost;\n");
-  const rendererCoreRuntime = dependencyCruiser([
-    '--config', config,
-    '--output-type', 'err',
-    'desktop/frontend/src',
-  ], fixtureRoot);
-  assertStatus(rendererCoreRuntime, 1, 'desktop_renderer_core_runtime_negative_fixture', 'desktop-renderer-no-runtime-dev-dependencies');
-
-  await writeFixture(fixtureRoot, 'desktop/frontend/src/core-type-only.ts', "import type { SessionSummary } from '@ligule/core/tui.js';\nexport type Summary = SessionSummary;\n");
-  const rendererCoreTypeOnly = dependencyCruiser([
-    '--config', config,
-    '--output-type', 'err',
-    'desktop/frontend/src/core-type-only.ts',
-  ], fixtureRoot);
-  assertStatus(rendererCoreTypeOnly, 0, 'desktop_renderer_core_type_only_positive_fixture');
+  await writeFixture(fixtureRoot, 'desktop/frontend/src/core-deep.ts', "export { createHost } from '../../../core/src/host/host.js';\n");
+  const fixtureRuntime = scanRendererCoreRuntimeImports(fixtureRoot);
+  if (fixtureRuntime.length !== 2) {
+    throw new Error(`renderer_core_runtime_fixture: expected 2 violations, got ${JSON.stringify(fixtureRuntime)}`);
+  }
+  await writeFixture(fixtureRoot, 'desktop/frontend/src/core-runtime.ts', "import type { SessionSummary } from '@ligule/core/tui.js';\nexport type Summary = SessionSummary;\n");
+  await writeFixture(fixtureRoot, 'desktop/frontend/src/core-deep.ts', "import type { Host } from '../../../core/src/host/host.js';\nexport type H = Host;\n");
+  const fixtureTypeOnly = scanRendererCoreRuntimeImports(fixtureRoot);
+  if (fixtureTypeOnly.length !== 0) {
+    throw new Error(`renderer_core_type_only_fixture: expected 0 violations, got ${JSON.stringify(fixtureTypeOnly)}`);
+  }
 
   await writeFixture(fixtureRoot, 'runtime-cycle/left.ts', "import './right.js';\nexport const left = true;\n");
   await writeFixture(fixtureRoot, 'runtime-cycle/right.ts', "import './left.js';\nexport const right = true;\n");
@@ -231,13 +265,18 @@ try {
   ], fixtureRoot);
   assertStatus(typeCycle, 0, 'type_only_cycle_positive_fixture');
 
-  process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev (including renderer runtime imports of @ligule/core), client deep core imports, internal host imports, domain imports of an assembly entry, wire imports of product assembly and runtime cycles rejected; Electron host API, Core entry -> host, the @ligule/core entry, renderer type-only imports of @ligule/core, type-only npm-dev imports/references and type-only cycles allowed\n');
+  process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev, renderer runtime Core imports (including relative core/src), client deep core imports, internal host imports, domain imports of an assembly entry, wire imports of product assembly and runtime cycles rejected; Electron host API, Core entry -> host, the @ligule/core entry, renderer type-only imports of @ligule/core, type-only npm-dev imports/references and type-only cycles allowed\n');
 } finally {
   const currentTempRoot = await realpath(tempRoot);
   const currentFixtureRoot = await realpath(fixtureRoot);
   if (currentTempRoot !== canonicalTempRoot) throw new Error('dependency_fixture_temp_root_changed');
   assertInsideTemp(currentFixtureRoot, currentTempRoot);
   await rm(currentFixtureRoot, { recursive: true, force: true });
+}
+
+const repositoryCoreRuntimeImports = scanRendererCoreRuntimeImports(repositoryRoot);
+if (repositoryCoreRuntimeImports.length > 0) {
+  throw new Error(`renderer_runtime_core_import: ${repositoryCoreRuntimeImports.join('; ')}`);
 }
 
 const normal = dependencyCruiser([
