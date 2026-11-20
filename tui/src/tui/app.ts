@@ -29,6 +29,7 @@ import { activeRunBudgetSegment, buildStatusLine, contextSegment } from './statu
 import { controlPresets, textOf as chooseText, VIEW_REQUEST_METHOD, type Locale } from '@ligule/core/tui.js';
 import type { TerminalAction } from './keymap.js';
 import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type ControlWizardValues } from './control-wizard.js';
+import { createSessionNavigation, type SessionNavigation, type SessionNavigationLease } from './session-navigation.js';
 import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionHeader, SessionSummary, UsageBucket, UsageSummary } from '@ligule/core/tui.js';
 import type { AgentPresetPage, AgentPresetPreview } from '@ligule/core/tui.js';
 import type { PresetCommand, SubrunCommand, TemplateCommand } from './commands.js';
@@ -172,11 +173,6 @@ interface DetailState {
 
 interface SessionPickerState {
   readonly items: readonly SessionSummary[];
-}
-
-interface SessionNavigationLease {
-  readonly token: number;
-  readonly owner: string;
 }
 
 interface SearchState {
@@ -770,8 +766,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [sessionId]);
   useEffect(() => { setSessionName(''); }, [sessionId]);
   const pickerRequest = useRef(0);
-  const sessionNavigation = useRef({ generation: 0, activeToken: 0 });
-  const sessionNavigationMounted = useRef(false);
+  const sessionNavigation = useRef<SessionNavigation | undefined>(undefined);
+  const navigationOf = () => sessionNavigation.current ??= createSessionNavigation({
+    alive: () => alive.current,
+    activeSession: () => activeSession.current,
+  });
   const [ordinaryDraft, setOrdinaryDraft] = useState('');
   const [ordinaryCaret, setOrdinaryCaret] = useState(0);
   const [answerDraft, setAnswerDraft] = useState('');
@@ -848,7 +847,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const alive = useRef(true);
   useEffect(() => () => {
     alive.current = false;
-    sessionNavigation.current.generation += 1;
+    navigationOf().invalidate();
   }, []);
   const push = useCallback((...added: TranscriptItem[]) => {
     if (!alive.current) return;
@@ -957,8 +956,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [sessionPicker, setSessionPicker] = useState<SessionPickerState | null>(null);
   useEffect(() => {
     pickerRequest.current += 1;
-    if (sessionNavigationMounted.current) sessionNavigation.current.generation += 1;
-    else sessionNavigationMounted.current = true;
+    navigationOf().entered();
     if (ask !== null || query !== null) setSessionPicker(null);
   }, [ask, query, sessionId]);
   const [approvalExpanded, setApprovalExpanded] = useState(false);
@@ -1039,7 +1037,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const asked = params;
         if (asked.sessionId !== sessionId || !Array.isArray(asked.questions) || asked.questions.length === 0 || !asked.questions.every(isAskQuestion)) return;
         pickerRequest.current += 1;
-        sessionNavigation.current.generation += 1;
+        navigationOf().invalidate();
         setPanel(null);
         setDetail(null);
         setSessionPicker(null);
@@ -1054,7 +1052,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       if (message.method !== 'approval.request' || params.sessionId !== sessionId || typeof params.tool !== 'string') return;
       pickerRequest.current += 1;
-      sessionNavigation.current.generation += 1;
+      navigationOf().invalidate();
       setPanel(null);
       const args = isRecord(params.args) ? params.args : {};
       setApprovalExpanded(false);
@@ -1660,33 +1658,25 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [client, controlSnapshot, controlTarget, controlWizard, info.boundary, modes, push, sessionId, t]);
 
   const beginSessionNavigation = useCallback((owner: string): SessionNavigationLease | undefined => {
-    const navigation = sessionNavigation.current;
-    if (navigation.activeToken !== 0) {
+    const lease = navigationOf().begin(owner);
+    if (lease === undefined) {
       push({ kind: 'meta', text: t('会话切换正在进行，请稍后重试。', 'A session switch is in progress; try again shortly.') });
       return undefined;
     }
     sessionIdentityGeneration.current += 1;
-    const token = ++navigation.generation;
-    navigation.activeToken = token;
-    return { token, owner };
+    return lease;
   }, [push, t]);
 
-  const sessionNavigationIsCurrent = useCallback((lease: SessionNavigationLease): boolean => {
-    const navigation = sessionNavigation.current;
-    return alive.current
-      && navigation.activeToken === lease.token
-      && navigation.generation === lease.token
-      && activeSession.current === lease.owner;
-  }, []);
+  const sessionNavigationIsCurrent = useCallback((lease: SessionNavigationLease): boolean =>
+    navigationOf().isCurrent(lease), []);
 
   const finishSessionNavigation = useCallback((lease: SessionNavigationLease): void => {
-    if (sessionNavigation.current.activeToken !== lease.token) return;
-    sessionNavigation.current.activeToken = 0;
+    if (!navigationOf().finish(lease)) return;
     setMcpTrustOutcomeRevision((revision) => revision + 1);
   }, []);
 
   useEffect(() => {
-    if (sessionId === null || sessionNavigation.current.activeToken !== 0) return;
+    if (sessionId === null || navigationOf().activeToken !== 0) return;
     const outcomes = mcpTrustOutcomeRows.current.get(sessionId);
     if (outcomes === undefined) return;
     mcpTrustOutcomeRows.current.delete(sessionId);
@@ -3700,7 +3690,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     const answering = query !== null && !text.trim().startsWith('/');
     // New input supersedes an unfinished grant-wizard setup before the wizard itself appears.
     if (controlWizardRef.current === null && text.trim() !== '') controlWizardGeneration.current += 1;
-    if (sessionNavigation.current.activeToken !== 0 && !answering && !(route.kind === 'command' && route.name === 'quit')) {
+    if (navigationOf().activeToken !== 0 && !answering && !(route.kind === 'command' && route.name === 'quit')) {
       push({ kind: 'meta', text: t('会话切换完成前不会提交输入，草稿已保留。', 'Input is held until the session switch completes; the draft is preserved.') });
       return;
     }
