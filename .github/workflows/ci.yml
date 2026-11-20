@@ -82,7 +82,8 @@ jobs:
   test:
     name: shared tests on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # Windows 上完整套件已接近 15 分钟（成功的一次 14m17s）；超时是安全网，不应成为抖动来源。
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
