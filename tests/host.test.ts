@@ -24,6 +24,7 @@ import { historyPathOf, rememberHistory } from '../core/dist/kernel/input-histor
 import { prefsPathOf, savePrefs } from '../core/dist/kernel/desktop-prefs.js';
 import { listProjectFiles } from '../core/dist/host/paths.js';
 import { listenFetchable } from './helpers/port.ts';
+import { readJsonBody } from './helpers/request-body.ts';
 import { testHostProvider } from '../core/tests/helpers/provider.ts';
 
 // 协议回复没有生成类型；测试按自己读取的字段声明所需形状，再用窄转换标注。
@@ -125,9 +126,12 @@ const TEXT_TURN = [
 async function withEndpoint<T>(run: (baseUrl: string, requests: ChatBody[]) => Promise<T>): Promise<T> {
   const requests: ChatBody[] = [];
   const server = createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const body = await readJsonBody<ChatBody>(request);
+    if (body === undefined) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end('{"error":"incomplete_request"}');
+      return;
+    }
     requests.push(body);
     const events = JSON.stringify(body.messages).includes('tool_result') ? TEXT_TURN : TOOL_TURN;
     response.writeHead(200, { 'content-type': 'text/event-stream' });

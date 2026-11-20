@@ -18,6 +18,7 @@ import { modeDirectories } from '../core/dist/kernel/modes.js';
 import { createPermissionContext } from '../core/dist/kernel/permission.js';
 import { createDelegationGrant, listDelegationGrants } from '../core/dist/host/agent-control.js';
 import { listenFetchable } from './helpers/port.ts';
+import { readJsonBody } from './helpers/request-body.ts';
 import { connectMcp } from './helpers/mcp-control.mjs';
 import { requestAgentControl } from '../core/dist/host/agent-control-runtime.js';
 import type { AgentControlRequest } from '../core/dist/host/agent-control-runtime.js';
@@ -862,9 +863,12 @@ test('operator tools configure real sessions, answer Host interactions, and run 
   const draftGate = gate();
   let callId = 0;
   const endpoint = createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const body = await readJsonBody<ProviderBody>(request);
+    if (body === undefined) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end('{"error":"incomplete_request"}');
+      return;
+    }
     requests.push(body);
     const last = body.messages.at(-1);
     const userText = body.messages.filter((message: { role: string }) => message.role === 'user').at(-1)?.content ?? '';

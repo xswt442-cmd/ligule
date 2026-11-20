@@ -10,6 +10,7 @@ import { createConnection } from '../core/dist/host/connection.js';
 import { sessionDirectory } from '../core/dist/session/list.js';
 import { listenFetchable } from './helpers/port.ts';
 import { ready } from './helpers/readiness.ts';
+import { readJsonBody } from './helpers/request-body.ts';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 
@@ -71,9 +72,13 @@ test('Host applies budgets at turn boundaries, retains explicit model selection,
   let gate: Promise<void> | undefined;
   let release: (() => void) | undefined;
   const server = createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+    const body = await readJsonBody<RecordedRequest>(request);
+    if (body === undefined) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end('{"error":"incomplete_request"}');
+      return;
+    }
+    requests.push(body);
     if (gate !== undefined) await gate;
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end('data: {"choices":[{"delta":{"content":"budget verified"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
@@ -149,9 +154,13 @@ test('Host sends each selected service model budget and rejects an invalid servi
   let gate: Promise<void> | undefined;
   let release: (() => void) | undefined;
   const server = createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+    const body = await readJsonBody<RecordedRequest>(request);
+    if (body === undefined) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end('{"error":"incomplete_request"}');
+      return;
+    }
+    requests.push(body);
     if (gate !== undefined) await gate;
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end('data: {"choices":[{"delta":{"content":"budget verified"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
@@ -247,10 +256,13 @@ test('a model context added after session creation reaches the existing loop and
   const recordDirectory = sessionDirectoryAt(home, project);
   const requests: RecordedRequest[] = [];
   const server = createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks).toString());
-    const summary = body.messages.some((message: unknown) => JSON.stringify(message).includes('Write a summary of the transcript excerpt'));
+    const body = await readJsonBody<RecordedRequest & { messages?: unknown[] }>(request);
+    if (body === undefined) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end('{"error":"incomplete_request"}');
+      return;
+    }
+    const summary = (body.messages ?? []).some((message: unknown) => JSON.stringify(message).includes('Write a summary of the transcript excerpt'));
     requests.push({ body, summary });
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: summary ? 'short checkpoint summary' : 'budget verified' }, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`);
@@ -310,9 +322,13 @@ test('Host validates project-local budgets before saving and preserves a shadowe
   await Promise.all([mkdir(join(project, '.ligule'), { recursive: true }), mkdir(home)]);
   const requests: RecordedRequest[] = [];
   const server = createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+    const body = await readJsonBody<RecordedRequest>(request);
+    if (body === undefined) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end('{"error":"incomplete_request"}');
+      return;
+    }
+    requests.push(body);
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end('data: {"choices":[{"delta":{"content":"restart verified"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
   });
@@ -362,9 +378,13 @@ test('a user budget write validates every loaded project before changing shared 
   await Promise.all([mkdir(project), mkdir(join(other, '.ligule'), { recursive: true }), mkdir(home)]);
   const requests: RecordedRequest[] = [];
   const server = createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+    const body = await readJsonBody<RecordedRequest>(request);
+    if (body === undefined) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end('{"error":"incomplete_request"}');
+      return;
+    }
+    requests.push(body);
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end('data: {"choices":[{"delta":{"content":"shared config survived"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
   });
@@ -406,9 +426,13 @@ test('a project model override cannot hide an invalid shared default from a futu
   await Promise.all([mkdir(join(project, '.ligule'), { recursive: true }), mkdir(future), mkdir(home)]);
   const requests: RecordedRequest[] = [];
   const server = createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+    const body = await readJsonBody<RecordedRequest>(request);
+    if (body === undefined) {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end('{"error":"incomplete_request"}');
+      return;
+    }
+    requests.push(body);
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end('data: {"choices":[{"delta":{"content":"future project works"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
   });
