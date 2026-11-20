@@ -3664,12 +3664,32 @@ export function createHost({
       };
       // 目标 Run 的可见性只在这里判定：接受记录里的作用域、调用方可见范围与 Grant 作用域。
       // 处理器只拿得到已经通过判定的会话事件，不再各自复制同一段判定。
-      const requireRunReference = async (state: HostSessionState, runId: string) => {
+      const runReferenceOf = async (state: HostSessionState, runId: string) => {
         const events = await state.session.read();
-        const scope = runAcceptanceScope(events, state.id, runId);
-        if (scope === undefined || (runScopes !== undefined && !runScopes.includes(scope))) throw new KernelError('run_not_found');
+        return { events, scope: runAcceptanceScope(events, state.id, runId) };
+      };
+      const assertVisibleRunScope = (scope: string | undefined) => {
+        if (scope !== undefined && runScopes !== undefined && !runScopes.includes(scope)) throw new KernelError('run_not_found');
+      };
+      const requireRunReference = async (state: HostSessionState, runId: string) => {
+        const { events, scope } = await runReferenceOf(state, runId);
+        if (scope === undefined) throw new KernelError('run_not_found');
+        assertVisibleRunScope(scope);
         if (grant !== undefined) assertGrantSessionScope(grant, state);
         return { events, scope };
+      };
+      // 人工 Operation 的有限命令以 operationId 作为运行引用：只允许该操作会话查询自己那条已批准的命令。
+      const requireExecutionReference = async (state: HostSessionState, runId: string): Promise<void> => {
+        const { events, scope } = await runReferenceOf(state, runId);
+        if (scope === undefined) {
+          const operation = events.find((event) => event.kind === 'operationStarted' && event.operationId === runId);
+          if (operation === undefined || state.operationOnly !== true || state.operationId !== runId) {
+            throw new KernelError('run_not_found');
+          }
+          requireTrustedUi('operation-run', controlTrust);
+        }
+        assertVisibleRunScope(scope);
+        if (grant !== undefined) assertGrantSessionScope(grant, state);
       };
       const requireSubrunParent = async (state: HostSessionState, parentRunId: string): Promise<void> => {
         await requireRunReference(state, parentRunId);
@@ -4897,18 +4917,7 @@ export function createHost({
           const state = open(sessionId);
           const runId = requiredString(message.params.runId, 'runId');
           const executionId = requiredString(message.params.executionId, 'executionId');
-          const events = await state.session.read();
-          const scope = runAcceptanceScope(events, sessionId, runId);
-          if (scope === undefined) {
-            const operation = events.find((event) => event.kind === 'operationStarted' && event.operationId === runId);
-            if (operation === undefined || state.operationOnly !== true || state.operationId !== runId) {
-              throw new KernelError('run_not_found');
-            }
-            requireTrustedUi('operation-run', controlTrust);
-          } else if (runScopes !== undefined && !runScopes.includes(scope)) {
-            throw new KernelError('run_not_found');
-          }
-          if (grant !== undefined) assertGrantSessionScope(grant, state);
+          await requireExecutionReference(state, runId);
           const owner = { projectIdentity: workspaceIdentity(state.environment.projectRoot), sessionId, runId };
           if (message.method === 'execution.status') return finiteCommands.status(owner, executionId);
           if (message.method === 'execution.wait') {
