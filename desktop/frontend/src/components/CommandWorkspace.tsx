@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { code, type Client } from '../protocol';
 import { useText } from '../locale';
 import type { Status } from '../status';
-import { createViewScope } from '../view-scope';
+import { createViewScope, type ViewToken } from '../view-scope';
 import { commandReferenceKey, MAX_WORKBENCH_COMMANDS, type WorkbenchCommandReference } from '../workbench';
 
 type OutputEvent = { readonly id: string; readonly stream: string; readonly text: string };
@@ -107,17 +107,25 @@ export function CommandWorkspace({
   viewsRef.current = views;
   const referencesRef = useRef(references);
   referencesRef.current = references;
-  const refreshing = useRef(new Set<string>());
-  const refreshAgain = useRef(new Set<string>());
+  const refreshing = useRef(new Map<string, ViewToken>());
+  const refreshAgain = useRef(new Map<string, ViewToken>());
   const refreshReferenceRef = useRef<(reference: WorkbenchCommandReference) => Promise<void>>(async () => {});
   const openedAt = useRef(new Map<string, number>());
-  const actionBusy = useRef(new Set<string>());
+  const actionBusy = useRef(new Map<string, ViewToken>());
+  const startingToken = useRef<ViewToken | null>(null);
   const logElement = useRef<HTMLDivElement | null>(null);
   const [copyStatus, setCopyStatus] = useState<'copied' | 'error' | null>(null);
   // 面板、会话、项目或 Host 重启后，仍在途的 `status.get` / `execution.*` 结果不再属于当前视图。
   const viewScope = useRef(createViewScope());
   const previousReferenceKeys = useRef<readonly string[]>([]);
-  useEffect(() => { viewScope.current.bump(); }, [client, hostRevision, open, projectRoot, sessionId]);
+  useEffect(() => {
+    viewScope.current.bump();
+    // 旧代次的启动提交不能把 busy 状态留给新视图。
+    if (startingToken.current !== null && !viewScope.current.isCurrent(startingToken.current)) {
+      startingToken.current = null;
+      setStarting(false);
+    }
+  }, [client, hostRevision, open, projectRoot, sessionId]);
 
   const visibleReferences = useMemo(() => references.filter(reference =>
     reference.sourceSessionId === sessionId || reference.operationSessionId === sessionId), [references, sessionId]);
@@ -142,11 +150,11 @@ export function CommandWorkspace({
     const token = viewScope.current.capture(key);
     const isLive = () => viewScope.current.isCurrent(token);
     if (refreshing.current.has(key)) {
-      refreshAgain.current.add(key);
+      refreshAgain.current.set(key, token);
       return;
     }
     if (!referencesRef.current.some(item => commandReferenceKey(item) === key)) return;
-    refreshing.current.add(key);
+    refreshing.current.set(key, token);
     try {
       if (openedAt.current.get(reference.operationSessionId) !== hostRevision) {
         await client.call('session.open', { sessionId: reference.operationSessionId, projectRoot }, 15_000);
@@ -203,8 +211,15 @@ export function CommandWorkspace({
           errorCode: code(error) }));
       }
     } finally {
-      refreshing.current.delete(key);
-      if (refreshAgain.current.delete(key) && isLive()) void refreshReferenceRef.current(reference);
+      // 只有登记这次请求的 owner 才能释放标记；旧的 finally 不能删掉新代次的等待者。
+      if (refreshing.current.get(key) === token) {
+        refreshing.current.delete(key);
+        const queued = refreshAgain.current.get(key);
+        if (queued !== undefined) {
+          refreshAgain.current.delete(key);
+          if (viewScope.current.isCurrent(queued)) void refreshReferenceRef.current(reference);
+        }
+      }
     }
   }, [client, hostRevision, projectRoot, updateView]);
   refreshReferenceRef.current = refreshReference;
@@ -249,6 +264,7 @@ export function CommandWorkspace({
     if (!canStart || sessionId === null || command.trim() === '') return;
     const token = viewScope.current.capture();
     const isLive = () => viewScope.current.isCurrent(token);
+    startingToken.current = token;
     setStarting(true);
     setStartingError(null);
     const sourceSessionId = sessionId;
@@ -269,24 +285,32 @@ export function CommandWorkspace({
         executionId: result.executionId,
       };
       const key = commandReferenceKey(reference);
-      if (!isLive()) return;
-      updateView(key, previous => ({ ...previous, state: typeof result.state === 'string' ? result.state : 'starting',
-        ...(typeof result.errorCode === 'string' ? { errorCode: result.errorCode } : {}) }));
+      // 命令已经在 Host 上真实启动，引用是既成事实，不随视图代次丢弃。
+      // 代次只限制临时界面状态（视图缓存、选中、错误提示）。
       onAdd(reference);
-      void refreshReference(reference);
+      if (isLive()) {
+        updateView(key, previous => ({ ...previous, state: typeof result.state === 'string' ? result.state : 'starting',
+          ...(typeof result.errorCode === 'string' ? { errorCode: result.errorCode } : {}) }));
+        void refreshReference(reference);
+      }
     } catch (error) {
       if (isLive()) setStartingError(code(error));
     } finally {
-      if (isLive()) setStarting(false);
+      if (startingToken.current === token) {
+        startingToken.current = null;
+        setStarting(false);
+      }
     }
   }, [canStart, client, command, cwd, onAdd, refreshReference, sessionId, updateView]);
 
   const waitForCommand = useCallback(async (reference: WorkbenchCommandReference) => {
     const key = commandReferenceKey(reference);
-    if (actionBusy.current.has(key)) return;
     const token = viewScope.current.capture(key);
+    // 旧代次的在途动作不再阻塞新视图。
+    const previous = actionBusy.current.get(key);
+    if (previous !== undefined && viewScope.current.isCurrent(previous)) return;
     const isLive = () => viewScope.current.isCurrent(token);
-    actionBusy.current.add(key);
+    actionBusy.current.set(key, token);
     updateView(key, previous => ({ ...previous, waitTimedOut: false, errorCode: undefined }));
     try {
       const result = await client.call('execution.wait', {
@@ -299,16 +323,17 @@ export function CommandWorkspace({
     } catch (error) {
       if (isLive()) updateView(key, previous => ({ ...previous, errorCode: code(error) }));
     } finally {
-      actionBusy.current.delete(key);
+      if (actionBusy.current.get(key) === token) actionBusy.current.delete(key);
     }
   }, [client, refreshReference, updateView]);
 
   const cancelCommand = useCallback(async (reference: WorkbenchCommandReference) => {
     const key = commandReferenceKey(reference);
-    if (actionBusy.current.has(key)) return;
     const token = viewScope.current.capture(key);
+    const previous = actionBusy.current.get(key);
+    if (previous !== undefined && viewScope.current.isCurrent(previous)) return;
     const isLive = () => viewScope.current.isCurrent(token);
-    actionBusy.current.add(key);
+    actionBusy.current.set(key, token);
     updateView(key, previous => ({ ...previous, errorCode: undefined }));
     try {
       await client.call('execution.cancel', {
@@ -319,7 +344,7 @@ export function CommandWorkspace({
     } catch (error) {
       if (isLive()) updateView(key, previous => ({ ...previous, errorCode: code(error) }));
     } finally {
-      actionBusy.current.delete(key);
+      if (actionBusy.current.get(key) === token) actionBusy.current.delete(key);
     }
   }, [client, refreshReference, updateView]);
 
