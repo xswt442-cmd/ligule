@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createKernel, createPermissionContext, KernelError, loadAssembly, minimalPlugin } from '../dist/index.js';
 import type { Kernel, ToolDefinition } from '../dist/kernel/kernel.js';
 import type { Plugin } from '../dist/kernel/assembly.js';
+import { hasCode } from './helpers/assertions.ts';
 
 const manifestPermission = createPermissionContext('workspace-write', 'policy', {
   filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
@@ -29,10 +30,6 @@ function plugin(name: string, registered: readonly string[], disposed: string[])
       };
     },
   };
-}
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
 }
 
 test('an empty manifest leaves the kernel with nothing and the assembly list empty', () => {

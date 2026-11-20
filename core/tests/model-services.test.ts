@@ -5,14 +5,11 @@ import { join } from 'node:path';
 import { parse } from 'smol-toml';
 import { modelServices, resolveModel } from '../dist/kernel/model-services.js';
 import { configVersion, writeConfigField } from '../dist/kernel/config-edit.js';
+import { hasCode } from './helpers/assertions.ts';
 
 // 解析结果是嵌套表；测试只按表结构读它，收窄集中在这里。
 type TomlTable = { readonly [key: string]: TomlTable };
 const readToml = (text: string): TomlTable => parse(text) as unknown as TomlTable;
-
-function hasCode(error: unknown, code: string): boolean {
-  return error instanceof Error && (error as { code?: string }).code === code;
-}
 
 const service = { id: 'deepseek', name: 'DeepSeek 🌿', api: 'chat-completions', baseURL: 'https://example.test/v1', apiKeyEnv: 'LIGULE_SERVICE_KEY', models: ['deepseek-reasoner', 'org/model-v2'] };
 

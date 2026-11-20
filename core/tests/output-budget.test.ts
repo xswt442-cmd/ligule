@@ -5,12 +5,9 @@ import { createConfig } from '../dist/kernel/config.js';
 import { editableField, encodeValue } from '../dist/kernel/config-edit.js';
 import { createServer } from 'node:http';
 import { listenFetchable } from './helpers/port.ts';
+import { hasCode } from './helpers/assertions.ts';
 
 const official = { api: 'chat-completions', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-flash' };
-
-function hasCode(error: unknown, code: string): boolean {
-  return error instanceof Error && (error as { code?: string }).code === code;
-}
 
 test('explicit output budget is effective for a verified model while the default stays 8192', () => {
   assert.equal(providerFromConfig({ model: official }).outputTokens, 8192);

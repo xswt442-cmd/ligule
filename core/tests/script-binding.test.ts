@@ -13,6 +13,7 @@ import type { PermissionContext } from '../dist/kernel/permission.js';
 import type { LoggerBackend } from '../dist/kernel/log.js';
 import type { PolicyAsk, PolicyMode, PolicyQuestion } from '../dist/kernel/policy.js';
 import { setTrusted } from '../dist/kernel/workspace-trust.js';
+import { hasCode } from './helpers/assertions.ts';
 
 const permission = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
@@ -26,10 +27,6 @@ test('Node and package-manager commands select the pinned sandbox runtime', asyn
   assert.equal(await requiresTrustedWorkspaceCommand('corepack pnpm run dev', shell), true);
   assert.equal(await commandUsesNodeRuntime('git status --short', shell), false);
 });
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
-}
 
 function kernelFor(
   root: string,

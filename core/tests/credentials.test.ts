@@ -4,13 +4,10 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { hasCode } from './helpers/assertions.ts';
 import {
   credentialStatus, deleteCredential, resolveCredential, storeCredential,
 } from '../dist/kernel/credentials.js';
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
-}
 
 const temporaryRoot = fileURLToPath(new URL('../testplace/tmp/', import.meta.url));
 

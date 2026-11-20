@@ -15,6 +15,7 @@ import type { SessionEvent } from '../dist/session/format.js';
 import { prefixDigest } from '../dist/session/checkpoint.js';
 import { branchSession } from '../dist/session/branch.js';
 import { assertAllAnswered } from '../dist/model/http.js';
+import { hasCode } from './helpers/assertions.ts';
 await mkdir(join(process.cwd(), 'testplace', 'tmp'), { recursive: true });
 
 type RepairFields = {
@@ -36,10 +37,6 @@ type SessionReadEvent = {
 };
 
 type DirectoryConfig = { boundary: string; workspaceRoot?: string; userHome?: string };
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
-}
 
 const READ_ONLY = new Set(['read']);
 const dispatched = (seq: number, id: string, name: string, args: Record<string, unknown>) => ({ seq, kind: 'assistant', text: '', toolCalls: [{ id, name, args }] });

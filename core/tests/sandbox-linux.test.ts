@@ -11,6 +11,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildLinuxSandbox } from '../dist/capability/sandbox-linux.js';
 import type { LinuxSandboxRequest, LinuxSandboxResult } from '../dist/capability/sandbox-linux.js';
+import { hasCode } from './helpers/assertions.ts';
 
 type SandboxFixture = { root: string; workspace: string; privateTempDir: string };
 type AvailableSandbox = Extract<LinuxSandboxResult, { available: true }>;
@@ -67,10 +68,6 @@ function run(result: LinuxSandboxResult) {
   });
   assert.equal(child.error, undefined, child.error?.message);
   return child;
-}
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
 }
 
 test('the actual WSL bubblewrap command limits writable paths and clears inherited credentials', { skip: !linux }, async (t) => {

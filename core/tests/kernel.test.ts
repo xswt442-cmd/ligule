@@ -9,6 +9,7 @@ import {
 import type { ToolDefinition } from '../dist/kernel/kernel.js';
 import type { Logger } from '../dist/kernel/log.js';
 import type { ProviderDiagnostic } from '../dist/kernel/error.js';
+import { hasCode } from './helpers/assertions.ts';
 
 const toolFailurePermission = createPermissionContext('workspace-write', 'policy', {
   filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
@@ -24,10 +25,6 @@ type PackageManifest = {
   scripts: Record<string, string>;
   dependencies: Record<string, string>;
 };
-
-function hasCode(error: unknown, code: string): boolean {
-  return error instanceof Error && (error as { code?: string }).code === code;
-}
 
 function hasDetail(error: unknown, text: string): boolean {
   return error instanceof Error && ((error as { detail?: string }).detail ?? '').includes(text);

@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { hasCode } from './helpers/assertions.ts';
 import {
   createCompactTool,
   createCompaction,
@@ -13,10 +14,6 @@ import {
   createSessionLog,
   loadCheckpointFile,
 } from '../dist/index.js';
-
-function hasCode(error: unknown, code: string): error is { code: string; detail: string } {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
-}
 
 const limits = { contextTokens: 100_000, compactThresholdRatio: 0.8, compactRetainRatio: 0.16, resultBytes: 16_000 };
 const fakeProvider = {

@@ -9,14 +9,11 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { createSessionLog, listSessions } from '../dist/index.js';
 import { SESSION_LOCK_STALE_MS, sessionWriterActive } from '../dist/session/lock.js';
+import { hasCode } from './helpers/assertions.ts';
 
 type WriterProcess = ChildProcessWithoutNullStreams & { exited: Promise<unknown> };
 
 const writerPath = fileURLToPath(new URL('./fixtures/session-writer.mjs', import.meta.url));
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
-}
 
 async function withSessionDirectory(run: (directory: string) => void | Promise<void>): Promise<void> {
   const testplace = resolve('testplace');

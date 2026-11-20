@@ -2,10 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveShell, withNativeExitCode } from '../dist/index.js';
 import type { ShellSelection } from '../dist/capability/shell.js';
-
-function hasCode(error: unknown, code: string): error is { code: string; detail: string } {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
-}
+import { hasCode } from './helpers/assertions.ts';
 
 // 探测这一步用一条注入的查找代替真文件系统：这一具 Host 该挑哪一份解释器是逻辑，机器上真有什么是环境。
 const windowsEnvironment = { ProgramFiles: 'C:\\Program Files', PATH: 'C:\\Windows\\System32' };

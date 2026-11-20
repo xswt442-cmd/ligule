@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile, rename, mkdir, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { withTuiHost } from './helpers/tui-host.ts';
+import { hasCode } from './helpers/assertions.ts';
 
 type ToolEventView = { kind?: string; result: { spillFormat?: string; content: string } };
 
@@ -12,10 +13,6 @@ type CompleteReadView = {
 };
 
 type RecordLineView = { kind?: string; result: { spilled: string } };
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
-}
 
 test('complete results are read through the Host without changing the record or model projection', async () => {
   await withTuiHost(async ({ client, config, sessionId, sessionDirectory }) => {

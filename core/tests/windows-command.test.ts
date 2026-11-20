@@ -10,10 +10,7 @@ import test from 'node:test';
 import { spawnWindowsCommand } from '../dist/capability/windows-command.js';
 import type { OwnedWindowsCommand } from '../dist/capability/windows-command.js';
 import { resolveShell, withNativeExitCode } from '../dist/capability/shell.js';
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
-}
+import { hasCode } from './helpers/assertions.ts';
 
 const descendant = fileURLToPath(new URL('./fixtures/exec-descendant.mjs', import.meta.url));
 const hostFixture = fileURLToPath(new URL('./fixtures/owned-command-host.mjs', import.meta.url));

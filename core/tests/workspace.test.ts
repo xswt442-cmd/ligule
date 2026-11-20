@@ -17,10 +17,7 @@ import type { SessionEvent } from '../dist/session/format.js';
 import { parseRegistry, readRegistry, registerWorkspace, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../dist/kernel/workspace.js';
 import type { WorkspaceRegistry } from '../dist/kernel/workspace.js';
 import { testHostProvider } from './helpers/provider.ts';
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
-}
+import { hasCode } from './helpers/assertions.ts';
 
 /** 临时根里真建一个目录：身份读的是磁盘上那一份，夹具就得是真的。 */
 async function withWorkspace(run: (directory: string, root: string) => Promise<void>) {

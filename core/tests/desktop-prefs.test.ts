@@ -7,6 +7,7 @@ import { writeFileSync } from 'node:fs';
 import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DESKTOP_PREFS_LIMIT_BYTES, loadPrefs, parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../dist/kernel/desktop-prefs.js';
+import { hasCode } from './helpers/assertions.ts';
 
 const tempRoot = join(process.cwd(), 'testplace', 'tmp');
 
@@ -21,10 +22,6 @@ type FileHolder = {
 };
 type SaveFailure = { code?: string; cause?: { code?: string; syscall?: string } };
 type SaveOutcome = { value?: { saved?: unknown; error?: { code?: string } } };
-
-function hasCode(error: unknown, code: string): boolean {
-  return error instanceof Error && (error as { code?: string }).code === code;
-}
 
 async function makeDirectory() {
   const path = join(tempRoot, `desktop-prefs-${randomUUID()}`);

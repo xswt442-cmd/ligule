@@ -10,16 +10,13 @@ import type { KernelOptions } from '../dist/kernel/kernel.js';
 import { projectModelView } from '../dist/session/session.js';
 import type { SessionLog } from '../dist/session/session.js';
 import type { SessionEvent } from '../dist/session/format.js';
+import { hasCode } from './helpers/assertions.ts';
 
 type ToolEvent = {
   kind?: string;
   tool?: string;
   result: { kind?: string; code?: string; reason?: string; content: string; spilled?: string };
 };
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
-}
 
 const fullAccess = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',

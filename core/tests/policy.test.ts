@@ -8,10 +8,7 @@ import { createPermissionContext } from '../dist/kernel/permission.js';
 import { classifyDangerousCommand } from '../dist/capability/dangerous-command.js';
 import type { ShellKind, ShellSelection } from '../dist/capability/shell.js';
 import type { NetworkTarget } from '../dist/capability/network.js';
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
-}
+import { hasCode } from './helpers/assertions.ts';
 
 // 判定结果还包含能力名称、审批档位和所用的决策路径。本文件关注规则顺序与结论。
 async function judged(chain: DecisionChain, call: PolicyCall) {

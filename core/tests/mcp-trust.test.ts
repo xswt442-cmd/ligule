@@ -9,6 +9,7 @@ import { createHost } from '../dist/host/host.js';
 import { createConfig } from '../dist/kernel/config.js';
 import { MESSAGES_CAPABILITIES } from '../dist/index.js';
 import { testHostProvider } from './helpers/provider.ts';
+import { hasCode } from './helpers/assertions.ts';
 
 type McpTrustView = {
   version: string;
@@ -38,10 +39,6 @@ async function waitForFile(path: string) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`mcp_fixture_marker_missing: ${path}`);
-}
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
 }
 
 test('user trust applies across projects, project denial masks it, and a changed server identity is untrusted', async () => {

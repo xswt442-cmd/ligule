@@ -18,12 +18,9 @@ import { workspaceDataDirectory, splitUncIdentity } from '../dist/session/list.j
 import type { SessionDirectoryConfig, SessionSummary } from '../dist/session/list.js';
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '../dist/session/format.js';
 import { testHostProvider } from './helpers/provider.ts';
+import { hasCode } from './helpers/assertions.ts';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
-
-function hasCode(error: unknown, code: string): error is { code: string; detail: string } {
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
-}
 
 // 摘要由 `loadMode` 算出来，这里只取一份真实值用于比对。
 async function digestOf(name: string) {

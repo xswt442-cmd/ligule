@@ -4,6 +4,7 @@ import { link, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/
 import { join } from 'node:path';
 import { isWithin, resolveWithin, KernelError } from '../dist/index.js';
 import { relativePathWithin } from '../dist/capability/paths.js';
+import { hasCode } from './helpers/assertions.ts';
 
 // 夹具建在 testplace/ 下：那个目录既不进版本控制也不进包。
 // 边界取 workspace，outside 是边界之外的那一半，用来构造两类越界。
@@ -24,10 +25,6 @@ async function withFixture(run: (paths: { workspace: string; outside: string }) 
 
 // Windows 上目录用 junction，POSIX 上用符号链接目录；两者都会被 realpath 解开。
 const linkType = process.platform === 'win32' ? 'junction' : 'dir';
-
-function hasCode(error: unknown, code: string): boolean {
-  return error instanceof Error && (error as { code?: string }).code === code;
-}
 
 test('a path inside the boundary resolves to its real path', async () => {
   await withFixture(async ({ workspace }) => {
