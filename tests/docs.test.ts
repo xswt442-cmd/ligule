@@ -2,6 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, posix, resolve, sep } from 'node:path';
 import { parse } from '../core/node_modules/smol-toml/dist/index.js';
@@ -9,6 +10,7 @@ import { DEFAULT_LIMITS } from '../core/dist/capability/limits.js';
 import { loadInstructions } from '../core/dist/index.js';
 import { modelServices, resolveModel } from '../core/dist/kernel/model-services.js';
 import { releaseNotesForTag } from '../scripts/release-notes.js';
+import { stagePublishedDocs } from '../scripts/pack-release.js';
 
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
 const zhPath = join(repoRoot, 'docs', 'guide.zh-CN.md');
@@ -28,8 +30,6 @@ const maintainedDocs = [
   ...bilingualPairs.flatMap((pair) => pair),
   join(repoRoot, 'tui', 'CHANGELOG.md'),
   join(repoRoot, 'docs', 'development', 'RELEASE.md'),
-  join(repoRoot, 'tui', 'docs', 'guide.zh-CN.md'),
-  join(repoRoot, 'tui', 'docs', 'guide.en.md'),
 ];
 // 根指南描述全局规则，局部指南描述各模块和 Desktop 子目录的约定。
 const guides = [
@@ -91,7 +91,8 @@ function codeTokens(text: string) {
 }
 
 function tomlExample(text: string) {
-  const match = text.match(/```toml\n([\s\S]*?)\n```/);
+  // 文档在工作树里可能被编辑器写成 CRLF；这里只比较示例内容，不把行尾当成格式。
+  const match = text.match(/```toml\r?\n([\s\S]*?)\r?\n```/);
   assert.ok(match, 'guide must contain a TOML example');
   return parse(match[1]);
 }
@@ -131,9 +132,24 @@ test('所有中英文配对文档包含相同的代码标识符', () => {
   }
 });
 
-test('the npm package guide copies match the maintained user guides', () => {
-  for (const name of ['guide.en.md', 'guide.zh-CN.md']) {
-    assert.equal(readFileSync(join(repoRoot, 'tui', 'docs', name), 'utf8'), readFileSync(join(repoRoot, 'docs', name), 'utf8'), name);
+test('the user guides exist once in the repository and the release package receives that copy', async () => {
+  assert.deepEqual(
+    readdirSync(join(repoRoot, 'tui', 'docs')).filter((name) => name.endsWith('.md')),
+    [],
+    'the published guide copy must not be maintained a second time',
+  );
+  const staged = await mkdtemp(join(repoRoot, 'testplace', 'tmp', 'published-docs-'));
+  try {
+    await stagePublishedDocs(staged);
+    for (const name of ['guide.en.md', 'guide.zh-CN.md']) {
+      assert.equal(
+        await readFile(join(staged, 'docs', name), 'utf8'),
+        readFileSync(join(repoRoot, 'docs', name), 'utf8'),
+        `${name} in the release package must be the maintained guide`,
+      );
+    }
+  } finally {
+    await rm(staged, { recursive: true, force: true });
   }
 });
 

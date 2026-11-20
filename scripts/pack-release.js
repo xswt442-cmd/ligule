@@ -11,6 +11,19 @@ import { assertSymlinksInside } from './runtime-tree.js';
 const root = fileURLToPath(new URL('..', import.meta.url));
 export const BUNDLED_SPREADSHEET = 'xlsx';
 
+// 用户手册只维护一份，发布时复制到包目录；tui/docs 里不再保存第二份正文。
+export const PUBLISHED_DOCUMENTS = ['guide.en.md', 'guide.zh-CN.md'];
+
+export async function stagePublishedDocs(packageDirectory) {
+  const target = join(packageDirectory, 'docs');
+  await mkdir(target, { recursive: true });
+  for (const name of PUBLISHED_DOCUMENTS) {
+    const source = join(root, 'docs', name);
+    if (!existsSync(source)) throw new Error(`the maintained user guide ${name} is missing`);
+    await cp(source, join(target, name), { dereference: true, errorOnExist: false, force: true });
+  }
+}
+
 function spreadsheetPayload() {
   const fromCore = createRequire(join(root, 'core', 'package.json'));
   const path = join(dirname(fromCore.resolve(BUNDLED_SPREADSHEET)), 'package.json');
@@ -117,6 +130,7 @@ export async function packRelease(destination) {
   const stagedPackage = join(temporaryRoot, 'package');
   try {
     deployTui(stagedPackage);
+    await stagePublishedDocs(stagedPackage);
     await assertSymlinksInside(stagedPackage);
     await assertCoreRuntimeMatches(join(root, 'core'), join(stagedPackage, 'node_modules', '@ligule', 'core'));
     // The public manifest installs external dependencies for the consumer's platform.
@@ -140,6 +154,9 @@ export async function packRelease(destination) {
     const sourceInfo = packInfo(dryRun, 'deployed dry run');
     const included = new Set(sourceInfo.files.map(({ path }) => path));
     if (!included.has('package.json')) throw new Error('deployed package is missing package.json');
+    for (const name of PUBLISHED_DOCUMENTS) {
+      if (!included.has(`docs/${name}`)) throw new Error(`the published package is missing docs/${name}`);
+    }
     if (sourceInfo.files.some(({ path }) => path.startsWith(`node_modules/${BUNDLED_SPREADSHEET}/`)
       && /\.(?:node|dll|exe|so|dylib)$/iu.test(path))) throw new Error('the bundled spreadsheet parser must not contain platform-native binaries');
     await mkdir(destinationDirectory, { recursive: true });

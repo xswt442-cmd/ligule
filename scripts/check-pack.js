@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { BUNDLED_SPREADSHEET, releaseManifest } from './pack-release.js';
+import { BUNDLED_SPREADSHEET, PUBLISHED_DOCUMENTS, releaseManifest } from './pack-release.js';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const args = process.argv.slice(2);
@@ -99,6 +99,13 @@ try {
     || !existsSync(join(spreadsheet, 'xlsx.js')) || !existsSync(join(spreadsheet, 'LICENSE'))
     || Object.keys({ ...spreadsheetManifest.dependencies, ...spreadsheetManifest.optionalDependencies }).length !== 0) {
     throw new Error(`${tarball} must contain the dependency-free spreadsheet parser and its license`);
+  }
+  for (const name of PUBLISHED_DOCUMENTS) {
+    const guide = join(shipped, 'docs', name);
+    if (!existsSync(guide)) throw new Error(`${tarball} is missing the user guide docs/${name}`);
+    if (!readFileSync(guide).equals(readFileSync(join(repo, 'docs', name)))) {
+      throw new Error(`${tarball} carries a copy of docs/${name} that differs from the maintained guide`);
+    }
   }
   for (const testPath of ['test', 'tests', 'core/test', 'core/tests', 'tui/test', 'tui/tests']) {
     if (existsSync(join(shipped, testPath))) throw new Error(`${tarball} must not contain test files: ${testPath}`);
