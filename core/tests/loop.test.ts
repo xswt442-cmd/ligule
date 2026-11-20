@@ -151,7 +151,16 @@ test('a cleanup failure keeps every failure reason without borrowing provider di
   const root = await loopFailureDirectory();
   const session = createSessionLog({ directory: root, id: 'subrun-cleanup-detail' });
   try {
-    const provider = { async *stream() { throw new KernelError('provider_http_error'); } };
+    const provider = {
+      async *stream() {
+        throw new KernelError('provider_http_error', {
+          diagnostics: {
+            category: 'server', status: 503, attempts: 3,
+            responseReceived: true, streamReceived: false, recoverable: true,
+          },
+        });
+      },
+    };
     let steeringClosed = 0;
     await assert.rejects(createLoop({ kernel: kernelWith([]), provider, session }).run('fail in cleanup', {
       steering: steeringInbox(async () => {
