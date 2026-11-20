@@ -20,10 +20,10 @@ function deferred<T>(): Deferred<T> {
 }
 
 function delayedChildScript(path: string): string {
-  const child = `const{writeFileSync}=require('node:fs');setTimeout(()=>writeFileSync(${JSON.stringify(path)},'late'),1500);`;
+  const child = "const{writeFileSync}=require('node:fs');setTimeout(()=>writeFileSync(process.argv[1],'late'),1500);";
   return [
     "import { spawn } from 'node:child_process';",
-    `spawn(process.execPath, ['-e', ${JSON.stringify(child)}], { stdio: 'ignore', windowsHide: true });`,
+    `spawn(process.execPath, ['-e', ${JSON.stringify(child)}, ${JSON.stringify(path)}], { stdio: 'ignore', windowsHide: true });`,
     'setTimeout(() => {}, 5_000);',
   ].join('\n');
 }

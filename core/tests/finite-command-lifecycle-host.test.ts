@@ -44,7 +44,7 @@ test('the command deadline terminates a real finite process tree and stays disti
     completionPath = join(projectDirectory, 'must-not-finish.txt');
     await writeFile(scriptPath, [
       "import { spawn } from 'node:child_process';",
-      `spawn(process.execPath, ['-e', ${JSON.stringify(`const{writeFileSync}=require('node:fs');setTimeout(()=>writeFileSync(${JSON.stringify(completionPath)},'late'),5000);`)}], { stdio: 'ignore', windowsHide: true });`,
+      `spawn(process.execPath, ['-e', ${JSON.stringify("const{writeFileSync}=require('node:fs');setTimeout(()=>writeFileSync(process.argv[1],'late'),5000);")}, ${JSON.stringify(completionPath)}], { stdio: 'ignore', windowsHide: true });`,
       'setTimeout(() => {}, 5_000);',
     ].join('\n'));
     await client.request('workspace.trust', { projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true });
@@ -107,7 +107,7 @@ test('Run completion waits for its active finite command before persisting compl
     completionPath = join(projectDirectory, 'completion-candidate-finished.txt');
     await writeFile(commandPath, [
       "import { writeFileSync } from 'node:fs';",
-      `setTimeout(() => writeFileSync(${JSON.stringify(completionPath)}, 'finished'), 750);`,
+      "setTimeout(() => writeFileSync(new URL('./completion-candidate-finished.txt', import.meta.url), 'finished'), 750);",
       'setTimeout(() => process.exit(0), 1_000);',
     ].join('\n'));
     await client.request('workspace.trust', { projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true });
@@ -160,7 +160,7 @@ test('background command work keeps TaskBudget active while a real user question
       completionPath = join(projectDirectory, 'budget-command-finished.txt');
       await writeFile(commandPath, [
         "import { spawn } from 'node:child_process';",
-        `spawn(process.execPath, ['-e', ${JSON.stringify(`const{writeFileSync}=require('node:fs');setTimeout(()=>writeFileSync(${JSON.stringify(completionPath)},'late'),5000);`)}], { stdio: 'ignore', windowsHide: true });`,
+        `spawn(process.execPath, ['-e', ${JSON.stringify("const{writeFileSync}=require('node:fs');setTimeout(()=>writeFileSync(process.argv[1],'late'),5000);")}, ${JSON.stringify(completionPath)}], { stdio: 'ignore', windowsHide: true });`,
         'setTimeout(() => {}, 5_000);',
       ].join('\n'));
       await client.request('workspace.trust', { projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true });

@@ -13,11 +13,11 @@ import { withTuiHost, waitFor } from './helpers/tui-host.ts';
 const hostFixture = fileURLToPath(new URL('./fixtures/finite-command-host-process.mjs', import.meta.url));
 
 function commandScript(markerPath: string): string {
-  const startPath = `${markerPath}.started`;
-  const child = `const{writeFileSync}=require('node:fs');writeFileSync(${JSON.stringify(startPath)},JSON.stringify({pid:process.pid,parentId:process.ppid,startedAt:Date.now()}));setTimeout(()=>writeFileSync(${JSON.stringify(markerPath)},'late'),5_000);`;
+  // 路径通过 argv 传入，-e 的代码体保持常量；避免把生成的临时路径拼进可执行代码。
+  const child = "const{writeFileSync}=require('node:fs');const m=process.argv[1];writeFileSync(m+'.started',JSON.stringify({pid:process.pid,parentId:process.ppid,startedAt:Date.now()}));setTimeout(()=>writeFileSync(m,'late'),5_000);";
   return [
     "import { spawn } from 'node:child_process';",
-    `spawn(process.execPath, ['-e', ${JSON.stringify(child)}], { stdio: 'ignore', windowsHide: true });`,
+    `spawn(process.execPath, ['-e', ${JSON.stringify(child)}, ${JSON.stringify(markerPath)}], { stdio: 'ignore', windowsHide: true });`,
     'setTimeout(() => {}, 10_000);',
   ].join('\n');
 }

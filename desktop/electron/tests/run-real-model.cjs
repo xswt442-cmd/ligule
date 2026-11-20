@@ -1386,6 +1386,8 @@ async function verifyLateStatusFrameOwnership() {
 
     // 回到 owner，确认标签恢复；再切到只读会话，让 owner 处于非活动状态，避免心跳占用帧门。
     await evaluate(`${ownerItem()}.click(); true`);
+    // 这里与会话 id 的 UUID 拼进页面表达式，是 harness 既有的 evaluate 约定；值来自 Host 的 session id，不是外部输入。
+    // codeql[js/bad-code-sanitization]
     await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${owner}`)}) === true`, 10_000, 'status_hold_owner_restore_failed');
     await waitFor(`(() => { const label = document.querySelector('button.permission-trigger')?.textContent ?? ''; return label === ${JSON.stringify(ownerLabel)}; })()`, 10_000, 'status_hold_owner_label_restore_failed');
     await evaluate(`${itemOf(otherSessionId)}.click(); true`);
