@@ -193,6 +193,26 @@ try {
   ], fixtureRoot);
   assertStatus(rendererDevelopmentRuntime, 1, 'desktop_renderer_dev_dependency_negative_fixture', 'desktop-renderer-no-runtime-dev-dependencies');
 
+  // Renderer 只允许从 Core 取类型；运行时导入必须被门禁拒绝。
+  await writeFixture(fixtureRoot, 'desktop/frontend/package.json', '{"name":"fixture-frontend","devDependencies":{"@ligule/core":"workspace:*","vite":"8.3.2"}}\n');
+  await writeFixture(fixtureRoot, 'node_modules/@ligule/core/package.json', '{"name":"@ligule/core","version":"0.0.0","type":"module","exports":{"./tui.js":"./dist/tui.js"}}\n');
+  await writeFixture(fixtureRoot, 'node_modules/@ligule/core/dist/tui.js', 'export const createHost = () => {};\n');
+  await writeFixture(fixtureRoot, 'desktop/frontend/src/core-runtime.ts', "import { createHost } from '@ligule/core/tui.js';\nexport const host = createHost;\n");
+  const rendererCoreRuntime = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'desktop/frontend/src',
+  ], fixtureRoot);
+  assertStatus(rendererCoreRuntime, 1, 'desktop_renderer_core_runtime_negative_fixture', 'desktop-renderer-no-runtime-dev-dependencies');
+
+  await writeFixture(fixtureRoot, 'desktop/frontend/src/core-type-only.ts', "import type { SessionSummary } from '@ligule/core/tui.js';\nexport type Summary = SessionSummary;\n");
+  const rendererCoreTypeOnly = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'desktop/frontend/src/core-type-only.ts',
+  ], fixtureRoot);
+  assertStatus(rendererCoreTypeOnly, 0, 'desktop_renderer_core_type_only_positive_fixture');
+
   await writeFixture(fixtureRoot, 'runtime-cycle/left.ts', "import './right.js';\nexport const left = true;\n");
   await writeFixture(fixtureRoot, 'runtime-cycle/right.ts', "import './left.js';\nexport const right = true;\n");
   const runtimeCycle = dependencyCruiser([
@@ -211,7 +231,7 @@ try {
   ], fixtureRoot);
   assertStatus(typeCycle, 0, 'type_only_cycle_positive_fixture');
 
-  process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev, client deep core imports, internal host imports, domain imports of an assembly entry, wire imports of product assembly and runtime cycles rejected; Electron host API, Core entry -> host, the @ligule/core entry, type-only npm-dev imports/references and type-only cycles allowed\n');
+  process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev (including renderer runtime imports of @ligule/core), client deep core imports, internal host imports, domain imports of an assembly entry, wire imports of product assembly and runtime cycles rejected; Electron host API, Core entry -> host, the @ligule/core entry, renderer type-only imports of @ligule/core, type-only npm-dev imports/references and type-only cycles allowed\n');
 } finally {
   const currentTempRoot = await realpath(tempRoot);
   const currentFixtureRoot = await realpath(fixtureRoot);
