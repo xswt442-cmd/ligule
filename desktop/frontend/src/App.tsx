@@ -40,7 +40,7 @@ import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { appendProjectedRecords, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import { taskSummaryLabelOf, taskSummaryOf, type Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, saveWorkbenchSettings, updateSettings, type Settings } from './settings';
-import { addWorkbenchCommand, closeWorkbenchCommand, closeWorkbenchTab, openWorkbenchResource, selectWorkbenchCommand,
+import { addWorkbenchCommand, closeWorkbenchCommand, closeWorkbenchTab, openWorkbenchResource, registerWorkbenchCommand, selectWorkbenchCommand,
   selectWorkbenchTab, updateWorkbenchFileDraft, workbenchStateFrom,
   type WorkbenchCommandReference, type WorkbenchFileDraft, type WorkbenchResource } from './workbench';
 import { LocaleProvider, localeOf } from './locale';
@@ -716,9 +716,12 @@ export function App({ transport }: { transport: Transport }) {
   const closeWorkbench = useCallback((key: string) => {
     leaveDock(() => applyWorkbenchState(closeWorkbenchTab(workbenchRef.current, key)));
   }, [applyWorkbenchState, leaveDock]);
-  const addCommandReference = useCallback((reference: WorkbenchCommandReference) => {
+  const addCommandReference = useCallback((reference: WorkbenchCommandReference, activate: boolean) => {
     try {
-      applyWorkbenchState(addWorkbenchCommand(workbenchRef.current, reference));
+      // 迟到的成功回执只登记引用这一事实，不打开工作台、不改变当前选中项。
+      applyWorkbenchState(activate
+        ? addWorkbenchCommand(workbenchRef.current, reference)
+        : registerWorkbenchCommand(workbenchRef.current, reference));
       setWorkbenchError(null);
     } catch (error) { setWorkbenchError(code(error)); }
   }, [applyWorkbenchState]);

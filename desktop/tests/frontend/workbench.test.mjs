@@ -7,6 +7,7 @@ import {
   closeWorkbenchTab,
   closeWorkbenchCommand,
   openWorkbenchResource,
+  registerWorkbenchCommand,
   selectWorkbenchTab,
   selectWorkbenchCommand,
   updateWorkbenchFileDraft,
@@ -203,6 +204,30 @@ test('command reference cap rejects another start reference without deleting exi
     operationId: 'operation-id-overflow', executionId: 'execution-overflow',
   }), { code: 'workbench_command_limit' });
   assert.equal(state.commandTabs.length, MAX_WORKBENCH_COMMANDS);
+});
+
+test('a late command receipt is registered without opening or selecting the workbench', () => {
+  const first = { sourceSessionId: 'source-a', operationSessionId: 'operation-a', operationId: 'operation-id-a', executionId: 'execution-a' };
+  const second = { sourceSessionId: 'source-a', operationSessionId: 'operation-b', operationId: 'operation-id-b', executionId: 'execution-b' };
+  const selected = addWorkbenchCommand(DEFAULT_WORKBENCH_STATE, first);
+  const registered = registerWorkbenchCommand(selected, second);
+  assert.deepEqual(registered.commandTabs, [first, second]);
+  assert.equal(registered.bottomOpen, selected.bottomOpen, 'late registration must not open the workbench');
+  assert.equal(registered.activeCommandKey, selected.activeCommandKey, 'late registration must not change the selection');
+  assert.deepEqual(registerWorkbenchCommand(registered, second), registered, 'registering the same reference is a no-op');
+  assert.throws(() => {
+    let full = DEFAULT_WORKBENCH_STATE;
+    for (let index = 0; index < MAX_WORKBENCH_COMMANDS; index += 1) {
+      full = registerWorkbenchCommand(full, {
+        sourceSessionId: 'source-a', operationSessionId: `operation-${index}`,
+        operationId: `operation-id-${index}`, executionId: `execution-${index}`,
+      });
+    }
+    registerWorkbenchCommand(full, {
+      sourceSessionId: 'source-a', operationSessionId: 'operation-overflow',
+      operationId: 'operation-id-overflow', executionId: 'execution-overflow',
+    });
+  }, { code: 'workbench_command_limit' });
 });
 
 test('saving workbench state merges into the latest Host preferences and keeps conversation drafts', async () => {

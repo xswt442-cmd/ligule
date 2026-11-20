@@ -92,7 +92,7 @@ export function CommandWorkspace({
   readonly hostRevision: number;
   readonly references: readonly WorkbenchCommandReference[];
   readonly activeKey: string | null;
-  readonly onAdd: (reference: WorkbenchCommandReference) => void;
+  readonly onAdd: (reference: WorkbenchCommandReference, activate: boolean) => void;
   readonly onSelect: (key: string) => void;
   readonly onClose: (key: string) => void;
   readonly onOpenSession: (sessionId: string, projectRoot?: string) => void;
@@ -286,9 +286,10 @@ export function CommandWorkspace({
       };
       const key = commandReferenceKey(reference);
       // 命令已经在 Host 上真实启动，引用是既成事实，不随视图代次丢弃。
-      // 代次只限制临时界面状态（视图缓存、选中、错误提示）。
-      onAdd(reference);
-      if (isLive()) {
+      // 代次只决定是否立刻激活/写入临时视图状态。
+      const live = isLive();
+      onAdd(reference, live);
+      if (live) {
         updateView(key, previous => ({ ...previous, state: typeof result.state === 'string' ? result.state : 'starting',
           ...(typeof result.errorCode === 'string' ? { errorCode: result.errorCode } : {}) }));
         void refreshReference(reference);

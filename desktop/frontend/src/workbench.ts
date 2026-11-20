@@ -340,6 +340,20 @@ export function addWorkbenchCommand(state: WorkbenchState, input: WorkbenchComma
   return { ...current, bottomOpen: true, commandTabs: [...current.commandTabs, reference], activeCommandKey: key };
 }
 
+// 命令已在 Host 启动但视图代次已失效时使用：只登记引用这一事实，
+// 不打开工作台，也不改变当前会话的选中项。
+export function registerWorkbenchCommand(state: WorkbenchState, input: WorkbenchCommandReference): WorkbenchState {
+  const current = checkedState(state);
+  const reference = commandReferenceFrom(input);
+  if (reference === undefined) throw Object.assign(new Error('workbench_command_reference_invalid'), { code: 'workbench_command_reference_invalid' });
+  const key = commandReferenceKey(reference);
+  if (current.commandTabs.some(candidate => commandReferenceKey(candidate) === key)) return current;
+  if (current.commandTabs.length >= MAX_WORKBENCH_COMMANDS) {
+    throw Object.assign(new Error('workbench_command_limit'), { code: 'workbench_command_limit' });
+  }
+  return { ...current, commandTabs: [...current.commandTabs, reference] };
+}
+
 export function selectWorkbenchCommand(state: WorkbenchState, key: string): WorkbenchState {
   const current = checkedState(state);
   return current.commandTabs.some(reference => commandReferenceKey(reference) === key)

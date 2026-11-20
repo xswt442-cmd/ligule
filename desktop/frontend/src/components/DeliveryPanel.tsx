@@ -118,7 +118,7 @@ export function DeliveryPanel({ client, sessionId, projectRoot, status, hostRevi
   const t = useText();
   const sessionGeneration = useRef(0);
   const resultGeneration = useRef(0);
-  const checkLogsBusy = useRef(new Set<string>());
+  const checkLogsBusy = useRef(new Map<string, number>());
   const [refresh, setRefresh] = useState(0);
   const [receipts, setReceipts] = useState<RunReceipt[]>([]);
   const [receiptsError, setReceiptsError] = useState<string | null>(null);
@@ -248,9 +248,9 @@ export function DeliveryPanel({ client, sessionId, projectRoot, status, hostRevi
     if (sessionId === null || typeof check.executionId !== 'string') return;
     const generation = sessionGeneration.current;
     const key = JSON.stringify([runId, check.executionId]);
-    // 同一日志游标只允许一个在途读取，避免同一页被追加两次或用旧游标覆盖新游标。
-    if (checkLogsBusy.current.has(key)) return;
-    checkLogsBusy.current.add(key);
+    // 同一日志只允许一个在途读取；旧代次的在途读取不阻塞新代次。
+    if (checkLogsBusy.current.get(key) === generation) return;
+    checkLogsBusy.current.set(key, generation);
     try {
       const page = await client.call('execution.logs', {
         sessionId, runId, executionId: check.executionId,
@@ -272,7 +272,7 @@ export function DeliveryPanel({ client, sessionId, projectRoot, status, hostRevi
       setCheckLogs(current => ({ ...current, [key]: { ...(current[key] ?? { events: [], hasMore: false, gap: false }),
         error: code(error) } }));
     } finally {
-      checkLogsBusy.current.delete(key);
+      if (checkLogsBusy.current.get(key) === generation) checkLogsBusy.current.delete(key);
     }
   }, [checkLogs, client, sessionId]);
 
