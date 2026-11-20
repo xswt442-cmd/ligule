@@ -77,6 +77,25 @@ try {
   ], fixtureRoot);
   assertStatus(reverseDependency, 1, 'core_to_tui_negative_fixture', 'core-no-client-imports');
 
+  await writeFixture(fixtureRoot, 'core/src/session/session.ts', 'export const createSessionLog = (): void => {};\n');
+  await writeFixture(fixtureRoot, 'tui/src/deep.ts', "import { createSessionLog } from '../../core/src/session/session.js';\nexport const read = createSessionLog;\n");
+  const clientDeepImport = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'tui/src/deep.ts',
+  ], fixtureRoot);
+  assertStatus(clientDeepImport, 1, 'client_deep_core_import_negative_fixture', 'clients-use-core-entry');
+
+  await writeFixture(fixtureRoot, 'node_modules/@ligule/core/package.json', '{"name":"@ligule/core","version":"0.0.0","type":"module","exports":{".":"./index.js"}}\n');
+  await writeFixture(fixtureRoot, 'node_modules/@ligule/core/index.js', 'export const createSessionLog = () => {};\n');
+  await writeFixture(fixtureRoot, 'tui/src/public.ts', "import { createSessionLog } from '@ligule/core';\nexport const read = createSessionLog;\n");
+  const clientPublicImport = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'tui/src/public.ts',
+  ], fixtureRoot);
+  assertStatus(clientPublicImport, 0, 'client_public_core_entry_positive_fixture');
+
   await writeFixture(fixtureRoot, 'core/src/dev-runtime.ts', "import * as ts from 'typescript';\nexport const version = ts.version;\n");
   const developmentRuntime = dependencyCruiser([
     '--config', config,
@@ -150,7 +169,7 @@ try {
   ], fixtureRoot);
   assertStatus(typeCycle, 0, 'type_only_cycle_positive_fixture');
 
-  process.stdout.write('dependency guard fixtures passed: Core → TUI, Core/TUI/Desktop runtime npm-dev, and runtime cycles rejected; Electron host API, type-only npm-dev imports/references and type-only cycles allowed\n');
+  process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev, client deep core imports and runtime cycles rejected; Electron host API, the @ligule/core entry, type-only npm-dev imports/references and type-only cycles allowed\n');
 } finally {
   const currentTempRoot = await realpath(tempRoot);
   const currentFixtureRoot = await realpath(fixtureRoot);

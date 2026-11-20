@@ -63,6 +63,12 @@ module.exports = {
       },
     },
     {
+      name: 'clients-use-core-entry',
+      severity: 'error',
+      from: { path: '^(tui/src/|desktop/frontend/src/)' },
+      to: { path: '^core/src/' },
+    },
+    {
       name: 'no-runtime-cycles',
       severity: 'error',
       from: {},
