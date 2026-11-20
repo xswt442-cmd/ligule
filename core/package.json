@@ -13,6 +13,10 @@
       "types": "./dist/tui.d.ts",
       "import": "./dist/tui.js"
     },
+    "./wire.js": {
+      "types": "./dist/wire.d.ts",
+      "import": "./dist/wire.js"
+    },
     "./host/control.js": {
       "types": "./dist/host/control.d.ts",
       "import": "./dist/host/control.js"

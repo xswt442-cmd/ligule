@@ -30,7 +30,8 @@ import { controlPresets, textOf as chooseText, VIEW_REQUEST_METHOD, type Locale 
 import type { TerminalAction } from './keymap.js';
 import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type ControlWizardValues } from './control-wizard.js';
 import { createSessionNavigation, type SessionNavigation, type SessionNavigationLease } from './session-navigation.js';
-import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionHeader, SessionSummary, UsageBucket, UsageSummary } from '@ligule/core/tui.js';
+import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionSummary, UsageBucket, UsageSummary } from '@ligule/core/tui.js';
+import type { SessionControlSnapshot, SessionReadPage, SubrunReference, SubrunStatus } from '@ligule/core/wire.js';
 import type { AgentPresetPage, AgentPresetPreview } from '@ligule/core/tui.js';
 import type { PresetCommand, SubrunCommand, TemplateCommand } from './commands.js';
 import type { EditorOutcome } from './editor.js';
@@ -320,33 +321,15 @@ interface SessionInputState {
   readonly draft: string;
 }
 
-interface SessionPage {
-  readonly sessionId: string;
-  readonly events: SessionEvent[];
-  readonly header: SessionHeader | null;
-  readonly endSeq: number | null;
-  readonly hasMore: boolean;
-  readonly writerActive?: boolean;
-}
+type SessionPage = Pick<SessionReadPage, 'sessionId' | 'events' | 'header' | 'endSeq' | 'hasMore' | 'writerActive'>;
 
-interface ExternalControlSnapshot extends Record<string, unknown> {
-  readonly sessionId: string;
+// 外控状态只读取这几个字段；其余由 Host 的完整快照携带，界面不复制字段表。
+type ExternalControlSnapshot = Pick<SessionControlSnapshot,
+  'sessionId' | 'state' | 'pendingInteractions' | 'events' | 'nextCursor' | 'eventGap' | 'firstAvailableCursor' | 'queue'> & {
   readonly operationId?: string;
-  readonly state: 'idle' | 'running' | 'done' | 'failed' | 'cancelled';
   readonly phase?: string | null;
   readonly progress?: TuiProgress | null;
-  readonly pendingInteractions: readonly {
-    readonly requestId: string;
-    readonly sessionId: string;
-    readonly type: 'approval' | 'question';
-    readonly details: Record<string, unknown>;
-  }[];
-  readonly events: readonly Record<string, unknown>[];
-  readonly nextCursor: number;
-  readonly eventGap?: boolean;
-  readonly firstAvailableCursor?: number;
-  readonly queue?: readonly { readonly queueItemId: string; readonly inputCharacters: number; readonly source: 'human' | 'controller' }[];
-}
+};
 
 interface TuiConfigResult extends Record<string, unknown> {
   readonly services: ModelService[];
@@ -355,18 +338,9 @@ interface TuiConfigResult extends Record<string, unknown> {
   readonly layers?: readonly { readonly layer: string; readonly version: string }[];
 }
 
-interface TuiSubrunReference {
-  readonly parentRunId: string;
-  readonly subrunId: string;
-  readonly sessionId: string;
-  readonly runId: string;
-}
+type TuiSubrunReference = SubrunReference & { readonly parentRunId: string };
 
-interface TuiSubrunStatus extends TuiSubrunReference {
-  readonly state: string;
-  readonly phase: string | null;
-  readonly errorCode?: string;
-}
+type TuiSubrunStatus = TuiSubrunReference & Pick<SubrunStatus, 'state' | 'phase' | 'errorCode'>;
 
 interface TuiPresetPreview extends Pick<AgentPresetPreview, 'presetId' | 'layer' | 'description'> {
   readonly instruction: string;
@@ -464,7 +438,8 @@ interface TuiRequestResults {
   readonly 'session.close': { readonly sessionId: string };
   readonly 'session.read': SessionPage;
   readonly 'session.observe': SessionPage & { readonly writerActive: boolean };
-  readonly 'session.control': ExternalControlSnapshot;
+  // 同一方法的回复随 request.action 变化；共享快照字段按 wire 类型，动作附加字段仍由调用处按类型判断。
+  readonly 'session.control': ExternalControlSnapshot & Record<string, unknown>;
   readonly 'approval.details': { readonly requestId: string; readonly sessionId: string; readonly argumentSha256: string; readonly args: Record<string, unknown> };
   readonly 'session.export': Exported;
   readonly 'session.branch': BranchResult;

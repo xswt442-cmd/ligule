@@ -12,6 +12,7 @@ const manifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf
 const supported = [
   '.',
   './tui.js',
+  './wire.js',
   './host/control.js',
   './host/mcp-server.js',
   './kernel/result.js',
