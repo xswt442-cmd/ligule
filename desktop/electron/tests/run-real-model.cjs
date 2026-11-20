@@ -201,12 +201,13 @@ async function requestHost(method, params = {}, timeoutMs = 60_000) {
 
 async function sessionSummary() {
   if (typeof sessionId !== 'string') throw Object.assign(new Error('real_model_session_missing'), { code: 'real_model_session_missing' });
-  const status = await requestHost('status.get', { sessionId });
-  const record = await requestHost('session.read', { sessionId, fullResults: true });
+  // status.get/session.read 需要原始结果（含 userSeq），不能用会丢字段的渲染投影。
+  const status = await host.request('status.get', { sessionId });
+  const record = await host.request('session.read', { sessionId, fullResults: true });
   return {
     running: status.running,
     turns: record.events.filter(event => event.kind === 'turn').map(event => ({ status: event.status, code: event.code, userSeq: event.userSeq })),
-    tools: record.events.filter(event => event.kind === 'tool').map(event => ({ tool: event.tool, kind: event.resultKind, code: event.resultCode })),
+    tools: record.events.filter(event => event.kind === 'tool').map(event => ({ tool: event.tool, kind: event.result?.kind, code: event.result?.code })),
     deltaCount: await evaluate(`window.__realModelFrames.filter(frame => frame.notify === 'delta' && frame.sessionId === ${JSON.stringify(sessionId)}).length`),
   };
 }
@@ -915,6 +916,15 @@ async function verifyExternalSessionControl() {
     const fetchState = await fetch(`${process.env.LIGULE_STUB_CONTROL}/state`).then(response => response.json());
     assert.equal(fetchState.externalFetchCount, 1, 'human_approval_did_not_allow_the_bound_fetch');
 
+    const controlSnapshot = async () => {
+      try {
+        return await host.request('session.control', {
+          projectRoot: workspaceRoot, sessionId: observerSessionId,
+          request: { action: 'status', after: 0, limit: 1, waitMs: 0 },
+        });
+      } catch { return null; }
+    };
+    const baselineOperationId = (await controlSnapshot())?.operationId ?? null;
     await fetch(`${process.env.LIGULE_STUB_CONTROL}/hang`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hang: true }) });
     await evaluate(`(() => {
       const input = document.querySelector('.external-session-composer textarea[aria-label="发送消息到外控会话"], .external-session-composer textarea[aria-label="Send a message to the external session"]');
@@ -924,29 +934,32 @@ async function verifyExternalSessionControl() {
       document.querySelector('.external-session-composer button.send')?.click();
       return true;
     })()`);
+    // 发送后必须等本次输入成为新的运行操作；发送前的旧操作不能当作取消目标。
+    let cancelTargetOperationId = null;
+    const targetDeadline = Date.now() + 20_000;
+    while (Date.now() < targetDeadline) {
+      const snapshot = await controlSnapshot();
+      if (typeof snapshot?.operationId === 'string' && snapshot.operationId !== baselineOperationId && snapshot.state === 'running') {
+        cancelTargetOperationId = snapshot.operationId;
+        break;
+      }
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 100));
+    }
+    if (cancelTargetOperationId === null) {
+      throw Object.assign(new Error('external_control_cancel_target_missing'), {
+        code: 'external_control_cancel_target_missing',
+        diagnostic: `external-control-cancel-target:${JSON.stringify({ baselineOperationId })}`,
+      });
+    }
     await waitFor(`(() => [...document.querySelectorAll('.external-control-head button')].some(item => /停止本轮|Stop turn/u.test(item.textContent ?? '')))()`, 15_000, 'external_control_cancel_button_missing');
     const cancelPhaseStopped = async () => evaluate(`document.querySelector('.external-control .external-control-state')?.textContent.includes('已停止') === true
       || document.querySelector('.external-control .external-control-state')?.textContent.includes('Stopped') === true`);
     const cancelNotePresent = async () => evaluate(`document.querySelector('.external-control')?.innerText.includes('已请求停止外控会话当前轮次') === true
       || document.querySelector('.external-control')?.innerText.includes('Requested cancellation of the active external turn') === true`);
-    // 以目标操作的终态为准；面板的阶段文字只作界面观察。
-    const controlSnapshot = async () => {
-      try {
-        return await host.request('session.control', {
-          projectRoot: workspaceRoot, sessionId: observerSessionId,
-          request: { action: 'status', after: 0, limit: 1, waitMs: 0 },
-        });
-      } catch { return null; }
-    };
-    const cancelTargetOperationId = (await controlSnapshot())?.operationId;
+    // 以本次操作的目标终态为准；面板的阶段文字只作界面观察。
     const targetCancelled = async () => {
       const snapshot = await controlSnapshot();
-      if (typeof cancelTargetOperationId === 'string') {
-        return snapshot?.operationId === cancelTargetOperationId && snapshot?.state === 'cancelled';
-      }
-      const record = await host.request('session.read', { sessionId: observerSessionId, fullResults: true }).catch(() => null);
-      const turns = Array.isArray(record?.events) ? record.events.filter(event => event.kind === 'turn') : [];
-      return turns.at(-1)?.status === 'cancelled';
+      return snapshot?.operationId === cancelTargetOperationId && snapshot?.state === 'cancelled';
     };
     const clickStop = () => evaluate(`(() => {
       const button = [...document.querySelectorAll('.external-control-head button')].find(item => /停止本轮|Stop turn/u.test(item.textContent ?? ''));
@@ -1235,7 +1248,7 @@ async function verifySessionSnapshotLiveInterleave() {
       });
     }
     // 用接受回执确认这一条记录已落盘，再检查界面是否在同一次打开里显示它。
-    const accepted = await requestHost('run.submit', { sessionId: owner, input: unique }, 20_000).catch(error => {
+    const accepted = await host.request('run.submit', { sessionId: owner, input: unique }, 20_000).catch(error => {
       error.diagnostic = `interleave-submit:${String(error.code ?? error.message)}`;
       throw error;
     });
@@ -1247,7 +1260,7 @@ async function verifySessionSnapshotLiveInterleave() {
         diagnostic: JSON.stringify({
           persistedHits,
           owner,
-          accepted: accepted.result === undefined ? accepted : accepted.result,
+          accepted: JSON.stringify(accepted ?? null).slice(0, 200),
           tail: Array.isArray(persisted?.events) ? persisted.events.slice(-6).map(event => `${event.kind}:${String(event.text ?? '').slice(0, 40)}`) : persisted,
         }),
       });
@@ -1291,8 +1304,14 @@ async function verifySessionSnapshotLiveInterleave() {
     }
     const summary = await waitForSessionIdle(30_000, 'interleave_turn_did_not_finish');
     // running 变成 false 与终态 turn 落盘之间有一个窗口；按接受的 userSeq 找到本次 Run 的 turn，等它落定。
-    const acceptedUserSeq = accepted.result?.userSeq;
-    const turnFor = turns => turns.filter(turn => typeof acceptedUserSeq !== 'number' || turn.userSeq === acceptedUserSeq).at(-1);
+    const acceptedUserSeq = typeof accepted?.userSeq === 'number' ? accepted.userSeq : undefined;
+    if (acceptedUserSeq === undefined) {
+      throw Object.assign(new Error('interleave_accept_user_seq_missing'), {
+        code: 'interleave_accept_user_seq_missing',
+        diagnostic: JSON.stringify(accepted ?? null).slice(0, 400),
+      });
+    }
+    const turnFor = turns => turns.filter(turn => turn.userSeq === acceptedUserSeq).at(-1);
     let lastTurn = turnFor(summary.turns);
     const turnDeadline = Date.now() + 10_000;
     while (Date.now() < turnDeadline && (lastTurn === undefined || lastTurn.status === 'running')) {
