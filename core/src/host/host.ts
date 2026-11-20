@@ -127,6 +127,7 @@ import type { PolicyReviewRecord, PolicyReviewRequest } from '../kernel/policy.j
 import type { ReviewFacts } from '../kernel/reviewer.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
 import { runAcceptanceScope, runLivenessOf, runReceiptView, withinRunWindows } from './run-records.js';
+import { runResourcesOf } from './run-resources.js';
 import { checkedToolResultSpillReference, decodeToolResultCursor, encodeToolResultCursor, readVerifiedToolResultSpillPage } from '../session/tool-result.js';
 import { checkedFileChangeFact, createFileChangeStore, type FileChangeFact, type FileChangeStore } from '../session/file-changes.js';
 import { checkedCheckDeclaration, type CheckDeclaration } from '../session/checks.js';
@@ -2999,6 +3000,22 @@ export function createHost({
         state.reviewer?.beginRun();
         const subagents = state.subagents;
         if (subagents === undefined) throw new KernelError('subagent_runtime_unavailable');
+        // 本轮拥有的外部资源按同一生命周期收口；每个资源只提供自己的动作，阶段与失败合并由这里拥有。
+        const acceptedRunId = options.acceptance?.runId;
+        const runResources = acceptedRunId === undefined ? undefined : runResourcesOf([
+          {
+            beginCompletionCandidate: () => subagents.beginCompletionCandidate(acceptedRunId),
+            resume: () => subagents.resumeParent(acceptedRunId),
+            settle: async (status) => await subagents.settleParent(acceptedRunId, status),
+            finish: async () => await subagents.finishParent(acceptedRunId),
+          },
+          {
+            beginCompletionCandidate: () => finiteCommands.beginCompletionCandidate(state.id, acceptedRunId),
+            resume: () => finiteCommands.resumeRun(state.id, acceptedRunId),
+            settle: async (status) => await finiteCommands.settleRun(state.id, acceptedRunId, status),
+            finish: async () => await finiteCommands.finishRun(state.id, acceptedRunId),
+          },
+        ]);
         const result = await loop.run(input, {
           signal: budget.signal,
           task: budget,
@@ -3053,35 +3070,12 @@ export function createHost({
             structuredSubmitted = false;
             structured = undefined;
           },
-          ...(options.acceptance === undefined ? {} : {
-            runId: options.acceptance.runId,
-            settleSubruns: async (status) => {
-              const outcomes = await Promise.allSettled([
-                subagents.settleParent(options.acceptance!.runId, status),
-                finiteCommands.settleRun(state.id, options.acceptance!.runId,
-                  status === 'completed' ? 'completed' : status === 'cancelled' ? 'cancelled' : 'failed'),
-              ]);
-              const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
-                .map((outcome) => outcome.reason);
-              if (failures.length > 0) throw new AggregateError(failures, 'run_resources_settle_failed');
-            },
-            beginCompletionCandidate: () => {
-              try { subagents.beginCompletionCandidate(options.acceptance!.runId); }
-              finally { finiteCommands.beginCompletionCandidate(state.id, options.acceptance!.runId); }
-            },
-            resumeSubruns: () => {
-              try { subagents.resumeParent(options.acceptance!.runId); }
-              finally { finiteCommands.resumeRun(state.id, options.acceptance!.runId); }
-            },
-            finishSubruns: async () => {
-              const outcomes = await Promise.allSettled([
-                subagents.finishParent(options.acceptance!.runId),
-                finiteCommands.finishRun(state.id, options.acceptance!.runId),
-              ]);
-              const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
-                .map((outcome) => outcome.reason);
-              if (failures.length > 0) throw new AggregateError(failures, 'run_resources_finish_failed');
-            },
+          ...(runResources === undefined ? {} : {
+            runId: acceptedRunId!,
+            settleSubruns: async (status: 'completed' | 'failed' | 'cancelled') => await runResources.settle(status),
+            beginCompletionCandidate: () => runResources.beginCompletionCandidate(),
+            resumeSubruns: () => runResources.resume(),
+            finishSubruns: async () => await runResources.finish(),
             persistTerminal: async (status, summary, fields) => {
               const runId = options.acceptance!.runId;
               const evidence = runEvidenceReferences(await session.read(), runId);
