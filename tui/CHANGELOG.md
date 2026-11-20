@@ -22,6 +22,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - Side Chat 用同一版本的有界快照核对选中内容，来自后续页的选择不再被误判为无法验证。
 - Operation Session 只保留其手动命令的记录与控制；来源权限收窄后，写文件、导出或启动新 Run 仍然被拒绝。
 - 随包指南不再出现内部阶段编号。
+- 运行结束时的资源收口失败会记录为 `run_resources_settle_failed` 或 `run_resources_finish_failed`，并保留原始失败原因与失败资源名，不再只显示通用运行时错误。
 
 ### English
 
@@ -39,6 +40,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - Side Chat verifies selected text against a bounded snapshot of the same file version, so a selection from a later page is no longer reported as unverifiable.
 - An Operation Session keeps only the record and controls of its manual command; after the source Permission narrows, writing files, exporting, or starting a new Run is still refused.
 - Packaged guides no longer mention internal stage numbers.
+- A Run that fails while settling its resources now records `run_resources_settle_failed` or `run_resources_finish_failed`, keeps the original failure and the failed resource names, and no longer reports only a generic runtime error.
 
 ## [0.1.2] - 2026-11-05
 

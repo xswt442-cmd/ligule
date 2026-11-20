@@ -27,6 +27,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - Project Git 面板会说明「当前会话文件边界窄于仓库根目录」并停止读取状态与改动。
 - 交付面板展示每次检查的时段与执行日志引用（字节数与 SHA-256）；旧记录显示为未知。
 - 切换会话、关闭面板或 Host 重启后，命令工作台与交付面板的迟到读取不再写入当前视图。
+- 运行结束时的资源收口失败会记录为 `run_resources_settle_failed` 或 `run_resources_finish_failed`，并保留原始失败原因与失败资源名，不再只显示通用运行时错误。
 
 ### English
 
@@ -46,6 +47,7 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - Side Chat verifies selected text against a bounded snapshot of the same file version, so a selection from a later page is no longer reported as unverifiable.
 - An Operation Session keeps only the record and controls of its manual command; after the source Permission narrows, writing files, exporting, or starting a new Run is still refused.
 - Packaged guides no longer mention internal stage numbers.
+- A Run that fails while settling its resources now records `run_resources_settle_failed` or `run_resources_finish_failed`, keeps the original failure and the failed resource names, and no longer reports only a generic runtime error.
 - The Project Git panel explains that the Session file boundary is narrower than the repository root and stops reading status and changes.
 - The delivery panel shows each check window and its execution log reference (bytes and SHA-256); older records display unknown.
 - After a session switch, a closed panel, or a Host restart, late command-workbench and delivery reads no longer write into the current view.
