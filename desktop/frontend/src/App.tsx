@@ -152,6 +152,8 @@ type PanelProps = {
   onProjects: (roots: string[]) => void;
   // 当前会话所属项目决定模型配置和审批规则的读取与写入范围。
   projectRoot: string;
+  // Host 重启后代次递增，面板的迟到读取据此失效。
+  hostRevision: number;
   // 在指定项目中创建会话；未指定时使用 Host 的默认项目。
   createIn: (root?: string) => void;
   // 当前设置页有未保存编辑时，关闭或切换前先请求用户确认。
@@ -209,8 +211,8 @@ const menuPanels: Panel<PanelProps>[] = [
   {
     id: 'panel.delivery',
     title: '交付',
-    view: ({ client, sessionId, projectRoot, status, openProjectFile, openProjectGit, openArtifact, openCheck, openDiagnostics, openHit }) => (
-      <DeliveryPanel client={client} sessionId={sessionId} projectRoot={projectRoot} status={status}
+    view: ({ client, sessionId, projectRoot, status, hostRevision, openProjectFile, openProjectGit, openArtifact, openCheck, openDiagnostics, openHit }) => (
+      <DeliveryPanel client={client} sessionId={sessionId} projectRoot={projectRoot} status={status} hostRevision={hostRevision}
         onOpenFile={path => openProjectFile(projectRoot, path)}
         onOpenEvent={(seq, kind) => sessionId !== null && openHit({ sessionId, name: '', seq, kind, text: '' }, projectRoot)}
         onOpenArtifact={openArtifact} onOpenCheck={openCheck} onOpenProjectChanges={() => openProjectGit(projectRoot)}
@@ -2369,6 +2371,7 @@ export function App({ transport }: { transport: Transport }) {
     othersRunning,
     runningIds,
     unread,
+    hostRevision,
     seconds,
     waiting: client.waiting(),
     counts: client.counts(),

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { code, type Client } from '../protocol';
 import { useText } from '../locale';
 import type { Status } from '../status';
+import { createViewScope } from '../view-scope';
 import { commandReferenceKey, MAX_WORKBENCH_COMMANDS, type WorkbenchCommandReference } from '../workbench';
 
 type OutputEvent = { readonly id: string; readonly stream: string; readonly text: string };
@@ -113,9 +114,10 @@ export function CommandWorkspace({
   const actionBusy = useRef(new Set<string>());
   const logElement = useRef<HTMLDivElement | null>(null);
   const [copyStatus, setCopyStatus] = useState<'copied' | 'error' | null>(null);
-  // 面板、会话或 Host 重启后，仍在途的 `status.get` / `execution.*` 结果不再属于当前视图。
-  const viewGeneration = useRef(0);
-  useEffect(() => { viewGeneration.current += 1; }, [hostRevision, open, sessionId]);
+  // 面板、会话、项目或 Host 重启后，仍在途的 `status.get` / `execution.*` 结果不再属于当前视图。
+  const viewScope = useRef(createViewScope());
+  const previousReferenceKeys = useRef<readonly string[]>([]);
+  useEffect(() => { viewScope.current.bump(); }, [client, hostRevision, open, projectRoot, sessionId]);
 
   const visibleReferences = useMemo(() => references.filter(reference =>
     reference.sourceSessionId === sessionId || reference.operationSessionId === sessionId), [references, sessionId]);
@@ -137,8 +139,8 @@ export function CommandWorkspace({
 
   const refreshReference = useCallback(async (reference: WorkbenchCommandReference) => {
     const key = commandReferenceKey(reference);
-    const generation = viewGeneration.current;
-    const isCurrent = () => viewGeneration.current === generation;
+    const token = viewScope.current.capture(key);
+    const isLive = () => viewScope.current.isCurrent(token);
     if (refreshing.current.has(key)) {
       refreshAgain.current.add(key);
       return;
@@ -152,7 +154,7 @@ export function CommandWorkspace({
           events?: { kind?: unknown; tool?: unknown; args?: unknown }[];
         };
         const execEvent = record.events?.find(event => event.kind === 'tool' && event.tool === 'exec');
-        if (!isCurrent()) return;
+        if (!isLive()) return;
         const args = typeof execEvent?.args === 'object' && execEvent.args !== null && !Array.isArray(execEvent.args)
           ? execEvent.args as Record<string, unknown> : undefined;
         updateView(key, previous => ({
@@ -179,7 +181,7 @@ export function CommandWorkspace({
         || sessionStatus.operation.sourceSessionId !== reference.sourceSessionId) {
         throw Object.assign(new Error('operation_owner_mismatch'), { code: 'operation_owner_mismatch' });
       }
-      if (!isCurrent()) return;
+      if (!isLive()) return;
       const received = outputFrom(logs.events);
       updateView(key, previous => ({
         ...previous,
@@ -196,13 +198,13 @@ export function CommandWorkspace({
         logError: typeof logs.unavailableReason === 'string' ? logs.unavailableReason : undefined,
       }));
     } catch (error) {
-      if (isCurrent()) {
+      if (isLive()) {
         updateView(key, previous => ({ ...previous, state: previous.state === 'starting' ? 'unknown' : previous.state,
           errorCode: code(error) }));
       }
     } finally {
       refreshing.current.delete(key);
-      if (refreshAgain.current.delete(key)) void refreshReferenceRef.current(reference);
+      if (refreshAgain.current.delete(key) && isLive()) void refreshReferenceRef.current(reference);
     }
   }, [client, hostRevision, projectRoot, updateView]);
   refreshReferenceRef.current = refreshReference;
@@ -227,6 +229,8 @@ export function CommandWorkspace({
 
   useEffect(() => {
     const valid = new Set(references.map(commandReferenceKey));
+    for (const key of previousReferenceKeys.current) if (!valid.has(key)) viewScope.current.forget(key);
+    previousReferenceKeys.current = [...valid];
     const retained = Object.fromEntries(Object.entries(viewsRef.current).filter(([key]) => valid.has(key)));
     viewsRef.current = retained;
     setViews(retained);
@@ -235,6 +239,7 @@ export function CommandWorkspace({
   useEffect(() => {
     setCommand('');
     setCwd('.');
+    setStarting(false);
     setStartingError(null);
     setCopyStatus(null);
   }, [sessionId]);
@@ -242,6 +247,8 @@ export function CommandWorkspace({
   const startCommand = useCallback(async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!canStart || sessionId === null || command.trim() === '') return;
+    const token = viewScope.current.capture();
+    const isLive = () => viewScope.current.isCurrent(token);
     setStarting(true);
     setStartingError(null);
     const sourceSessionId = sessionId;
@@ -262,20 +269,23 @@ export function CommandWorkspace({
         executionId: result.executionId,
       };
       const key = commandReferenceKey(reference);
+      if (!isLive()) return;
       updateView(key, previous => ({ ...previous, state: typeof result.state === 'string' ? result.state : 'starting',
         ...(typeof result.errorCode === 'string' ? { errorCode: result.errorCode } : {}) }));
       onAdd(reference);
       void refreshReference(reference);
     } catch (error) {
-      setStartingError(code(error));
+      if (isLive()) setStartingError(code(error));
     } finally {
-      setStarting(false);
+      if (isLive()) setStarting(false);
     }
   }, [canStart, client, command, cwd, onAdd, refreshReference, sessionId, updateView]);
 
   const waitForCommand = useCallback(async (reference: WorkbenchCommandReference) => {
     const key = commandReferenceKey(reference);
     if (actionBusy.current.has(key)) return;
+    const token = viewScope.current.capture(key);
+    const isLive = () => viewScope.current.isCurrent(token);
     actionBusy.current.add(key);
     updateView(key, previous => ({ ...previous, waitTimedOut: false, errorCode: undefined }));
     try {
@@ -283,10 +293,11 @@ export function CommandWorkspace({
         sessionId: reference.operationSessionId, runId: reference.operationId,
         executionId: reference.executionId, waitMs: 2_000,
       }, 5_000) as { waitTimedOut?: unknown };
+      if (!isLive()) return;
       updateView(key, previous => ({ ...previous, waitTimedOut: result.waitTimedOut === true }));
       await refreshReference(reference);
     } catch (error) {
-      updateView(key, previous => ({ ...previous, errorCode: code(error) }));
+      if (isLive()) updateView(key, previous => ({ ...previous, errorCode: code(error) }));
     } finally {
       actionBusy.current.delete(key);
     }
@@ -295,15 +306,18 @@ export function CommandWorkspace({
   const cancelCommand = useCallback(async (reference: WorkbenchCommandReference) => {
     const key = commandReferenceKey(reference);
     if (actionBusy.current.has(key)) return;
+    const token = viewScope.current.capture(key);
+    const isLive = () => viewScope.current.isCurrent(token);
     actionBusy.current.add(key);
     updateView(key, previous => ({ ...previous, errorCode: undefined }));
     try {
       await client.call('execution.cancel', {
         sessionId: reference.operationSessionId, runId: reference.operationId, executionId: reference.executionId,
       }, 10_000);
+      if (!isLive()) return;
       await refreshReference(reference);
     } catch (error) {
-      updateView(key, previous => ({ ...previous, errorCode: code(error) }));
+      if (isLive()) updateView(key, previous => ({ ...previous, errorCode: code(error) }));
     } finally {
       actionBusy.current.delete(key);
     }

@@ -101,12 +101,13 @@ function validationLabel(status: unknown, t: (chinese: string, english: string) 
   return t('未请求结构化输出', 'Structured output not requested');
 }
 
-export function DeliveryPanel({ client, sessionId, projectRoot, status, onOpenFile, onOpenEvent,
+export function DeliveryPanel({ client, sessionId, projectRoot, status, hostRevision, onOpenFile, onOpenEvent,
   onOpenArtifact, onOpenCheck, onOpenProjectChanges, onOpenDiagnostics }: {
   readonly client: Client;
   readonly sessionId: string | null;
   readonly projectRoot: string;
   readonly status: import('../status').Status | null;
+  readonly hostRevision: number;
   readonly onOpenFile: (path: string) => void;
   readonly onOpenEvent: (seq: number, kind: string) => void;
   readonly onOpenArtifact: (artifactKey: string) => void;
@@ -117,6 +118,7 @@ export function DeliveryPanel({ client, sessionId, projectRoot, status, onOpenFi
   const t = useText();
   const sessionGeneration = useRef(0);
   const resultGeneration = useRef(0);
+  const checkLogsBusy = useRef(new Set<string>());
   const [refresh, setRefresh] = useState(0);
   const [receipts, setReceipts] = useState<RunReceipt[]>([]);
   const [receiptsError, setReceiptsError] = useState<string | null>(null);
@@ -179,7 +181,7 @@ export function DeliveryPanel({ client, sessionId, projectRoot, status, onOpenFi
       }
     });
     return () => { sessionGeneration.current += 1; };
-  }, [client, projectRoot, refresh, sessionId]);
+  }, [client, hostRevision, projectRoot, refresh, sessionId]);
 
   const selectedReceipt = receipts.find(receipt => receipt.runId === selectedRunId);
   useEffect(() => {
@@ -200,7 +202,7 @@ export function DeliveryPanel({ client, sessionId, projectRoot, status, onOpenFi
       if (resultGeneration.current === generation) setRunResultBusy(false);
     });
     return () => { resultGeneration.current += 1; };
-  }, [client, projectRoot, selectedReceipt, sessionId]);
+  }, [client, hostRevision, projectRoot, selectedReceipt, sessionId]);
 
   const loadOlderReceipts = useCallback(async () => {
     if (sessionId === null || projectRoot === '' || receiptsBusy || receiptsBefore === null) return;
@@ -246,6 +248,9 @@ export function DeliveryPanel({ client, sessionId, projectRoot, status, onOpenFi
     if (sessionId === null || typeof check.executionId !== 'string') return;
     const generation = sessionGeneration.current;
     const key = JSON.stringify([runId, check.executionId]);
+    // 同一日志游标只允许一个在途读取，避免同一页被追加两次或用旧游标覆盖新游标。
+    if (checkLogsBusy.current.has(key)) return;
+    checkLogsBusy.current.add(key);
     try {
       const page = await client.call('execution.logs', {
         sessionId, runId, executionId: check.executionId,
@@ -266,6 +271,8 @@ export function DeliveryPanel({ client, sessionId, projectRoot, status, onOpenFi
       if (sessionGeneration.current !== generation) return;
       setCheckLogs(current => ({ ...current, [key]: { ...(current[key] ?? { events: [], hasMore: false, gap: false }),
         error: code(error) } }));
+    } finally {
+      checkLogsBusy.current.delete(key);
     }
   }, [checkLogs, client, sessionId]);
 
