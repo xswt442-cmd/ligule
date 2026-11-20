@@ -10,8 +10,9 @@ import {
   capabilitiesOf, createConfig, createKernel, createLoop, createMessagesProvider, createChatCompletionsProvider, createSessionLog,
   DEFAULT_RETRY, MESSAGES_CAPABILITIES, readTool,
 } from '../dist/index.js';
-import type { ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
+import type { ModelRequest } from '../dist/kernel/loop.js';
 import { fetchablePort, listenFetchable } from './helpers/port.ts';
+import { collect } from './helpers/streams.ts';
 
 const API_KEY_ENV = 'LIGULE_TEST_API_KEY';
 const FAST_RETRY = { ...DEFAULT_RETRY, baseDelayMs: 1 };
@@ -69,12 +70,6 @@ async function withEndpoint<TResult>(
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
   }
-}
-
-async function collect(stream: AsyncIterable<ProviderEvent>): Promise<ProviderEvent[]> {
-  const events: ProviderEvent[] = [];
-  for await (const event of stream) events.push(event);
-  return events;
 }
 
 function provider(baseUrl: string, extra: ProviderOptions = {}) {

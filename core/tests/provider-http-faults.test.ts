@@ -8,6 +8,7 @@ import { createMessagesProvider, DEFAULT_RETRY } from '../dist/index.js';
 import type { RetryPolicy } from '../dist/model/http.js';
 import type { ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
 import { listenFetchable } from './helpers/port.ts';
+import { collect } from './helpers/streams.ts';
 
 const API_KEY_ENV = 'LIGULE_HTTP_FAULT_TEST_KEY';
 const FAST_RETRY = { ...DEFAULT_RETRY, baseDelayMs: 1 };
@@ -37,12 +38,6 @@ function categoryForStatus(status: number) {
   if (status >= 500) return 'server';
   if (status >= 400) return 'client';
   return 'http';
-}
-
-async function collect(stream: AsyncIterable<ProviderEvent>): Promise<ProviderEvent[]> {
-  const events: ProviderEvent[] = [];
-  for await (const event of stream) events.push(event);
-  return events;
 }
 
 async function withEndpoint(

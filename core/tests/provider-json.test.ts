@@ -10,6 +10,7 @@ import { createKernel, createLoop } from '../dist/index.js';
 import { editTool } from '../dist/tools/write.js';
 import type { ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
 import { listenFetchable } from './helpers/port.ts';
+import { collect } from './helpers/streams.ts';
 
 const KEY_NAME = 'LIGULE_NONSTREAM_TEST_KEY';
 const RETRY = { maxAttempts: 1, baseDelayMs: 0, retry429: false, retry5xx: false, retryTransport: false };
@@ -78,12 +79,6 @@ async function withJsonEndpoint<TResult>(
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
   }
-}
-
-async function collect(stream: AsyncIterable<ProviderEvent>): Promise<ProviderEvent[]> {
-  const events: ProviderEvent[] = [];
-  for await (const event of stream) events.push(event);
-  return events;
 }
 
 test('Chat Completions parses a real non-streaming JSON response and usage', async () => {

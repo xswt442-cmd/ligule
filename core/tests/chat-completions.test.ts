@@ -9,8 +9,9 @@ import type { IncomingHttpHeaders, ServerResponse } from 'node:http';
 import {
   CHAT_COMPLETIONS_CAPABILITIES, chatCompletionsCapabilities, createChatCompletionsProvider, readTool,
 } from '../dist/index.js';
-import type { ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
+import type { ModelRequest } from '../dist/kernel/loop.js';
 import { listenFetchable } from './helpers/port.ts';
+import { collect } from './helpers/streams.ts';
 
 const API_KEY_ENV = 'LIGULE_TEST_API_KEY';
 
@@ -58,12 +59,6 @@ async function withEndpoint<TResult>(
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
   }
-}
-
-async function collect(stream: AsyncIterable<ProviderEvent>): Promise<ProviderEvent[]> {
-  const events: ProviderEvent[] = [];
-  for await (const event of stream) events.push(event);
-  return events;
 }
 
 function provider(baseUrl: string, extra: ProviderOptions = {}) {
