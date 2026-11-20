@@ -1162,12 +1162,21 @@ async function verifySessionSnapshotLiveInterleave() {
       });
     }
     try {
-      // 切回会话时视图可能停在旧范围，虚拟化窗口不包含末尾；先回到最新再判断行数。
+      // 切回会话时视图可能停在旧范围，虚拟化窗口不包含末尾；在等待期间反复回到最新。
       // jump-latest 只滚动，不重新读取，因此不会掩盖“实时记录丢失”。
-      if (await evaluate(`document.querySelector('.jump-latest') !== null`)) {
-        await clickWithMouse('.jump-latest', 'interleave_jump_latest_failed');
+      const deadline = Date.now() + 15_000;
+      let rendered = 0;
+      while (Date.now() < deadline) {
+        rendered = await evaluate(occurrences());
+        if (rendered === 1) break;
+        if (await evaluate(`document.querySelector('.jump-latest') !== null`)) {
+          await evaluate(`(() => { document.querySelector('.jump-latest')?.click(); return true })()`);
+        }
+        await new Promise(resolvePromise => setTimeout(resolvePromise, 250));
       }
-      await waitFor(occurrences() + ' === 1', 15_000, 'interleave_live_record_not_rendered');
+      if (rendered !== 1) {
+        throw Object.assign(new Error('interleave_live_record_not_rendered'), { code: 'interleave_live_record_not_rendered' });
+      }
     } catch (error) {
       const state = await evaluate(`(() => ({
         conversation: document.querySelector('.conversation')?.innerText.slice(-400) ?? null,
