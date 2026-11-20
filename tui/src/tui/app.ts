@@ -4,7 +4,7 @@
 import { resolve } from 'node:path';
 import { createElement as h, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, parseExecCommand, parsePresetCommand, parseSubrunCommand, parseToolCommand, resolveSessionId, routeInput } from './commands.js';
+import { answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, parseControlCommand, parseExecCommand, parseExtensionsCommand, parseMcpCommand, parsePresetCommand, parseSubrunCommand, parseToolCommand, resolveSessionId, routeInput, usageText } from './commands.js';
 import { pushHistory } from '@ligule/core/tui.js';
 import { searchHistory } from './history.js';
 import { editDraft, isTypingRun, moveDraftCaret, type DraftState } from './draft.js';
@@ -33,7 +33,7 @@ import { createSessionNavigation, type SessionNavigation, type SessionNavigation
 import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionSummary, UsageBucket, UsageSummary } from '@ligule/core/tui.js';
 import type { SessionControlSnapshot, SessionReadPage, SubrunReference, SubrunStatus } from '@ligule/core/wire.js';
 import type { AgentPresetPage, AgentPresetPreview } from '@ligule/core/tui.js';
-import type { PresetCommand, SubrunCommand, TemplateCommand } from './commands.js';
+import type { McpTrustScope, PresetCommand, SubrunCommand, TemplateCommand } from './commands.js';
 import type { EditorOutcome } from './editor.js';
 import type { SavedInput } from './input-store.js';
 import type { BranchResult, CredentialStatus, Exported, LoopResult, ModelSelection, ModelService, PathListing, SearchHit } from '@ligule/core/tui.js';
@@ -204,7 +204,6 @@ type AgentGrant = {
   readonly revokedAt: string | null;
 };
 type AgentControlSnapshot = { readonly version: string; readonly grants: readonly AgentGrant[] };
-type McpTrustScope = 'session' | 'project' | 'user';
 type McpServerSummary = {
   readonly name: string;
   readonly command: string;
@@ -1668,27 +1667,25 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (name === 'mcp') {
-      const [action = 'list', serverName = '', scopeText = ''] = argument.trim().split(/\s+/, 3);
-      const scopes: readonly McpTrustScope[] = ['session', 'project', 'user'];
-      const scope = scopes.includes(scopeText as McpTrustScope) ? scopeText as McpTrustScope : undefined;
-      if (action === 'add') {
-        const parts = argument.trim().split(/\s+/);
-        if (parts.length < 3) {
-          push({ kind: 'error', text: t('用法：/mcp add <名称> <程序> [参数…]', 'Usage: /mcp add <name> <executable> [args…]') });
-          return;
-        }
+      const command = parseMcpCommand(argument);
+      if ('code' in command) {
+        const [zh, en] = usageText(command.code);
+        push({ kind: 'error', text: t(zh, en) });
+        return;
+      }
+      if (command.action === 'add') {
         void (async () => {
           try {
             const config = await client.request('config.get', { projectRoot: info.boundary });
             const version = (config.layers ?? []).find((layer) => layer.layer === 'user')?.version ?? '';
             await client.request('config.set', {
               projectRoot: info.boundary, field: 'mcp.servers', layer: 'user', version, op: 'set',
-              serverName: parts[1], serverCommand: parts[2],
-              ...(parts.length > 3 ? { serverArgs: parts.slice(3) } : {}),
+              serverName: command.name, serverCommand: command.executable,
+              ...(command.args.length === 0 ? {} : { serverArgs: [...command.args] }),
             });
             push({ kind: 'meta', text: t(
-              `${parts[1]} 已保存到使用者默认配置。环境变量与工作目录请在配置文件中补充；新配置需重新信任（/mcp trust）。`,
-              `${parts[1]} was saved to the user defaults. Add environment references and a working directory in the config file; the new configuration needs trust again (/mcp trust).`,
+              `${command.name} 已保存到使用者默认配置。环境变量与工作目录请在配置文件中补充；新配置需重新信任（/mcp trust）。`,
+              `${command.name} was saved to the user defaults. Add environment references and a working directory in the config file; the new configuration needs trust again (/mcp trust).`,
             ) });
           } catch (error) {
             push({ kind: 'error', text: t(`MCP Server 未保存：${errorCode(error) ?? errorMessage(error) ?? 'config_set_failed'}`, `MCP server was not saved: ${errorCode(error) ?? errorMessage(error) ?? 'config_set_failed'}`) });
@@ -1696,26 +1693,22 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         })();
         return;
       }
-      if (action === 'remove') {
-        if (serverName === '') {
-          push({ kind: 'error', text: t('用法：/mcp remove <名称>', 'Usage: /mcp remove <name>') });
-          return;
-        }
+      if (command.action === 'remove') {
         void (async () => {
           try {
             const config = await client.request('config.get', { projectRoot: info.boundary });
             const version = (config.layers ?? []).find((layer) => layer.layer === 'user')?.version ?? '';
             await client.request('config.set', {
-              projectRoot: info.boundary, field: 'mcp.servers', layer: 'user', version, op: 'remove', serverName,
+              projectRoot: info.boundary, field: 'mcp.servers', layer: 'user', version, op: 'remove', serverName: command.name,
             });
-            push({ kind: 'meta', text: t(`已从使用者默认配置移除 ${serverName}；信任记录与其他配置层不受影响。`, `${serverName} was removed from the user defaults; trust records and other layers are untouched.`) });
+            push({ kind: 'meta', text: t(`已从使用者默认配置移除 ${command.name}；信任记录与其他配置层不受影响。`, `${command.name} was removed from the user defaults; trust records and other layers are untouched.`) });
           } catch (error) {
             push({ kind: 'error', text: t(`MCP Server 未移除：${errorCode(error) ?? errorMessage(error) ?? 'config_set_failed'}`, `MCP server was not removed: ${errorCode(error) ?? errorMessage(error) ?? 'config_set_failed'}`) });
           }
         })();
         return;
       }
-      if (action === 'confirm') {
+      if (command.action === 'confirm') {
         const pending = mcpTrustPending;
         if (pending === null || pending.sessionId !== sessionId || pending.sessionGeneration !== sessionIdentityGeneration.current
           || activeSession.current !== sessionId) {
@@ -1755,7 +1748,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         })();
         return;
       }
-      if (action === 'list' || action === '') {
+      if (command.action === 'list') {
         void client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId }).then((snapshot) => {
           const lines = snapshot.servers.length === 0 ? [t('当前项目没有配置 MCP Server。', 'No MCP servers are configured for this project.')]
             : snapshot.servers.map((server) => `${server.name} · ${server.trust === null ? t('未信任', 'untrusted') : server.trust.trusted ? t(`已信任 ${server.trust.scope}（可信本机界面）`, `trusted ${server.trust.scope} (trusted local UI)`) : t(`已阻止 ${server.trust.scope}`, `blocked ${server.trust.scope}`)} · ${server.command} ${server.args.join(' ')} · cwd ${server.cwd}`);
@@ -1763,11 +1756,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         }, (error: unknown) => push({ kind: 'error', text: t(`无法读取 MCP Server：${errorCode(error) ?? 'mcp_trust_list_failed'}`, `Could not read MCP servers: ${errorCode(error) ?? 'mcp_trust_list_failed'}`) }));
         return;
       }
-      if (action === 'trust') {
-        if (serverName === '' || scope === undefined) {
-          push({ kind: 'error', text: t('用法：/mcp trust <Server> <session|project|user>', 'Usage: /mcp trust <server> <session|project|user>') });
-          return;
-        }
+      if (command.action === 'trust') {
+        const scope = command.scope;
         if (scope === 'session' && sessionId === '') {
           push({ kind: 'error', text: t('当前没有会话，不能保存会话范围的信任。', 'There is no active session for session-scoped trust.') });
           return;
@@ -1780,7 +1770,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           try {
             const snapshot = await client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId: owner });
             if (!isCurrent()) return;
-            const server = snapshot.servers.find((item) => item.name === serverName);
+            const server = snapshot.servers.find((item) => item.name === command.server);
             if (server === undefined) throw new Error('mcp_server_unknown');
             setMcpTrustPending({ server: server.name, scope, version: snapshot.version, identityDigest: server.identityDigest,
               sessionId: owner, sessionGeneration: generation });
@@ -1795,57 +1785,47 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         })();
         return;
       }
-      if (action === 'revoke') {
-        if (serverName === '' || scope === undefined) {
-          push({ kind: 'error', text: t('用法：/mcp revoke <Server> <session|project|user>', 'Usage: /mcp revoke <server> <session|project|user>') });
-          return;
-        }
+      if (command.action === 'revoke') {
+        const scope = command.scope;
         void (async () => {
           try {
             const snapshot = await client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId });
-            const server = snapshot.servers.find((item) => item.name === serverName);
+            const server = snapshot.servers.find((item) => item.name === command.server);
             if (server === undefined) throw new Error('mcp_server_unknown');
             await client.request('mcp.trust.set', {
-              projectRoot: info.boundary, sessionId, server: serverName, identityDigest: server.identityDigest, scope, trusted: false,
+              projectRoot: info.boundary, sessionId, server: command.server, identityDigest: server.identityDigest, scope, trusted: false,
               ...(scope === 'session' ? {} : { version: snapshot.version }),
             });
             setMcpTrustPending(null);
-            push({ kind: 'meta', text: t(`已撤销 ${serverName} 的 ${scope} 信任。`, `Revoked ${scope} trust for ${serverName}.`) });
+            push({ kind: 'meta', text: t(`已撤销 ${command.server} 的 ${scope} 信任。`, `Revoked ${scope} trust for ${command.server}.`) });
           } catch (error) {
             push({ kind: 'error', text: t(`撤销 MCP Server 信任失败：${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`, `Could not revoke MCP server trust: ${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`) });
           }
         })();
         return;
       }
-      if (action === 'tools') {
-        if (serverName === '') {
-          push({ kind: 'error', text: t('用法：/mcp tools <Server>', 'Usage: /mcp tools <server>') });
-          return;
-        }
-        push({ kind: 'meta', text: t(`正在启动已信任的 ${serverName} 并读取工具清单；不会调用工具。`, `Starting trusted server ${serverName} to list tools; no tools will be called.`) });
-        void client.request('mcp.trust.tools', { projectRoot: info.boundary, sessionId, server: serverName }).then((listed) => {
+      if (command.action === 'tools') {
+        push({ kind: 'meta', text: t(`正在启动已信任的 ${command.server} 并读取工具清单；不会调用工具。`, `Starting trusted server ${command.server} to list tools; no tools will be called.`) });
+        void client.request('mcp.trust.tools', { projectRoot: info.boundary, sessionId, server: command.server }).then((listed) => {
           push({ kind: 'meta', text: listed.tools.map((tool) => `${tool.name}${tool.description === '' ? '' : ` · ${tool.description}`}`).join('\n') || t('此 Server 没有工具。', 'This server has no tools.') });
         }, (error: unknown) => push({ kind: 'error', text: t(`无法读取 MCP 工具：${errorCode(error) ?? 'mcp_tool_list_failed'}`, `Could not read MCP tools: ${errorCode(error) ?? 'mcp_tool_list_failed'}`) }));
         return;
       }
-      push({ kind: 'error', text: t('用法：/mcp [list|add <名称> <程序> [参数…]|remove <名称>|trust <Server> <scope>|confirm|revoke <Server> <scope>|tools <Server>]', 'Usage: /mcp [list|add <name> <executable> [args…]|remove <name>|trust <server> <scope>|confirm|revoke <server> <scope>|tools <server>]') });
-      return;
     }
     if (name === 'extensions') {
-      // 空参数 split 得到 ['']，默认值只对 undefined 生效；显式归一为 list。
-      const [rawAction = '', target = ''] = argument.trim().split(/\s+/, 2);
-      const action = rawAction === '' ? 'list' : rawAction;
-      if (action !== 'list' && (action !== 'on' && action !== 'off' || target === '')) {
-        push({ kind: 'error', text: t('用法：/extensions [on|off <名称>]', 'Usage: /extensions [on|off <name>]') });
+      const command = parseExtensionsCommand(argument);
+      if ('code' in command) {
+        const [zh, en] = usageText(command.code);
+        push({ kind: 'error', text: t(zh, en) });
         return;
       }
       void (async () => {
         try {
-          if (action === 'on' || action === 'off') {
-            await client.request('extensions.set', { projectRoot: info.boundary, name: target, enabled: action === 'on' });
+          if ('name' in command) {
+            await client.request('extensions.set', { projectRoot: info.boundary, name: command.name, enabled: command.action === 'on' });
             push({ kind: 'meta', text: t(
-              `已${action === 'on' ? '启用' : '停用'} ${target}：下一次启动 Host 时生效。`,
-              `${target} was ${action === 'on' ? 'enabled' : 'disabled'}: it takes effect the next time the Host starts.`,
+              `已${command.action === 'on' ? '启用' : '停用'} ${command.name}：下一次启动 Host 时生效。`,
+              `${command.name} was ${command.action === 'on' ? 'enabled' : 'disabled'}: it takes effect the next time the Host starts.`,
             ) });
             return;
           }
@@ -1883,12 +1863,17 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (name === 'control') {
-      const [action = '', wanted = ''] = argument.trim().split(/\s+/, 2);
-      if (action === '') {
+      const command = parseControlCommand(argument);
+      if ('code' in command) {
+        const [zh, en] = usageText(command.code);
+        push({ kind: 'error', text: t(zh, en) });
+        return;
+      }
+      if (command.action === 'picker') {
         openPicker('control');
         return;
       }
-      if (action === 'create' && wanted === '') {
+      if (command.action === 'create') {
         if (info.boundary === undefined || info.boundary === '') {
           push({ kind: 'error', text: t('当前没有已选择的项目目录。', 'No project directory is selected.') });
           return;
@@ -1917,15 +1902,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         })();
         return;
       }
-      if (action !== 'list' && action !== 'copy' && action !== 'revoke') {
-        push({ kind: 'error', text: t('用法：/control [list|create|copy <id>|revoke <id>]', 'Usage: /control [list|create|copy <id>|revoke <id>]') });
-        return;
-      }
+      const wanted = command.action === 'copy' || command.action === 'revoke' ? command.id : '';
       void (async () => {
         try {
           const snapshot = await client.request('agent-control.list', {}) as AgentControlSnapshot;
           setControlSnapshot(snapshot);
-          if (action === 'list') {
+          if (command.action === 'list') {
             const lines = snapshot.grants.length === 0 ? [t('尚未创建外控授权。', 'No external Agent grants have been created.')]
               : snapshot.grants.map((grant) => {
                 const state = grant.revokedAt !== null ? t('已撤销', 'revoked')
@@ -1953,7 +1935,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             return;
           }
           const grant = matches[0]!;
-          if (action === 'copy') {
+          if (command.action === 'copy') {
             const copied = await copyToClipboard(agentMcpConfig(grant));
             push('program' in copied
               ? { kind: 'meta', text: t(`已复制授权 ${grant.id} 的本地 MCP 配置`, `Copied local MCP configuration for grant ${grant.id}`) }

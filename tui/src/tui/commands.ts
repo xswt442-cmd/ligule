@@ -122,6 +122,93 @@ export function findUiCommand(name: string): UiCommand | undefined {
   return UI_COMMANDS.find((command) => command.name === name);
 }
 
+/** `/mcp` 的信任范围；与 Host 的 `mcp.trust.*` 取值一致。 */
+export type McpTrustScope = 'session' | 'project' | 'user';
+
+const MCP_SCOPES: readonly McpTrustScope[] = ['session', 'project', 'user'];
+
+export type McpUsageCode = 'tui_mcp_add_usage' | 'tui_mcp_remove_usage' | 'tui_mcp_trust_usage'
+  | 'tui_mcp_revoke_usage' | 'tui_mcp_tools_usage' | 'tui_mcp_command_invalid';
+
+export type McpCommand =
+  | { readonly action: 'list' }
+  | { readonly action: 'confirm' }
+  | { readonly action: 'add'; readonly name: string; readonly executable: string; readonly args: readonly string[] }
+  | { readonly action: 'remove'; readonly name: string }
+  | { readonly action: 'trust' | 'revoke'; readonly server: string; readonly scope: McpTrustScope }
+  | { readonly action: 'tools'; readonly server: string }
+  | { readonly code: McpUsageCode };
+
+// `/mcp` 子命令的语法只在这里判定；多余参数与旧行为一致地被忽略。
+export function parseMcpCommand(argument: string): McpCommand {
+  const words = argument.trim().split(/\s+/).filter((word) => word !== '');
+  const action = words[0] ?? '';
+  const rest = words.slice(1);
+  if (action === '' || action === 'list') return { action: 'list' };
+  if (action === 'add') {
+    if (rest.length < 2) return { code: 'tui_mcp_add_usage' };
+    return { action: 'add', name: rest[0]!, executable: rest[1]!, args: rest.slice(2) };
+  }
+  if (action === 'remove') return rest.length === 0 ? { code: 'tui_mcp_remove_usage' } : { action: 'remove', name: rest[0]! };
+  if (action === 'confirm') return { action: 'confirm' };
+  if (action === 'tools') return rest.length === 0 ? { code: 'tui_mcp_tools_usage' } : { action: 'tools', server: rest[0]! };
+  if (action === 'trust' || action === 'revoke') {
+    const scope = rest[1] as McpTrustScope | undefined;
+    if (rest.length < 2 || scope === undefined || !MCP_SCOPES.includes(scope)) {
+      return { code: action === 'trust' ? 'tui_mcp_trust_usage' : 'tui_mcp_revoke_usage' };
+    }
+    return { action, server: rest[0]!, scope };
+  }
+  return { code: 'tui_mcp_command_invalid' };
+}
+
+export type ExtensionsCommand =
+  | { readonly action: 'list' }
+  | { readonly action: 'on' | 'off'; readonly name: string }
+  | { readonly code: 'tui_extensions_command_invalid' };
+
+export function parseExtensionsCommand(argument: string): ExtensionsCommand {
+  const [rawAction = '', target = ''] = argument.trim().split(/\s+/, 2);
+  const action = rawAction === '' ? 'list' : rawAction;
+  if (action === 'list') return { action };
+  if ((action === 'on' || action === 'off') && target !== '') return { action, name: target };
+  return { code: 'tui_extensions_command_invalid' };
+}
+
+export type ControlCommand =
+  | { readonly action: 'picker' }
+  | { readonly action: 'create' }
+  | { readonly action: 'list' }
+  | { readonly action: 'copy' | 'revoke'; readonly id: string }
+  | { readonly code: 'tui_control_command_invalid' };
+
+export function parseControlCommand(argument: string): ControlCommand {
+  const [action = '', wanted = ''] = argument.trim().split(/\s+/, 2);
+  if (action === '') return { action: 'picker' };
+  if (action === 'create') return wanted === '' ? { action } : { code: 'tui_control_command_invalid' };
+  if (action === 'list') return { action };
+  if (action === 'copy' || action === 'revoke') return { action, id: wanted };
+  return { code: 'tui_control_command_invalid' };
+}
+
+// 命令用法只有这一份；命令表的 usage 供帮助与补全，这里的完整写法用于拒绝时的提示。
+const COMMAND_USAGE = {
+  tui_mcp_add_usage: ['用法：/mcp add <名称> <程序> [参数…]', 'Usage: /mcp add <name> <executable> [args…]'],
+  tui_mcp_remove_usage: ['用法：/mcp remove <名称>', 'Usage: /mcp remove <name>'],
+  tui_mcp_trust_usage: ['用法：/mcp trust <Server> <session|project|user>', 'Usage: /mcp trust <server> <session|project|user>'],
+  tui_mcp_revoke_usage: ['用法：/mcp revoke <Server> <session|project|user>', 'Usage: /mcp revoke <server> <session|project|user>'],
+  tui_mcp_tools_usage: ['用法：/mcp tools <Server>', 'Usage: /mcp tools <server>'],
+  tui_mcp_command_invalid: ['用法：/mcp [list|add <名称> <程序> [参数…]|remove <名称>|trust <Server> <scope>|confirm|revoke <Server> <scope>|tools <Server>]', 'Usage: /mcp [list|add <name> <executable> [args…]|remove <name>|trust <server> <scope>|confirm|revoke <server> <scope>|tools <server>]'],
+  tui_extensions_command_invalid: ['用法：/extensions [on|off <名称>]', 'Usage: /extensions [on|off <name>]'],
+  tui_control_command_invalid: ['用法：/control [list|create|copy <id>|revoke <id>]', 'Usage: /control [list|create|copy <id>|revoke <id>]'],
+} as const;
+
+export type CommandUsageCode = keyof typeof COMMAND_USAGE;
+
+export function usageText(code: CommandUsageCode): readonly [string, string] {
+  return COMMAND_USAGE[code];
+}
+
 export type SubrunCommand =
   | { readonly action: 'list' }
   | { readonly action: 'status' | 'cancel'; readonly seq: number; readonly subrunId?: undefined }
