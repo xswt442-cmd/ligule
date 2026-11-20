@@ -1338,26 +1338,28 @@ async function verifySessionSnapshotLiveInterleave() {
     await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${awaySessionId}`)}) === true`, 10_000, 'interleave_reopen_away_failed');
     await evaluate(`${itemOf(owner)}.click(); true`);
     await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${owner}`)}) === true`, 10_000, 'interleave_reopen_owner_failed');
-    // 视图可能停在旧范围；回到最新后再判断记录是否完整显示。
-    await new Promise(resolvePromise => setTimeout(resolvePromise, 800));
-    if (await evaluate(`document.querySelector('.jump-latest') !== null`)) {
-      await clickWithMouse('.jump-latest', 'interleave_jump_latest_failed');
+    // 视图可能是虚拟化窗口且停在旧范围：反复回到最新并滚到底，直到记录进入渲染窗口。
+    const reopenDeadline = Date.now() + 20_000;
+    let reopened = 0;
+    while (Date.now() < reopenDeadline) {
+      reopened = await evaluate(occurrences());
+      if (reopened === 1) break;
+      if (await evaluate(`document.querySelector('.jump-latest') !== null`)) {
+        await evaluate(`(() => { document.querySelector('.jump-latest')?.click(); return true })()`);
+      }
+      await evaluate(`(() => { const conversation = document.querySelector('.conversation'); if (conversation !== null) conversation.scrollTop = conversation.scrollHeight; return true })()`);
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 300));
     }
-    await waitFor(occurrences() + ' === 1', 15_000, 'interleave_clean_reopen_lost_the_record').catch(async (error) => {
+    if (reopened !== 1) {
       const state = await evaluate(`(() => ({
         active: document.querySelector('.session-item.active')?.title ?? null,
         rows: document.querySelectorAll('.conversation .row').length,
         placeholder: document.querySelector('.conversation .placeholder')?.textContent ?? null,
         tail: document.querySelector('.conversation')?.innerText.slice(-500) ?? null,
       }))()`);
-      error.diagnostic = `interleave-reopen:${JSON.stringify(state)}`;
-      throw error;
-    });
-    const reopened = await evaluate(occurrences());
-    if (reopened !== 1) {
-      throw Object.assign(new Error('interleave_clean_reopen_mismatch'), {
-        code: 'interleave_clean_reopen_mismatch',
-        diagnostic: JSON.stringify({ reopened }),
+      throw Object.assign(new Error('interleave_clean_reopen_lost_the_record'), {
+        code: 'interleave_clean_reopen_lost_the_record',
+        diagnostic: `interleave-reopen:${JSON.stringify(state)}`,
       });
     }
     return 'session.read 快照帧被延迟 1.5 s；压住期间写入的记录只出现一次，重新打开后仍只出现一次';
