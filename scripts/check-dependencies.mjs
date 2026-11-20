@@ -3,6 +3,7 @@ import { existsSync, readFileSync, realpathSync, readdirSync } from 'node:fs';
 import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const config = join(repositoryRoot, 'dependency-cruiser.cjs');
@@ -57,8 +58,34 @@ async function writeFixture(root, path, source) {
 }
 
 // dependency-cruiser 无法解析 workspace 的 `@ligule/core/tui.js`（exports + 符号链接），
-// 这条边会以 unknown/couldNotResolve 出现，npm-dev 规则看不到它。这里直接扫描源码，
-// 保证 renderer 对 Core 的导入只能是 type-only；相对路径指到 core/src 或 core/dist 同样拒绝。
+// 这条边会以 unknown/couldNotResolve 出现，npm-dev 规则看不到它。这里用 TypeScript AST
+// 直接检查 renderer 源码：import/export/动态导入只要是运行时绑定，或指向 core/src、core/dist，
+// 都算违规；非静态的动态导入无法证明不是 Core，直接拒绝。
+function importIsTypeOnly(node) {
+  const clause = node.importClause;
+  if (clause === undefined) return false; // 副作用导入是运行时依赖
+  if (clause.isTypeOnly) return true;
+  if (clause.name !== undefined) return false; // default 绑定是值
+  const bindings = clause.namedBindings;
+  if (bindings === undefined) return false;
+  if (ts.isNamespaceImport(bindings)) return false;
+  return bindings.elements.length > 0 && bindings.elements.every(element => element.isTypeOnly);
+}
+
+function exportIsTypeOnly(node) {
+  if (node.isTypeOnly) return true;
+  const clause = node.exportClause;
+  if (clause === undefined) return false; // export * 是运行时依赖
+  if (ts.isNamespaceExport(clause)) return false;
+  return clause.elements.length > 0 && clause.elements.every(element => element.isTypeOnly);
+}
+
+function staticModuleText(node) {
+  if (node === undefined) return undefined;
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  return null;
+}
+
 function scanRendererCoreRuntimeImports(root) {
   const sourceRoot = join(root, 'desktop', 'frontend', 'src');
   if (!existsSync(sourceRoot)) return [];
@@ -67,7 +94,7 @@ function scanRendererCoreRuntimeImports(root) {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) walk(path);
-      else if (/\.tsx?$/.test(entry.name)) files.push(path);
+      else if (/\.(?:ts|tsx|mts|cts)$/.test(entry.name)) files.push(path);
     }
   };
   walk(sourceRoot);
@@ -79,18 +106,32 @@ function scanRendererCoreRuntimeImports(root) {
   };
   const violations = [];
   for (const path of files) {
-    const text = readFileSync(path, 'utf8')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/^\s*\/\/.*$/gm, '');
-    for (const match of text.matchAll(/\b(?:import|export)\b([^;'"]*?)from\s+['"]([^'"]+)['"]/g)) {
-      const clause = match[1];
-      const specifier = match[2];
-      const typeOnly = /^\s*type\b/.test(clause) || /\{\s*type\b/.test(clause);
-      if (!typeOnly && isCoreSpecifier(path, specifier)) violations.push(`${path}: ${specifier}`);
-    }
-    for (const match of text.matchAll(/\b(?:import|require)\s*\(\s*['"]([^'"]+)['"]\s*\)/g)) {
-      if (isCoreSpecifier(path, match[1])) violations.push(`${path}: ${match[1]} (dynamic)`);
-    }
+    const text = readFileSync(path, 'utf8');
+    const source = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true,
+      path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    const visit = (node) => {
+      if (ts.isImportDeclaration(node)) {
+        const specifier = staticModuleText(node.moduleSpecifier);
+        if (specifier !== null && specifier !== undefined && isCoreSpecifier(path, specifier) && !importIsTypeOnly(node)) {
+          violations.push(`${path}: ${specifier}`);
+        }
+      } else if (ts.isExportDeclaration(node) && node.moduleSpecifier !== undefined) {
+        const specifier = staticModuleText(node.moduleSpecifier);
+        if (specifier !== null && specifier !== undefined && isCoreSpecifier(path, specifier) && !exportIsTypeOnly(node)) {
+          violations.push(`${path}: ${specifier}`);
+        }
+      } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        const specifier = staticModuleText(node.arguments[0]);
+        if (specifier === null) violations.push(`${path}: computed dynamic import`);
+        else if (specifier !== undefined && isCoreSpecifier(path, specifier)) violations.push(`${path}: ${specifier} (dynamic)`);
+      } else if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'require') {
+        const specifier = staticModuleText(node.arguments[0]);
+        if (specifier === null) violations.push(`${path}: computed require`);
+        else if (specifier !== undefined && isCoreSpecifier(path, specifier)) violations.push(`${path}: ${specifier} (require)`);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
   }
   return violations;
 }
@@ -233,15 +274,36 @@ try {
   assertStatus(rendererDevelopmentRuntime, 1, 'desktop_renderer_dev_dependency_negative_fixture', 'desktop-renderer-no-runtime-dev-dependencies');
 
   // Renderer 只允许从 Core 取类型。dependency-cruiser 解析不了 workspace 的 Core 入口，
-  // 因此这里用同一份源码扫描验证：运行时导入（含相对 core/src、core/dist）必须被判违规。
+  // 因此这里用 TypeScript AST 验证：值导入、混合 type/value、副作用导入、动态导入、
+  // 相对 core/src 与 core/dist 都必须被判违规；纯类型形式必须通过。
   await writeFixture(fixtureRoot, 'desktop/frontend/src/core-runtime.ts', "import { createHost } from '@ligule/core/tui.js';\nexport const host = createHost;\n");
   await writeFixture(fixtureRoot, 'desktop/frontend/src/core-deep.ts', "export { createHost } from '../../../core/src/host/host.js';\n");
+  await writeFixture(fixtureRoot, 'desktop/frontend/src/core-mixed.ts', [
+    "import { type SessionSummary, createHost } from '@ligule/core/tui.js';",
+    "export { type Host as HostType, createHost as buildHost } from '../../../core/src/host/host.js';",
+    '',
+  ].join('\n'));
+  await writeFixture(fixtureRoot, 'desktop/frontend/src/core-side-effect.ts', "import '@ligule/core/tui.js';\n");
+  await writeFixture(fixtureRoot, 'desktop/frontend/src/core-dynamic.ts', [
+    "void import('@ligule/core/tui.js');",
+    "const name = '@ligule/core/tui.js';",
+    'void import(name);',
+    '',
+  ].join('\n'));
   const fixtureRuntime = scanRendererCoreRuntimeImports(fixtureRoot);
-  if (fixtureRuntime.length !== 2) {
-    throw new Error(`renderer_core_runtime_fixture: expected 2 violations, got ${JSON.stringify(fixtureRuntime)}`);
+  if (fixtureRuntime.length !== 7) {
+    throw new Error(`renderer_core_runtime_fixture: expected 7 violations, got ${JSON.stringify(fixtureRuntime)}`);
   }
   await writeFixture(fixtureRoot, 'desktop/frontend/src/core-runtime.ts', "import type { SessionSummary } from '@ligule/core/tui.js';\nexport type Summary = SessionSummary;\n");
   await writeFixture(fixtureRoot, 'desktop/frontend/src/core-deep.ts', "import type { Host } from '../../../core/src/host/host.js';\nexport type H = Host;\n");
+  await writeFixture(fixtureRoot, 'desktop/frontend/src/core-mixed.ts', [
+    "import { type SessionSummary } from '@ligule/core/tui.js';",
+    "export { type Host as HostType } from '../../../core/src/host/host.js';",
+    "export type Dynamic = import('@ligule/core/tui.js').SessionSummary;",
+    '',
+  ].join('\n'));
+  await writeFixture(fixtureRoot, 'desktop/frontend/src/core-side-effect.ts', "export type { SessionSummary } from '@ligule/core/tui.js';\n");
+  await writeFixture(fixtureRoot, 'desktop/frontend/src/core-dynamic.ts', "export type Dynamic = import('@ligule/core/tui.js').SessionSummary;\n");
   const fixtureTypeOnly = scanRendererCoreRuntimeImports(fixtureRoot);
   if (fixtureTypeOnly.length !== 0) {
     throw new Error(`renderer_core_type_only_fixture: expected 0 violations, got ${JSON.stringify(fixtureTypeOnly)}`);
@@ -265,7 +327,7 @@ try {
   ], fixtureRoot);
   assertStatus(typeCycle, 0, 'type_only_cycle_positive_fixture');
 
-  process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev, renderer runtime Core imports (including relative core/src), client deep core imports, internal host imports, domain imports of an assembly entry, wire imports of product assembly and runtime cycles rejected; Electron host API, Core entry -> host, the @ligule/core entry, renderer type-only imports of @ligule/core, type-only npm-dev imports/references and type-only cycles allowed\n');
+  process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev, renderer runtime Core imports via TypeScript AST (value, mixed, side-effect, dynamic, computed, relative core/src and core/dist), client deep core imports, internal host imports, domain imports of an assembly entry, wire imports of product assembly and runtime cycles rejected; Electron host API, Core entry -> host, the @ligule/core entry, renderer type-only imports of @ligule/core, type-only npm-dev imports/references and type-only cycles allowed\n');
 } finally {
   const currentTempRoot = await realpath(tempRoot);
   const currentFixtureRoot = await realpath(fixtureRoot);
