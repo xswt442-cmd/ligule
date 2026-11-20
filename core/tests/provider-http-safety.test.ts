@@ -72,6 +72,46 @@ test('Malformed SSE JSON does not expose response text through details or causes
   });
 });
 
+test('Aborting a request settles a stream that never sends data', async () => {
+  await endpoint((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.write(': keep-alive\n\n');
+  }, async (url) => {
+    const controller = new AbortController();
+    const response = await open(url, { method: 'POST', signal: controller.signal }, RETRY);
+    const body = response.body as NonNullable<Response['body']>;
+    const iteration = (async () => {
+      for await (const event of parseSse(body, { signal: controller.signal })) assert.fail(`unexpected event ${typeof event}`);
+    })();
+    setTimeout(() => controller.abort(), 100);
+    const settled = await Promise.race([
+      iteration.then(() => 'resolved' as const, (error: unknown) => error),
+      new Promise<'timed-out'>(resolve => setTimeout(() => resolve('timed-out'), 5_000)),
+    ]);
+    assert.notEqual(settled, 'timed-out', 'an aborted stream must not wait for the upstream to end');
+    assert.equal((settled as ProviderFailure).code, 'provider_cancelled');
+  });
+});
+
+test('parseSse settles a pending read when the stream itself ignores the abort signal', async () => {
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    cancel() { cancelled = true; },
+  });
+  const controller = new AbortController();
+  const iteration = (async () => {
+    for await (const event of parseSse(stream, { signal: controller.signal })) assert.fail(`unexpected event ${typeof event}`);
+  })();
+  setTimeout(() => controller.abort(), 50);
+  const settled = await Promise.race([
+    iteration.then(() => 'resolved' as const, (error: unknown) => error),
+    new Promise<'timed-out'>(resolve => setTimeout(() => resolve('timed-out'), 5_000)),
+  ]);
+  assert.notEqual(settled, 'timed-out', 'cancelling must settle the pending read even if the stream ignores the signal');
+  assert.equal((settled as ProviderFailure).code, 'provider_cancelled');
+  assert.equal(cancelled, true, 'the response body must be cancelled on abort');
+});
+
 test('context overflow remains recognizable without disclosing the upstream diagnostic', async () => {
   await endpoint((request, response) => {
     response.writeHead(400);

@@ -149,6 +149,17 @@ function abortFailure(
   return providerError('provider_cancelled', 'cancelled', context, { streamReceived });
 }
 
+// 取消时主动 cancel 响应体：某些运行时在等待永不结束的流时，不会及时让挂起的 read 落定，
+// 只等 AbortSignal 会让一轮取消一直停在“正在请求模型”。cancel 会让挂起的读取立即结束，
+// 随后由读取方按 signal.aborted 归类为 provider_cancelled。
+function cancelOnAbort(reader: ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal | null | undefined): () => void {
+  if (signal === undefined || signal === null) return () => {};
+  const cancel = (): void => { void reader.cancel().catch(() => undefined); };
+  if (signal.aborted) { cancel(); return () => {}; }
+  signal.addEventListener('abort', cancel, { once: true });
+  return () => signal.removeEventListener('abort', cancel);
+}
+
 async function httpFailureDetail(
   response: Response,
   context: ProviderResponseContext,
@@ -164,6 +175,7 @@ async function httpFailureDetail(
   let text = '';
   let remaining = 8192;
   let streamReceived = false;
+  const stopCancel = cancelOnAbort(reader, signal);
   try {
     while (remaining > 0) {
       const { done, value } = await reader.read();
@@ -179,6 +191,7 @@ async function httpFailureDetail(
     }
     return { detail: status, streamReceived };
   } finally {
+    stopCancel();
     try { await reader.cancel(); } catch { /* Preserve the safe HTTP classification. */ }
     reader.releaseLock();
   }
@@ -264,6 +277,7 @@ export async function readJson(response: Response, signal?: AbortSignal | null):
   const chunks: Uint8Array[] = [];
   let completed = false;
   let streamReceived = false;
+  const stopCancel = cancelOnAbort(reader, signal);
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -288,6 +302,7 @@ export async function readJson(response: Response, signal?: AbortSignal | null):
       detail: 'the response body could not be read completely', streamReceived, recoverable: false,
     });
   } finally {
+    stopCancel();
     if (!completed) {
       try { await reader.cancel(); } catch { /* Keep the response read classification. */ }
     }
@@ -311,11 +326,14 @@ export async function* parseSse(
   let streamReceived = false;
   const reader = body.getReader();
   async function* chunks(): AsyncGenerator<Uint8Array> {
+    const stopCancel = cancelOnAbort(reader, signal);
     let completed = false;
     try {
       for (;;) {
+        if (signal?.aborted) throw abortFailure(signal.reason, signal, context, streamReceived);
         const { done, value } = await reader.read();
         if (done) {
+          if (signal?.aborted) throw abortFailure(signal.reason, signal, context, streamReceived);
           completed = true;
           return;
         }
@@ -332,6 +350,7 @@ export async function* parseSse(
         detail: 'the response body could not be read completely', streamReceived, recoverable: false,
       });
     } finally {
+      stopCancel();
       if (!completed) {
         try {
           await reader.cancel();
