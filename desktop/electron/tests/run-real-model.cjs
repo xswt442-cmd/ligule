@@ -33,13 +33,23 @@ const hostResponses = [];
 let nextExternalSendResponseGate = null;
 let workspaceReadinessMs = null;
 
-// 会话快照帧的保持门：让 `session.read` 的回复在 Host 读取之后才抵达界面，
-// 以便在一个确定的窗口里观察快照与实时记录交错。
+// 会话快照帧的保持门：快照响应在 Host 读取之后、抵达界面之前被压住，
+// 由测试显式放行，这样“先实时、后旧快照”的交错顺序可以被确定性地证明。
 let sessionReadFrameHold = null;
 // 会话快照帧被真正压住过，说明交错路径被实际执行，而不是碰巧没有重叠。
 let sessionReadFrameHeld = false;
+let heldSessionReadFrame = null;
 const sessionReadFrameLog = [];
 const sessionReadRequestIds = new Set();
+
+async function waitForDriver(predicate, timeoutMs, failureCode) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 50));
+  }
+  throw Object.assign(new Error(failureCode), { code: failureCode });
+}
 
 function holdNextExternalSendResponse() {
   if (nextExternalSendResponseGate !== null) throw Object.assign(new Error('external_send_response_gate_already_set'), { code: 'external_send_response_gate_already_set' });
@@ -248,14 +258,15 @@ async function createApplication() {
             });
           }
           if (sessionReadFrameHold !== null && sessionReadRequestIds.delete(response.id)) {
-            const holdMs = sessionReadFrameHold.ms;
-            sessionReadFrameLog.push(`captured ${response.id} ${holdMs}`);
+            const hold = sessionReadFrameHold;
+            sessionReadFrameLog.push(`captured ${response.id}`);
             sessionReadFrameHold = null;
             sessionReadFrameHeld = true;
+            heldSessionReadFrame = response;
             heldResponse = true;
-            setTimeout(() => {
+            void hold.released.then(() => {
               if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.webContents.send('ligule:host-frame', frame);
-            }, holdMs);
+            });
           }
         }
       } catch {}
@@ -1139,10 +1150,20 @@ async function verifySessionSnapshotLiveInterleave() {
     await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${awaySessionId}`)}) === true`, 10_000, 'interleave_away_open_failed');
 
     // 从另一个会话切回时，Host 已读出的快照帧被压住；压住期间写入的记录只能经实时通知到达界面。
+    // 快照由测试显式放行，先证明它确实在记录落盘之前产生，再提交新记录。
     sessionReadFrameHeld = false;
-    sessionReadFrameHold = { ms: 1_500, sessionId: owner };
+    heldSessionReadFrame = null;
+    let releaseSnapshot;
+    sessionReadFrameHold = { sessionId: owner, released: new Promise(resolvePromise => { releaseSnapshot = resolvePromise; }) };
     sessionReadFrameLog.push(`armed owner=${owner}`);
     await evaluate(`${itemOf(owner)}.click(); true`);
+    await waitForDriver(() => sessionReadFrameHeld, 15_000, 'interleave_snapshot_frame_was_not_held');
+    if (JSON.stringify(heldSessionReadFrame?.result ?? null).includes(unique)) {
+      throw Object.assign(new Error('interleave_snapshot_already_contains_record'), {
+        code: 'interleave_snapshot_already_contains_record',
+        diagnostic: JSON.stringify({ held: sessionReadFrameLog.slice(-4) }),
+      });
+    }
     // 用接受回执确认这一条记录已落盘，再检查界面是否在同一次打开里显示它。
     const accepted = await requestHost('run.submit', { sessionId: owner, input: unique }, 20_000).catch(error => {
       error.diagnostic = `interleave-submit:${String(error.code ?? error.message)}`;
@@ -1161,54 +1182,51 @@ async function verifySessionSnapshotLiveInterleave() {
         }),
       });
     }
-    try {
-      // 切回会话时视图可能停在旧范围，虚拟化窗口不包含末尾；在等待期间反复回到最新。
-      // jump-latest 只滚动，不重新读取，因此不会掩盖“实时记录丢失”。
-      const deadline = Date.now() + 15_000;
-      let rendered = 0;
-      while (Date.now() < deadline) {
-        rendered = await evaluate(occurrences());
-        if (rendered === 1) break;
-        if (await evaluate(`document.querySelector('.jump-latest') !== null`)) {
-          await evaluate(`(() => { document.querySelector('.jump-latest')?.click(); return true })()`);
-        }
-        await new Promise(resolvePromise => setTimeout(resolvePromise, 250));
+    // 打开期间界面停在“正在打开会话…”，实时事件不会先于快照渲染；记录此时不应提前出现。
+    if (await evaluate(occurrences()) !== 0) {
+      throw Object.assign(new Error('interleave_record_rendered_before_snapshot'), {
+        code: 'interleave_record_rendered_before_snapshot',
+        diagnostic: JSON.stringify({ held: sessionReadFrameLog.slice(-6) }),
+      });
+    }
+    if (!sessionReadFrameHeld) {
+      throw Object.assign(new Error('interleave_snapshot_frame_was_not_held'), {
+        code: 'interleave_snapshot_frame_was_not_held',
+        diagnostic: JSON.stringify({ log: sessionReadFrameLog.slice(-12) }),
+      });
+    }
+    // 记录是在快照生成之后落盘的；放行旧快照后，它仍必须出现且只出现一次。
+    releaseSnapshot();
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 500));
+    const deadline = Date.now() + 15_000;
+    let afterSnapshot = 0;
+    while (Date.now() < deadline) {
+      afterSnapshot = await evaluate(occurrences());
+      if (afterSnapshot === 1) break;
+      if (await evaluate(`document.querySelector('.jump-latest') !== null`)) {
+        await evaluate(`(() => { document.querySelector('.jump-latest')?.click(); return true })()`);
       }
-      if (rendered !== 1) {
-        throw Object.assign(new Error('interleave_live_record_not_rendered'), { code: 'interleave_live_record_not_rendered' });
-      }
-    } catch (error) {
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 250));
+    }
+    if (afterSnapshot !== 1) {
       const state = await evaluate(`(() => ({
         conversation: document.querySelector('.conversation')?.innerText.slice(-400) ?? null,
         rows: document.querySelectorAll('.conversation .row').length,
         events: window.__realModelFrames.filter(frame => frame.notify === 'event').length,
       }))()`);
-      error.diagnostic = `interleave-dom:${JSON.stringify(state)}`;
-      throw error;
+      throw Object.assign(new Error('interleave_live_record_not_rendered'), {
+        code: 'interleave_live_record_not_rendered',
+        diagnostic: `interleave-dom:${JSON.stringify(state)}; held:${JSON.stringify(sessionReadFrameLog.slice(-6))}`,
+      });
     }
     const summary = await waitForSessionIdle(30_000, 'interleave_turn_did_not_finish');
     assert.equal(summary.turns.at(-1)?.status, 'completed', 'interleave_turn_terminal_status_invalid');
-    // 保证被压住的快照帧已经抵达并应用。
-    await new Promise(resolvePromise => setTimeout(resolvePromise, 2_500));
-    if (!sessionReadFrameHeld) {
-      const view = await evaluate(`(() => ({
-        active: document.querySelector('.session-item.active')?.title ?? null,
-        tail: document.querySelector('.conversation')?.innerText.slice(-200) ?? null,
-      }))()`);
-      throw Object.assign(new Error('interleave_snapshot_frame_was_not_held'), {
-        code: 'interleave_snapshot_frame_was_not_held',
-        diagnostic: JSON.stringify({ log: sessionReadFrameLog.slice(-12), view }),
-      });
-    }
-    const afterSnapshot = await evaluate(occurrences());
-    if (afterSnapshot !== 1) {
-      const detail = await evaluate(`(() => ({
-        active: document.querySelector('.session-item.active')?.title ?? null,
-        rows: [...document.querySelectorAll('.conversation .row')].slice(-8).map(row => row.textContent.slice(0, 90)),
-      }))()`);
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 800));
+    const settled = await evaluate(occurrences());
+    if (settled !== 1) {
       throw Object.assign(new Error('interleave_stale_snapshot_mismatch'), {
         code: 'interleave_stale_snapshot_mismatch',
-        diagnostic: JSON.stringify({ afterSnapshot, held: sessionReadFrameLog.slice(-6), detail }),
+        diagnostic: JSON.stringify({ settled, held: sessionReadFrameLog.slice(-6) }),
       });
     }
 
@@ -1363,9 +1381,10 @@ async function runChecks() {
         return true;
       })()`);
       await waitFor(`document.querySelector('.composer-bar button.steer-button') !== null`, 5_000, 'steer_button_missing');
-      await clickWithMouse('.composer-bar button.steer-button', 'steer_button_not_clickable');
+      // 用 DOM click，避免按钮在审批卡片变化时重排导致坐标点击落空。
+      await evaluate(`(() => { document.querySelector('.composer-bar button.steer-button')?.click(); return true })()`);
       await waitFor(`document.body.innerText.includes('输入已加入当前运行')
-        || document.body.innerText.includes('Input added to the active run')`, 10_000, 'steer_acceptance_not_shown');
+        || document.body.innerText.includes('Input added to the active run')`, 20_000, 'steer_acceptance_not_shown');
       const summary = await waitForSessionIdle(30_000, 'steer_turn_did_not_finish');
       assert.equal(await require('node:fs/promises').access(target).then(() => true, () => false), false,
         'steering_did_not_cancel_the_pending_write_approval');
