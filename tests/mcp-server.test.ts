@@ -871,7 +871,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     }
     requests.push(body);
     const last = body.messages.at(-1);
-    const userText = body.messages.filter((message: { role: string }) => message.role === 'user').at(-1)?.content ?? '';
+    const userText = String(body.messages.filter((message: { role: string }) => message.role === 'user').at(-1)?.content ?? '');
     if (userText.includes('MCP_OPERATOR_DRAFT_GATE')) {
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'A separately inspectable provisional fragment.' } }] })}\n\n`);
