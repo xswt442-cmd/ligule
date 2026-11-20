@@ -78,6 +78,20 @@ module.exports = {
       to: { path: '^core/src/' },
     },
     {
+      // 领域模块只相互引用；装配入口（含 wire 类型的聚合）由入口自己组装。
+      name: 'core-domains-avoid-entry-imports',
+      severity: 'error',
+      from: { path: '^core/src/(kernel|session|tools|capability|model)/' },
+      to: { path: '^core/src/(index|tui|wire)[.]ts$' },
+    },
+    {
+      // wire 只描述协议形状，不引入 Host 活态或 native 能力，避免纯类型入口拉入产品装配。
+      name: 'wire-entry-avoids-product-assembly',
+      severity: 'error',
+      from: { path: '^core/src/wire[.]ts$' },
+      to: { path: '^core/src/(host|capability)/' },
+    },
+    {
       name: 'no-runtime-cycles',
       severity: 'error',
       from: {},

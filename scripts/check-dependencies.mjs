@@ -113,6 +113,31 @@ try {
   ], fixtureRoot);
   assertStatus(entryIntoHost, 0, 'core_entry_host_import_positive_fixture');
 
+  await writeFixture(fixtureRoot, 'core/src/kernel/leak.ts', "import { host } from '../index.js';\nexport const leaked = host;\n");
+  const domainIntoEntry = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'core/src/kernel/leak.ts',
+  ], fixtureRoot);
+  assertStatus(domainIntoEntry, 1, 'core_domain_entry_import_negative_fixture', 'core-domains-avoid-entry-imports');
+
+  await writeFixture(fixtureRoot, 'core/src/capability/component.ts', 'export const capability = (): void => {};\n');
+  await writeFixture(fixtureRoot, 'core/src/wire.ts', "import { capability } from './capability/component.js';\nexport type Wired = typeof capability;\n");
+  const wireIntoAssembly = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'core/src/wire.ts',
+  ], fixtureRoot);
+  assertStatus(wireIntoAssembly, 1, 'wire_product_assembly_negative_fixture', 'wire-entry-avoids-product-assembly');
+
+  await writeFixture(fixtureRoot, 'core/src/wire.ts', "import type { capability } from './capability/component.js';\nexport type Wired = typeof capability;\n");
+  const wireTypesOnly = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'core/src/wire.ts',
+  ], fixtureRoot);
+  assertStatus(wireTypesOnly, 1, 'wire_type_import_negative_fixture', 'wire-entry-avoids-product-assembly');
+
   await writeFixture(fixtureRoot, 'core/src/dev-runtime.ts', "import * as ts from 'typescript';\nexport const version = ts.version;\n");
   const developmentRuntime = dependencyCruiser([
     '--config', config,
@@ -186,7 +211,7 @@ try {
   ], fixtureRoot);
   assertStatus(typeCycle, 0, 'type_only_cycle_positive_fixture');
 
-  process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev, client deep core imports, internal host imports and runtime cycles rejected; Electron host API, Core entry -> host, the @ligule/core entry, type-only npm-dev imports/references and type-only cycles allowed\n');
+  process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev, client deep core imports, internal host imports, domain imports of an assembly entry, wire imports of product assembly and runtime cycles rejected; Electron host API, Core entry -> host, the @ligule/core entry, type-only npm-dev imports/references and type-only cycles allowed\n');
 } finally {
   const currentTempRoot = await realpath(tempRoot);
   const currentFixtureRoot = await realpath(fixtureRoot);
