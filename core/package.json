@@ -13,29 +13,25 @@
       "types": "./dist/tui.d.ts",
       "import": "./dist/tui.js"
     },
-    "./capability/*.js": {
-      "types": "./dist/capability/*.d.ts",
-      "import": "./dist/capability/*.js"
+    "./host/control.js": {
+      "types": "./dist/host/control.d.ts",
+      "import": "./dist/host/control.js"
     },
-    "./host/*.js": {
-      "types": "./dist/host/*.d.ts",
-      "import": "./dist/host/*.js"
+    "./host/mcp-server.js": {
+      "types": "./dist/host/mcp-server.d.ts",
+      "import": "./dist/host/mcp-server.js"
     },
-    "./kernel/*.js": {
-      "types": "./dist/kernel/*.d.ts",
-      "import": "./dist/kernel/*.js"
+    "./kernel/result.js": {
+      "types": "./dist/kernel/result.d.ts",
+      "import": "./dist/kernel/result.js"
     },
-    "./model/*.js": {
-      "types": "./dist/model/*.d.ts",
-      "import": "./dist/model/*.js"
+    "./kernel/workspace-trust.js": {
+      "types": "./dist/kernel/workspace-trust.d.ts",
+      "import": "./dist/kernel/workspace-trust.js"
     },
-    "./session/*.js": {
-      "types": "./dist/session/*.d.ts",
-      "import": "./dist/session/*.js"
-    },
-    "./tools/*.js": {
-      "types": "./dist/tools/*.d.ts",
-      "import": "./dist/tools/*.js"
+    "./session/atif.js": {
+      "types": "./dist/session/atif.d.ts",
+      "import": "./dist/session/atif.js"
     },
     "./modes/*": "./modes/*",
     "./package.json": "./package.json"
