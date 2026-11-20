@@ -244,12 +244,14 @@ export function DeliveryPanel({ client, sessionId, projectRoot, status, onOpenFi
 
   const loadCheckLogs = useCallback(async (runId: string, check: Record<string, unknown>) => {
     if (sessionId === null || typeof check.executionId !== 'string') return;
+    const generation = sessionGeneration.current;
     const key = JSON.stringify([runId, check.executionId]);
     try {
       const page = await client.call('execution.logs', {
         sessionId, runId, executionId: check.executionId,
         ...(checkLogs[key]?.cursor === undefined ? {} : { cursor: checkLogs[key]?.cursor }), limitBytes: 4096,
       }, 15_000) as Record<string, unknown>;
+      if (sessionGeneration.current !== generation) return;
       const events = Array.isArray(page.events) ? page.events.flatMap(value => {
         if (!object(value) || typeof value.text !== 'string' || typeof value.stream !== 'string') return [];
         return [{ stream: value.stream, text: value.text }];
@@ -261,6 +263,7 @@ export function DeliveryPanel({ client, sessionId, projectRoot, status, onOpenFi
         gap: current[key]?.gap === true || page.gap === true,
       } }));
     } catch (error) {
+      if (sessionGeneration.current !== generation) return;
       setCheckLogs(current => ({ ...current, [key]: { ...(current[key] ?? { events: [], hasMore: false, gap: false }),
         error: code(error) } }));
     }

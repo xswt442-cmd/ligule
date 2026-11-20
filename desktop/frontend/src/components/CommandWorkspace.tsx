@@ -113,6 +113,9 @@ export function CommandWorkspace({
   const actionBusy = useRef(new Set<string>());
   const logElement = useRef<HTMLDivElement | null>(null);
   const [copyStatus, setCopyStatus] = useState<'copied' | 'error' | null>(null);
+  // 面板、会话或 Host 重启后，仍在途的 `status.get` / `execution.*` 结果不再属于当前视图。
+  const viewGeneration = useRef(0);
+  useEffect(() => { viewGeneration.current += 1; }, [hostRevision, open, sessionId]);
 
   const visibleReferences = useMemo(() => references.filter(reference =>
     reference.sourceSessionId === sessionId || reference.operationSessionId === sessionId), [references, sessionId]);
@@ -134,6 +137,8 @@ export function CommandWorkspace({
 
   const refreshReference = useCallback(async (reference: WorkbenchCommandReference) => {
     const key = commandReferenceKey(reference);
+    const generation = viewGeneration.current;
+    const isCurrent = () => viewGeneration.current === generation;
     if (refreshing.current.has(key)) {
       refreshAgain.current.add(key);
       return;
@@ -147,6 +152,7 @@ export function CommandWorkspace({
           events?: { kind?: unknown; tool?: unknown; args?: unknown }[];
         };
         const execEvent = record.events?.find(event => event.kind === 'tool' && event.tool === 'exec');
+        if (!isCurrent()) return;
         const args = typeof execEvent?.args === 'object' && execEvent.args !== null && !Array.isArray(execEvent.args)
           ? execEvent.args as Record<string, unknown> : undefined;
         updateView(key, previous => ({
@@ -173,6 +179,7 @@ export function CommandWorkspace({
         || sessionStatus.operation.sourceSessionId !== reference.sourceSessionId) {
         throw Object.assign(new Error('operation_owner_mismatch'), { code: 'operation_owner_mismatch' });
       }
+      if (!isCurrent()) return;
       const received = outputFrom(logs.events);
       updateView(key, previous => ({
         ...previous,
@@ -189,8 +196,10 @@ export function CommandWorkspace({
         logError: typeof logs.unavailableReason === 'string' ? logs.unavailableReason : undefined,
       }));
     } catch (error) {
-      updateView(key, previous => ({ ...previous, state: previous.state === 'starting' ? 'unknown' : previous.state,
-        errorCode: code(error) }));
+      if (isCurrent()) {
+        updateView(key, previous => ({ ...previous, state: previous.state === 'starting' ? 'unknown' : previous.state,
+          errorCode: code(error) }));
+      }
     } finally {
       refreshing.current.delete(key);
       if (refreshAgain.current.delete(key)) void refreshReferenceRef.current(reference);
