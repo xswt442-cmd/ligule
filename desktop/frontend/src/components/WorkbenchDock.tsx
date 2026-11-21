@@ -35,7 +35,7 @@ export function WorkbenchDock({
       <div className="workbench-tablist" role="tablist" aria-label={t('工作台标签', 'Workbench tabs')}>
         {state.tabs.map(tab => <button key={tab.key} className="workbench-tab-item" type="button" role="tab"
           aria-selected={tab.key === state.activeKey} aria-controls="workbench-active-view" title={tab.title}
-          tabIndex={tab.key === state.activeKey ? 0 : -1}
+          tabIndex={tab.key === state.activeKey || (state.activeKey === null && tab.key === state.tabs[0]?.key) ? 0 : -1}
           data-active={tab.key === state.activeKey ? 'true' : undefined} onClick={() => onSelect(tab.key)}
           onKeyDown={event => {
             const currentIndex = state.tabs.findIndex(candidate => candidate.key === tab.key);
