@@ -53,7 +53,7 @@ import { clearSessionDraftIfCurrent, sessionDraftRevisionFor, updateSessionDraft
 import { Composer } from './components/Composer';
 import { CommandWorkspace } from './components/CommandWorkspace';
 import { SideChatDialog } from './components/SideChatDialog';
-import { MAX_SIDE_CHAT_CONTEXT_BYTES, sideChatContextBytes, sideChatPrompt, type SideChatSelection } from './side-chat';
+import { useSideChat } from './use-side-chat';
 import { ExternalSessionComposer, ExternalSessionControlPanel } from './components/ExternalSessionControlPanel';
 import type { MentionState } from './mentions';
 import type { PermissionConfirmations, PermissionTarget } from './permission-control';
@@ -344,11 +344,6 @@ export function App({ transport }: { transport: Transport }) {
   const allowSend = useRef(new Set<string>());
   const [status, setStatus] = useState<Status | null>(null);
   const [hostRevision, setHostRevision] = useState(0);
-  const [sideChatSelection, setSideChatSelection] = useState<SideChatSelection | null>(null);
-  const [sideChatDialog, setSideChatDialog] = useState<SideChatSelection | null>(null);
-  const [sideChatQuestion, setSideChatQuestion] = useState('');
-  const [sideChatBusy, setSideChatBusy] = useState(false);
-  const [sideChatError, setSideChatError] = useState<string | null>(null);
   const [modelViewRequest, setModelViewRequest] = useState<ModelViewRequest | null>(null);
   const modelViewRequestRef = useRef<ModelViewRequest | null>(null);
   useEffect(() => {
@@ -1442,111 +1437,10 @@ export function App({ transport }: { transport: Transport }) {
     return true;
   }, [client, projectRoot, refreshStatus]);
 
-  useEffect(() => {
-    let frame = 0;
-    const capture = () => {
-      if (frame !== 0) cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        frame = 0;
-        if (sideChatDialog !== null || sessionId === null || projectRoot === '') {
-          setSideChatSelection(null);
-          return;
-        }
-        const selection = window.getSelection();
-        const text = selection?.toString().trim() ?? '';
-        if (selection === null || selection.isCollapsed || selection.rangeCount !== 1 || text === ''
-          || sideChatContextBytes(text) > MAX_SIDE_CHAT_CONTEXT_BYTES) {
-          setSideChatSelection(null);
-          return;
-        }
-        const parentOf = (node: Node | null): Element | null => node instanceof Element ? node : node?.parentElement ?? null;
-        const start = parentOf(selection.anchorNode);
-        const end = parentOf(selection.focusNode);
-        const source = start?.closest<HTMLElement>('[data-side-chat-kind]') ?? null;
-        if (source === null || source !== end?.closest('[data-side-chat-kind]') || source.closest('.cm-editor') !== null) {
-          setSideChatSelection(null);
-          return;
-        }
-        let reference: SideChatSelection['source'] | undefined;
-        if (source.dataset.sideChatKind === 'event') {
-          const eventSeq = Number(source.dataset.sideChatSeq);
-          if (Number.isSafeInteger(eventSeq) && eventSeq >= 0) reference = { kind: 'event', eventSeq };
-        } else if (source.dataset.sideChatKind === 'file') {
-          const path = source.dataset.sideChatPath;
-          const version = source.dataset.sideChatVersion;
-          if (typeof path === 'string' && typeof version === 'string' && /^[a-f0-9]{16}$/iu.test(version)) {
-            reference = { kind: 'file', path, version };
-          }
-        } else if (source.dataset.sideChatKind === 'diff') {
-          const path = source.dataset.sideChatPath;
-          if (typeof path === 'string' && path !== '') reference = { kind: 'diff', path };
-        }
-        if (reference === undefined) {
-          setSideChatSelection(null);
-          return;
-        }
-        const bounds = selection.getRangeAt(0).getBoundingClientRect();
-        setSideChatSelection({ sessionId, projectRoot,
-          ...(reference.kind !== 'event' && status?.running === true && status.activeRunId !== null
-            && status.activeRunId !== undefined ? { sourceRunId: status.activeRunId } : {}),
-          text, source: reference,
-          left: Math.max(8, Math.min(window.innerWidth - 150, bounds.left)),
-          top: Math.max(8, Math.min(window.innerHeight - 42, bounds.bottom + 6)),
-        });
-      });
-    };
-    document.addEventListener('selectionchange', capture);
-    window.addEventListener('scroll', capture, true);
-    window.addEventListener('resize', capture);
-    return () => {
-      document.removeEventListener('selectionchange', capture);
-      window.removeEventListener('scroll', capture, true);
-      window.removeEventListener('resize', capture);
-      if (frame !== 0) cancelAnimationFrame(frame);
-    };
-  }, [projectRoot, sessionId, sideChatDialog, status?.activeRunId, status?.running]);
-
-  const createSideChat = useCallback(async () => {
-    const context = sideChatDialog;
-    const question = sideChatQuestion.trim();
-    const sourceSessionId = context?.sessionId ?? null;
-    const root = context?.projectRoot ?? '';
-    if (context === null || question === '' || sourceSessionId === null || root === '' || sideChatBusy) return;
-    setSideChatBusy(true);
-    setSideChatError(null);
-    try {
-      const request = {
-        sessionId: sourceSessionId,
-        sourceKind: context.source.kind,
-        selection: context.text,
-        ...(context.source.kind === 'event' ? { sourceEventSeq: context.source.eventSeq } : {
-          sourcePath: context.source.path,
-          ...(context.source.kind === 'file' ? { sourceVersion: context.source.version } : {}),
-          ...(context.sourceRunId === undefined ? {} : { sourceRunId: context.sourceRunId }),
-        }),
-      };
-      const created = await client.call('session.side.create', request, 30_000) as {
-        sessionId?: string; sourceSessionId?: string;
-      };
-      if (typeof created.sessionId !== 'string' || created.sessionId === '' || created.sourceSessionId !== sourceSessionId) {
-        throw Object.assign(new Error('side_session_response_invalid'), { code: 'side_session_response_invalid' });
-      }
-      const sourceLabel = context.source.kind === 'event' ? `Session event ${context.source.eventSeq}`
-        : context.source.kind === 'file' ? `file ${context.source.path}` : `Git diff ${context.source.path}`;
-      const prompt = sideChatPrompt(context.text, question, sourceLabel);
-      const opened = await openSession(created.sessionId, undefined, false, root);
-      if (opened !== true) throw Object.assign(new Error('side_session_open_failed'), { code: 'side_session_open_failed' });
-      setDraft(prompt, { root, id: created.sessionId });
-      openSideSessionResource(created.sessionId, sourceSessionId, root);
-      setSideChatDialog(null);
-      setSideChatQuestion('');
-      setSideChatSelection(null);
-    } catch (error) {
-      setSideChatError(code(error));
-    } finally {
-      setSideChatBusy(false);
-    }
-  }, [client, openSession, openSideSessionResource, setDraft, sideChatBusy, sideChatDialog, sideChatQuestion]);
+  // Side chat 的选区捕获、确认框与创建流程由 use-side-chat 持有；App 只传入当前会话与打开方式。
+  const sideChat = useSideChat({
+    client, sessionId, projectRoot, status, openSession, openSideSessionResource, setDraft,
+  });
 
   const sendSideConclusion = useCallback(async (sourceSessionId: string, sourceRunId: string, text: string, root: string) => {
     await client.call('session.open', { sessionId: sourceSessionId, projectRoot: root }, 15_000);
@@ -2737,15 +2631,10 @@ export function App({ transport }: { transport: Transport }) {
       </section>
     </main>
 
-    {sideChatSelection !== null && <button type="button" className="side-chat-selection-action"
-      style={{ left: sideChatSelection.left, top: sideChatSelection.top }}
+    {sideChat.selection !== null && <button type="button" className="side-chat-selection-action"
+      style={{ left: sideChat.selection.left, top: sideChat.selection.top }}
       onMouseDown={event => event.preventDefault()}
-      onClick={() => {
-        setSideChatDialog(sideChatSelection);
-        setSideChatSelection(null);
-        setSideChatQuestion('');
-        setSideChatError(null);
-      }}>{t('侧面询问', 'Ask about selection')}</button>}
+      onClick={sideChat.openDialog}>{t('侧面询问', 'Ask about selection')}</button>}
 
     {settings.workbench.rightOpen && <WorkbenchDock state={settings.workbench}
       activeTitle={activeWorkbenchTab?.title ?? null}
@@ -2821,10 +2710,10 @@ export function App({ transport }: { transport: Transport }) {
 
     {/* 面板收起后把焦点交回输入坞：面板自己那一个过滤框带着 `autoFocus`，它收掉之后没人可交，落在页面上就得从页头重新 Tab 过去。 */}
     {paletteOpen && <Palette commands={commands} onClose={() => { setPaletteOpen(false); composerRef.current?.focus(); }} />}
-    {sideChatDialog !== null && <SideChatDialog context={sideChatDialog} question={sideChatQuestion} busy={sideChatBusy}
-      error={sideChatError} onQuestion={setSideChatQuestion}
-      onClose={() => { if (!sideChatBusy) { setSideChatDialog(null); setSideChatError(null); } }}
-      onCreate={() => void createSideChat()} />}
+    {sideChat.dialog !== null && <SideChatDialog context={sideChat.dialog} question={sideChat.question} busy={sideChat.busy}
+      error={sideChat.error} onQuestion={sideChat.setQuestion}
+      onClose={sideChat.closeDialog}
+      onCreate={() => void sideChat.create()} />}
     {settingsOpen && <SettingsDialog
       initialSection={settingsSection}
       client={client}
