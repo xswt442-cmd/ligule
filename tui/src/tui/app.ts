@@ -16,6 +16,9 @@ import { errorCode, errorMessage } from './error-text.js';
 import { useIntegrationCommands } from './handlers/integrations.js';
 import { useConfigCommands } from './handlers/config.js';
 import { useInfoCommands } from './handlers/info.js';
+import { useRunControlCommands } from './handlers/run-control.js';
+import { queuedLine } from './queue-text.js';
+import { clearCancelledLocalQuestion } from './local-question.js';
 import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
 import { collectTranscriptPages } from './transcript-pages.js';
 import { VERSION } from '../version.js';
@@ -500,15 +503,6 @@ interface QuestionState {
   readonly external?: boolean;
 }
 
-export function clearCancelledLocalQuestion<T extends { readonly id: string; readonly external?: boolean }>(
-  current: T | null,
-  requestId: string | undefined,
-  cancelledInteractions: number,
-): T | null {
-  if (requestId === undefined || cancelledInteractions < 1 || current?.external === true || current?.id !== requestId) return current;
-  return null;
-}
-
 // 将命令表和纯函数导出，供测试及其他界面逻辑使用。
 export { SESSION_ROWS, UI_COMMANDS, answerOf, candidatesOf, describeChange, displayWidth, findLines, findUiCommand, insertMention, mentionToken, parseExecCommand, parsePresetCommand, parseSubrunCommand, parseToolCommand, resolveSessionId, routeInput, sessionLines } from './commands.js';
 export { activeRunBudgetSegment, buildStatusLine, contextSegment } from './status-line.js';
@@ -518,6 +512,8 @@ export { markdownLines } from './markdown.js';
 export { editDraft, isTypingRun } from './draft.js';
 
 export { foldText } from './message-format.js';
+export { queuedLine } from './queue-text.js';
+export { clearCancelledLocalQuestion } from './local-question.js';
 
 export { capabilityOf, projectRecord, resultParts };
 
@@ -635,11 +631,6 @@ function approvalBody(tool: string, args: Record<string, unknown>, locale: Local
     ...(change.before === '' ? [] : [t('原内容:', 'Before:'), ...marked(change.before, '-')]),
     ...(change.after === '' ? [] : [t('新内容:', 'After:'), ...marked(change.after, '+')]),
   ].join('\n');
-}
-
-// 队列预览截短为单行，避免长消息撑开输入区。
-export function queuedLine(text: string, limit = 64): string {
-  return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
 // 问题卡显示选项和自由回答。`undefined` 表示尚未回答，`null` 表示已提交空答复。
@@ -1659,6 +1650,17 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const infoCommands = useInfoCommands({ client, sessionId, setStatus, push, t, locale });
 
+  const clearCancelledQuestion = useCallback((requestId: string, cancelled: number) => {
+    setQuery((current) => clearCancelledLocalQuestion(current, requestId, cancelled));
+  }, []);
+
+  const runControlCommands = useRunControlCommands({
+    client, projectRoot: info.boundary, sessionId, externalControl,
+    pendingQuestionId: externalControl || query?.external === true ? undefined : query?.id,
+    clearCancelledQuestion, queue, queuePaused, setQueue, setQueuePaused,
+    activeQuestion, inputNow, resetOrdinaryDraft, push, t,
+  });
+
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (integrationCommands.handle(name, argument)) return;
@@ -2209,93 +2211,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       push({ kind: 'meta', text: `${action} = ${formatKeys(spec)} · ${locale === 'en' ? ENGLISH_LABELS[action] : binding.label}` });
       return;
     }
-    if (name === 'queue') {
-      // 队列由界面暂存；此命令只负责继续发送或将消息收回草稿，不修改会话记录。
-      const [action, ordinal] = argument.split(/\s+/);
-      if (action === undefined || action === '' || action === 'list') {
-        push({ kind: 'meta', text: queue.length === 0 ? t('队列为空', 'Queue is empty')
-          : [
-            t(`${queue.length} 条待发送（${queuePaused ? '已暂停；/queue continue 继续' : '本轮结束后依次发送'}）：`, `${queue.length} queued (${queuePaused ? 'paused; /queue continue to resume' : 'sends after this turn'}):`),
-            ...queue.map((item, index) => `${index + 1} · ${queuedLine(item)}`),
-          ].join('\n') });
-        return;
-      }
-      if (action === 'pause' || action === 'continue') {
-        setQueuePaused(action === 'pause');
-        push({ kind: 'meta', text: action === 'pause'
-          ? t(`队列已暂停：${queue.length} 条待发送`, `Queue paused: ${queue.length} pending`)
-          : queue.length === 0 ? t('队列为空', 'Queue is empty')
-            : t(`队列已继续：${queue.length} 条待发送`, `Queue resumed: ${queue.length} pending`) });
-        return;
-      }
-      // 将收回的消息放回草稿，保留用户输入。
-      // 命令已从草稿中移除，因此恢复后的草稿不会与命令文本拼接。
-      if (action === 'drop') {
-        const wanted = ordinal === undefined ? queue.length : Number(ordinal);
-        const at = wanted - 1;
-        if (!Number.isInteger(wanted) || at < 0 || at >= queue.length) {
-          push({ kind: 'error', text: t(`队列编号无效，当前有 ${queue.length} 条消息`, `Invalid queue index; ${queue.length} messages queued`) });
-          return;
-        }
-        const recovered = [activeQuestion.current === undefined ? '' : inputNow.current.draft, queue[at]].filter(Boolean).join('\n\n');
-        setQueue((current) => current.filter((_, index) => index !== at));
-        resetOrdinaryDraft(recovered);
-        push({ kind: 'meta', text: t(`消息 ${at + 1} 已移回草稿`, `Message ${at + 1} moved back to draft`) });
-        return;
-      }
-      if (action === 'clear') {
-        if (queue.length === 0) {
-          push({ kind: 'meta', text: t('队列为空', 'Queue is empty') });
-          return;
-        }
-        const recovered = [activeQuestion.current === undefined ? '' : inputNow.current.draft, ...queue].filter(Boolean).join('\n\n');
-        setQueue([]);
-        setQueuePaused(false);
-        resetOrdinaryDraft(recovered);
-        push({ kind: 'meta', text: t(`已将 ${queue.length} 条消息移回草稿`, `Moved ${queue.length} messages back to draft`) });
-        return;
-      }
-      push({ kind: 'error', text: t('用法：/queue list|pause|continue|drop <序号>|clear', 'Usage: /queue list|pause|continue|drop <n>|clear') });
-      return;
-    }
-    if (name === 'steer') {
-      const input = argument.trim();
-      if (input === '') {
-        push({ kind: 'error', text: t('用法：/steer <文字>', 'Usage: /steer <text>') });
-        return;
-      }
-      const pendingQuestionId = externalControl || query?.external === true ? undefined : query?.id;
-      void (async () => {
-        try {
-          const current = externalControl
-            ? await client.request('session.control', {
-              projectRoot: info.boundary ?? '', sessionId, request: { action: 'configuration' },
-            }) as unknown as TuiStatus
-            : await client.request('status.get', { sessionId });
-          const runId = current.activeRunId;
-          if (typeof runId !== 'string' || runId === '') {
-            throw Object.assign(new Error('run_not_running'), { code: 'run_not_running' });
-          }
-          const accepted = externalControl
-            ? await client.request('session.control', {
-              projectRoot: info.boundary ?? '', sessionId, request: { action: 'steer', runId, input },
-            })
-            : await client.request('run.steer', { sessionId, runId, input });
-          const pendingCount = typeof accepted.pendingCount === 'number' ? accepted.pendingCount : 0;
-          const cancelledInteractions = typeof accepted.cancelledInteractions === 'number' ? accepted.cancelledInteractions : 0;
-          if (cancelledInteractions > 0 && pendingQuestionId !== undefined) {
-            setQuery((current) => clearCancelledLocalQuestion(current, pendingQuestionId, cancelledInteractions));
-          }
-          push({ kind: 'meta', text: t(
-            `输入已加入当前运行，待应用 ${pendingCount} 条${cancelledInteractions > 0 ? `；已取消 ${cancelledInteractions} 个等待答复` : ''}`,
-            `Input added to the active run; ${pendingCount} pending${cancelledInteractions > 0 ? `; cancelled ${cancelledInteractions} pending interactions` : ''}`,
-          ) });
-        } catch (error) {
-          push({ kind: 'error', text: t(`当前运行未收到输入：${errorCode(error) ?? 'run_steer_failed'}`, `The active run did not receive the input: ${errorCode(error) ?? 'run_steer_failed'}`) });
-        }
-      })();
-      return;
-    }
+    if (runControlCommands.handle(name, argument)) return;
     if (name === 'usage') {
       const parts = argument.trim().split(/\s+/u).filter((part) => part !== '');
       if (parts[0] === 'requests') {
@@ -3059,7 +2975,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, runControlCommands, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
