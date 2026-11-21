@@ -1598,7 +1598,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   });
 
   const sessionMaintenanceCommands = useSessionMaintenanceCommands({
-    client, sessionId, activeSession, setSessionName, setRunning, setStatus, status, push, t,
+    client, sessionId, activeSession, setSessionName, setRunning, setStatus, push, t,
   });
 
   const resourceCommands = useResourceCommands({ client, sessionId, activeSession, push, t });

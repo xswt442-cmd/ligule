@@ -13,13 +13,12 @@ export type SessionMaintenanceCommandDeps = {
   readonly setSessionName: (name: string) => void;
   readonly setRunning: (running: boolean) => void;
   readonly setStatus: (next: TuiStatus | null) => void;
-  readonly status: TuiStatus | null;
   readonly push: (...items: TranscriptItem[]) => void;
   readonly t: (zh: string, en: string) => string;
 };
 
 export function useSessionMaintenanceCommands(deps: SessionMaintenanceCommandDeps): { handle: (name: string, argument: string) => boolean } {
-  const { client, sessionId, activeSession, setSessionName, setRunning, setStatus, status, push, t } = deps;
+  const { client, sessionId, activeSession, setSessionName, setRunning, setStatus, push, t } = deps;
 
   const handle = useCallback((name: string, argument: string): boolean => {
     if (name === 'rename' || name === 'archive' || name === 'unarchive') {
@@ -46,8 +45,6 @@ export function useSessionMaintenanceCommands(deps: SessionMaintenanceCommandDep
     if (name === 'compact') {
       void (async () => {
         const own = sessionId;
-        // 压缩会占用“运行中”标记：结束后回到压缩前的运行状态，不能把仍在跑的轮次标成空闲。
-        const wasRunning = status?.running === true;
         setRunning(true);
         try {
           // Host 负责调用模型生成摘要并写入检查点；TUI 显示成功或无法压缩的原因。
@@ -57,21 +54,24 @@ export function useSessionMaintenanceCommands(deps: SessionMaintenanceCommandDep
             push({ kind: 'error', text: t(`无法压缩上下文：${done.code}`, `Could not compact context: ${done.code}`) });
             return;
           }
-          setStatus(await client.request('status.get', { sessionId: own }).catch(() => null));
-          if (activeSession.current !== own) return;
           push({
             kind: 'meta',
             text: t(`已压缩记录 ${done.fromSeq}–${done.toSeq}：估算 token ${done.tokensBefore} → ${done.tokensAfter}，原文已保留`, `Compacted events ${done.fromSeq}–${done.toSeq}: estimated tokens ${done.tokensBefore} → ${done.tokensAfter}; original content preserved`),
           });
         } finally {
-          // 只恢复当前会话的标记；切换后的会话由各自的读取结果决定。
-          if (activeSession.current === own) setRunning(wasRunning);
+          // 运行标记以 Host 当前状态为准：期间结束的轮次不能被压缩前的快照重新标成运行中。
+          const latest = activeSession.current === own
+            ? await client.request('status.get', { sessionId: own }).catch(() => null)
+            : null;
+          if (activeSession.current !== own) return;
+          setStatus(latest);
+          setRunning(latest?.running === true);
         }
       })();
       return true;
     }
     return false;
-  }, [activeSession, client, push, sessionId, setRunning, setSessionName, setStatus, status, t]);
+  }, [activeSession, client, push, sessionId, setRunning, setSessionName, setStatus, t]);
 
   return { handle };
 }
