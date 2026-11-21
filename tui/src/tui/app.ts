@@ -3,7 +3,7 @@
 // 纯函数和命令表从此模块导出，供自动检查和界面复用。
 import { createElement as h, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, parseControlCommand, parseExecCommand, parsePresetCommand, parseSubrunCommand, parseToolCommand, resolveSessionId, routeInput, usageText } from './commands.js';
+import { answerOf, candidatesOf, describeChange, findUiCommand, insertMention, localizedCommand, mentionToken, parseControlCommand, parseExecCommand, parsePresetCommand, parseSubrunCommand, parseToolCommand, resolveSessionId, routeInput, usageText } from './commands.js';
 import { pushHistory } from '@ligule/core/tui.js';
 import { searchHistory } from './history.js';
 import { editDraft, isTypingRun, moveDraftCaret, type DraftState } from './draft.js';
@@ -18,6 +18,7 @@ import { useInfoCommands } from './handlers/info.js';
 import { useRunControlCommands } from './handlers/run-control.js';
 import { useViewCommands } from './handlers/view.js';
 import { useUsageCommands } from './handlers/usage.js';
+import { useSessionListCommands } from './handlers/session-list.js';
 import { queuedLine } from './queue-text.js';
 import { clearCancelledLocalQuestion } from './local-question.js';
 import { findRecord } from './record-find.js';
@@ -1624,6 +1625,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const usageCommands = useUsageCommands({ client, projectRoot: info.boundary, sessionId, activeSession, push, t, locale });
 
+  const sessionListCommands = useSessionListCommands({
+    client, projectRoot: info.boundary, sessionId, alive, activeSession, pickerRequest,
+    setSessionPicker, setDetail, setExpanded, setSearch, push, t, locale,
+  });
+
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (integrationCommands.handle(name, argument)) return;
@@ -1776,55 +1782,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           }
           finishSessionNavigation(lease);
         }
-      })();
-      return;
-    }
-    if (name === 'sessions') {
-      const token = pickerRequest.current;
-      const own = sessionId;
-      void (async () => {
-        // 会话列表由 Host 扫描，TUI 不直接访问记录目录。
-        const listed = await client.request('sessions.list', { projectRoot: info.boundary }).catch((error: unknown) => requestFailure(error, 'session_list_failed'));
-        if (!alive.current || activeSession.current !== own || pickerRequest.current !== token) return;
-        if ('code' in listed) {
-          push({ kind: 'error', text: t(`无法读取会话列表：${listed.code}`, `Could not list sessions: ${listed.code}`) });
-          return;
-        }
-        if (listed.sessions.length === 0) push({ kind: 'meta', text: t('此工作区暂无会话', 'No sessions in this workspace') });
-        else {
-          setDetail(null);
-          setExpanded(false);
-          setSearch(null);
-          setSessionPicker({ items: listed.sessions });
-        }
-      })();
-      return;
-    }
-    if (name === 'find') {
-      const wanted = argument.trim();
-      if (wanted === '') {
-        push({ kind: 'meta', text: t('请输入搜索内容：/find <文字>', 'Enter search text: /find <text>') });
-        return;
-      }
-      void (async () => {
-        // 搜索由 Host 扫描记录并返回会话和事件序号；TUI 不直接访问记录目录。
-        // 搜索当前会话时读取溢出文件中的完整内容，跨会话搜索只检查记录内的文本。
-        const [listed, deep] = await Promise.all([
-          client.request('sessions.search', { query: wanted, projectRoot: info.boundary }).catch((error: unknown) => requestFailure(error, 'session_search_failed')),
-          client.request('sessions.search', { query: wanted, sessionId }).catch((error: unknown) => requestFailure(error, 'session_search_failed')),
-        ]);
-        for (const answer of [listed, deep]) {
-          if ('code' in answer) push({ kind: 'error', text: t(`搜索失败：${answer.code}`, `Search failed: ${answer.code}`) });
-        }
-        if ('code' in listed && 'code' in deep) return;
-        const here = 'code' in deep ? [] : deep.hits;
-        const others = 'code' in listed ? [] : listed.hits.filter((hit) => hit.sessionId !== sessionId);
-        push({ kind: 'meta', text: here.length + others.length === 0
-          ? t(`没有找到“${wanted}”`, `No results for “${wanted}”`)
-          : [
-            ...(here.length === 0 ? [] : [t('当前会话：', 'Current session:'), ...findLines(here, '', locale)]),
-            ...(others.length === 0 ? [] : [t('其他会话：', 'Other sessions:'), ...findLines(others, sessionId, locale)]),
-          ].join('\n') });
       })();
       return;
     }
@@ -2132,6 +2089,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (runControlCommands.handle(name, argument)) return;
     if (viewCommands.handle(name, argument)) return;
     if (usageCommands.handle(name, argument)) return;
+    if (sessionListCommands.handle(name, argument)) return;
     if (name === 'rename' || name === 'archive' || name === 'unarchive') {
       // 会话名称和归档状态由 Host 写入记录，TUI 不维护第二份副本。
       const label = name === 'rename' ? { name: argument.trim() } : { archived: name === 'archive' };
@@ -2743,7 +2701,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, runControlCommands, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
+  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, runControlCommands, sessionId, sessionListCommands, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
