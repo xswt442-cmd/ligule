@@ -1,5 +1,5 @@
 // Side chat 的界面状态与异步创建：捕获选区、打开确认框、调用 Host 创建 side session 并切换前台。
-// 选区与目标会话绑定；创建期间的旧响应不会覆盖已切换的前台会话（由 openSession 的身份校验负责）。
+// 选区与目标会话绑定；创建期间的旧响应不会覆盖已切换的前台会话（由创建返回后的会话身份校验负责）。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { code, type Client } from './protocol';
 import { MAX_SIDE_CHAT_CONTEXT_BYTES, sideChatContextBytes, sideChatPrompt, type SideChatSelection } from './side-chat';
@@ -24,9 +24,11 @@ export function useSideChat(deps: {
   status: Status | null;
   openSession: (id: string, hit: undefined, reclaimQueue: boolean, askedRoot: string) => Promise<boolean | undefined>;
   openSideSessionResource: (sideSessionId: string, originSessionId: string, root: string) => void;
+  registerSideSessionResource: (sideSessionId: string, originSessionId: string, root: string) => void;
+  saveBackgroundDraft: (text: string, owner: { root: string; id: string }) => void;
   setDraft: (text: string, owner: { root: string; id: string }) => void;
 }): SideChatController {
-  const { client, sessionId, projectRoot, status, openSession, openSideSessionResource, setDraft } = deps;
+  const { client, sessionId, projectRoot, status, openSession, openSideSessionResource, registerSideSessionResource, saveBackgroundDraft, setDraft } = deps;
   const [selection, setSelection] = useState<SideChatSelection | null>(null);
   const [dialog, setDialog] = useState<SideChatSelection | null>(null);
   const [question, setQuestion] = useState('');
@@ -34,7 +36,7 @@ export function useSideChat(deps: {
   const [error, setError] = useState<string | null>(null);
   // 创建请求等待期间用户可能已切换前台：迟到的回执不能把前台强行切回 side 会话。
   const latestSession = useRef(sessionId);
-  latestSession.current = sessionId;
+  useEffect(() => { latestSession.current = sessionId; }, [sessionId]);
 
   useEffect(() => {
     let frame = 0;
@@ -130,8 +132,8 @@ export function useSideChat(deps: {
       const promptText = sideChatPrompt(context.text, prompt, sourceLabel);
       // 用户已离开发起会话：不切换前台，但已创建的 Side 会话与草稿仍要保留。
       if (latestSession.current !== sourceSessionId) {
-        setDraft(promptText, { root, id: created.sessionId });
-        openSideSessionResource(created.sessionId, sourceSessionId, root);
+        saveBackgroundDraft(promptText, { root, id: created.sessionId });
+        registerSideSessionResource(created.sessionId, sourceSessionId, root);
         setDialog(null);
         setQuestion('');
         setSelection(null);
@@ -149,7 +151,7 @@ export function useSideChat(deps: {
     } finally {
       setBusy(false);
     }
-  }, [busy, client, dialog, openSession, openSideSessionResource, question, setDraft]);
+  }, [busy, client, dialog, openSession, openSideSessionResource, question, registerSideSessionResource, saveBackgroundDraft, setDraft]);
 
   const openDialog = useCallback(() => {
     if (selection !== null) setDialog(selection);

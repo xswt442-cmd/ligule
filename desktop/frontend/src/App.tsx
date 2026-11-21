@@ -568,6 +568,14 @@ export function App({ transport }: { transport: Transport }) {
     draftState.current = next;
     setDraftState(next);
   }, []);
+  // 只为后台会话保存草稿，不替换当前输入框。
+  const saveBackgroundDraft = useCallback((text: string, owner: { root: string; id: string }) => {
+    const key = JSON.stringify([owner.root, owner.id]);
+    draftRevisions.current = updateSessionDraftRevision(draftRevisions.current, key, text);
+    unsavedInputs.current.set(key, {
+      ...unsavedInputs.current.get(key), root: owner.root, id: owner.id, draft: text,
+    });
+  }, []);
   const [prefsFailure, setPrefsFailure] = useState<string | null>(null);
   const [prefsDetails, setPrefsDetails] = useState('');
   const [prefsRevision, setPrefsRevision] = useState(0);
@@ -705,6 +713,16 @@ export function App({ transport }: { transport: Transport }) {
       } catch (error) { setWorkbenchError(code(error)); }
     });
   }, [applyWorkbenchState, leaveDock, t]);
+  // 后台回执只登记资源，不激活工作台页面，也不改变前台正在看的文件。
+  const registerSideSessionResource = useCallback((sideSessionId: string, originSessionId: string, root: string) => {
+    const previous = workbenchRef.current;
+    try {
+      const opened = openWorkbenchResource(previous,
+        { kind: 'side-session', projectRoot: root, sessionId: sideSessionId, originSessionId }, t('侧聊来源', 'Side chat source'));
+      applyWorkbenchState({ ...opened, rightOpen: previous.rightOpen, activeKey: previous.activeKey });
+      setWorkbenchError(null);
+    } catch (error) { setWorkbenchError(code(error)); }
+  }, [applyWorkbenchState, t]);
   const selectWorkbench = useCallback((key: string) => {
     leaveDock(() => applyWorkbenchState(selectWorkbenchTab(workbenchRef.current, key)));
   }, [applyWorkbenchState, leaveDock]);
@@ -1439,7 +1457,7 @@ export function App({ transport }: { transport: Transport }) {
 
   // Side chat 的选区捕获、确认框与创建流程由 use-side-chat 持有；App 只传入当前会话与打开方式。
   const sideChat = useSideChat({
-    client, sessionId, projectRoot, status, openSession, openSideSessionResource, setDraft,
+    client, sessionId, projectRoot, status, openSession, openSideSessionResource, registerSideSessionResource, saveBackgroundDraft, setDraft,
   });
 
   const sendSideConclusion = useCallback(async (sourceSessionId: string, sourceRunId: string, text: string, root: string) => {
