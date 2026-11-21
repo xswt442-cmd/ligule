@@ -16,6 +16,7 @@ Follow this file and the nearest module `AGENTS.md`. Current implementation and 
 - Use Node.js 24+ and pinned pnpm 12.9.1. Run `pnpm install --frozen-lockfile` and relevant tests; `pnpm test` is the full suite. Use `pnpm check-pack` and `pnpm verify-install` for CLI release changes. See [release procedures](docs/development/RELEASE.md) for Desktop and publication checks.
 - Core and TUI runtime TypeScript uses erasable syntax; avoid `enum`, `namespace`, and parameter properties. Keep package manifests, lockfile, engine declarations, and workflow versions consistent.
 - Keep generated binaries, `desktop/vendor/`, credentials, Session data, and temporary test output untracked. Preserve existing work; branch, commit, push, merge, restore, tag, and publish only with explicit authorization.
+- Start each commit subject with a Conventional Commit type: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `perf:`, `build:`, `ci:`, `chore:`, or `release:`. Add a scope in parentheses when it clarifies the area (`fix(tui):`). One commit carries one type; split unrelated changes into separate commits.
 - Document implemented behavior only. Keep Simplified Chinese and English guides aligned; do not duplicate source-owned details or add private paths and one-off verification logs to tracked documents.
 
 ## Module guides
