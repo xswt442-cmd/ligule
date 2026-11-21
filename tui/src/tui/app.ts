@@ -3,7 +3,7 @@
 // 纯函数和命令表从此模块导出，供自动检查和界面复用。
 import { createElement as h, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { answerOf, candidatesOf, describeChange, findUiCommand, insertMention, localizedCommand, mentionToken, parseControlCommand, parsePresetCommand, parseSubrunCommand, resolveSessionId, routeInput, usageText } from './commands.js';
+import { answerOf, candidatesOf, describeChange, findUiCommand, insertMention, localizedCommand, mentionToken, parseControlCommand, parseSubrunCommand, resolveSessionId, routeInput, usageText } from './commands.js';
 import { pushHistory } from '@ligule/core/tui.js';
 import { searchHistory } from './history.js';
 import { editDraft, isTypingRun, moveDraftCaret, type DraftState } from './draft.js';
@@ -21,6 +21,7 @@ import { useUsageCommands } from './handlers/usage.js';
 import { useSessionListCommands } from './handlers/session-list.js';
 import { useSessionMaintenanceCommands } from './handlers/session-maintenance.js';
 import { useResourceCommands } from './handlers/resource.js';
+import { usePresetCommands } from './handlers/preset.js';
 import { queuedLine } from './queue-text.js';
 import { clearCancelledLocalQuestion } from './local-question.js';
 import { findRecord } from './record-find.js';
@@ -46,7 +47,7 @@ import { createSessionNavigation, type SessionNavigation, type SessionNavigation
 import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionSummary, UsageSummary } from '@ligule/core/tui.js';
 import type { SessionControlSnapshot, SessionReadPage, SubrunReference, SubrunStatus } from '@ligule/core/wire.js';
 import type { AgentPresetPage, AgentPresetPreview } from '@ligule/core/tui.js';
-import type { McpTrustScope, PresetCommand, SubrunCommand, TemplateCommand } from './commands.js';
+import type { McpTrustScope, SubrunCommand, TemplateCommand } from './commands.js';
 import type { EditorOutcome } from './editor.js';
 import type { SavedInput } from './input-store.js';
 import type { BranchResult, CredentialStatus, Exported, LoopResult, ModelSelection, ModelService, PathListing, SearchHit } from '@ligule/core/tui.js';
@@ -329,7 +330,7 @@ interface TuiConfigResult extends Record<string, unknown> {
   readonly layers?: readonly { readonly layer: string; readonly version: string }[];
 }
 
-type TuiSubrunReference = SubrunReference & { readonly parentRunId: string };
+export type TuiSubrunReference = SubrunReference & { readonly parentRunId: string };
 
 type TuiSubrunStatus = TuiSubrunReference & Pick<SubrunStatus, 'state' | 'phase' | 'errorCode'>;
 
@@ -1627,6 +1628,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const resourceCommands = useResourceCommands({ client, sessionId, activeSession, push, t });
 
+  const presetCommands = usePresetCommands({ client, sessionId, activeSession, knownSubrunReferences, push, t });
+
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (integrationCommands.handle(name, argument)) return;
@@ -2089,6 +2092,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (sessionListCommands.handle(name, argument)) return;
     if (sessionMaintenanceCommands.handle(name, argument)) return;
     if (resourceCommands.handle(name, argument)) return;
+    if (presetCommands.handle(name, argument)) return;
     if (name === 'screen') {
       if (externalControl) {
         push({ kind: 'meta', text: t('外控会话的截图能力由独立 Grant 控制，请在外控授权中管理。', 'Screen capture for an externally controlled Session is managed by its separate grant.') });
@@ -2211,93 +2215,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       } else {
         void changePermission({ profile: target });
       }
-      return;
-    }
-    if (name === 'preset') {
-      const command: PresetCommand = parsePresetCommand(argument);
-      if ('code' in command) {
-        push({ kind: 'error', text: t(
-          `预设命令格式不正确：${command.code}。用法：/preset list；/preset preview <id>；/preset start <id> <任务>`,
-          `Invalid preset command: ${command.code}. Use /preset list, preview <id>, or start <id> <task>.`,
-        ) });
-        return;
-      }
-      const own = sessionId;
-      void (async () => {
-        if (command.action === 'list') {
-          const result = await client.request('preset.list', { sessionId: own, limit: 64 })
-            .catch((error: unknown) => requestFailure(error, 'preset_list_failed'));
-          if (activeSession.current !== own) return;
-          if ('code' in result) {
-            push({ kind: 'error', text: t(`无法列出任务预设：${result.code}`, `Could not list task presets: ${result.code}`) });
-            return;
-          }
-          if (result.presets.length === 0) {
-            push({ kind: 'meta', text: t('当前没有可用任务预设。', 'No task presets are available.') });
-            return;
-          }
-          const lines = result.presets.map(preset => preset.errorCode === undefined
-            ? `${preset.id} · ${preset.layer} · ${preset.description ?? ''}`
-            : `${preset.id} · ${preset.layer} · ${t(`无效：${preset.errorCode}`, `invalid: ${preset.errorCode}`)}`);
-          if (result.truncated) lines.push(t('列表有更多内容或达到扫描上限。', 'More entries exist or the scan limit was reached.'));
-          push({ kind: 'meta', text: lines.join('\n') });
-          return;
-        }
-        if (command.action === 'preview') {
-          const current = await client.request('status.get', { sessionId: own })
-            .catch((error: unknown) => requestFailure(error, 'status_read_failed'));
-          if ('code' in current) {
-            if (activeSession.current === own) push({ kind: 'error', text: t(`无法读取当前运行：${current.code}`, `Could not read the current run: ${current.code}`) });
-            return;
-          }
-          const result = await client.request('preset.preview', {
-            sessionId: own, presetId: command.presetId,
-            ...(typeof current.activeRunId === 'string' ? { parentRunId: current.activeRunId } : {}),
-          }).catch((error: unknown) => requestFailure(error, 'preset_preview_failed'));
-          if (activeSession.current !== own) return;
-          if ('code' in result) {
-            push({ kind: 'error', text: t(`无法预览预设：${result.code}`, `Could not preview preset: ${result.code}`) });
-            return;
-          }
-          const modeTools = result.mode.tools === '*' ? '*' : result.mode.tools.join(', ');
-          const modePrompt = result.mode.prompt === '*' ? '*' : result.mode.prompt.join(', ');
-          push({ kind: 'meta', text: [
-            `${result.presetId} · ${result.layer} · ${result.executable ? t('可在当前运行中启动', 'executable under the current run') : t('仅预览，需活动父任务才能启动', 'preview only; an active parent run is required')}`,
-            result.description,
-            t(`模式：${result.mode.name}；工具：${modeTools || '无'}；片段：${modePrompt || '无'}`, `Mode: ${result.mode.name}; tools: ${modeTools || 'none'}; prompt fragments: ${modePrompt || 'none'}`),
-            t(`权限上限：${result.permission.profile}；网络：${result.permission.network}`, `Permission ceiling: ${result.permission.profile}; network: ${result.permission.network}`),
-            t(`生成：${result.generation.outputTokens ?? '继承'} Token；思考：${result.generation.thinkingEffort ?? '继承'}`, `Generation: ${result.generation.outputTokens ?? 'inherited'} tokens; thinking: ${result.generation.thinkingEffort ?? 'inherited'}`),
-            t(`循环上限：${result.limits.loopIterations}；模型调用上限：${result.limits.modelCalls}`, `Loop limit: ${result.limits.loopIterations}; model-call limit: ${result.limits.modelCalls}`),
-            result.requiredChecks.length === 0 ? t('完成检查：无额外门槛', 'Completion checks: no additional gate')
-              : t(`完成检查：${result.requiredChecks.join(', ')}`, `Completion checks: ${result.requiredChecks.join(', ')}`),
-            result.narrowedFields.length === 0 ? '' : t(`被父运行收窄：${result.narrowedFields.join(', ')}`, `Narrowed by the parent run: ${result.narrowedFields.join(', ')}`),
-            result.instruction,
-          ].filter(line => line !== '').join('\n') });
-          return;
-        }
-        const current = await client.request('status.get', { sessionId: own })
-          .catch((error: unknown) => requestFailure(error, 'status_read_failed'));
-        if (activeSession.current !== own) return;
-        if ('code' in current || typeof current.activeRunId !== 'string') {
-          push({ kind: 'error', text: t('启动预设子任务需要一个当前活动的父任务。', 'Starting a preset child requires an active parent run.') });
-          return;
-        }
-        const result = await client.request('subrun.start', {
-          sessionId: own, parentRunId: current.activeRunId, task: command.task, presetId: command.presetId,
-        }).catch((error: unknown) => requestFailure(error, 'preset_start_failed'));
-        if (activeSession.current !== own) return;
-        if ('code' in result) {
-          push({ kind: 'error', text: t(`无法启动预设子任务：${result.code}`, `Could not start preset child: ${result.code}`) });
-          return;
-        }
-        knownSubrunReferences.current.set(`${own}\u0000${result.subrunId}`, result);
-        push({ kind: 'meta', text: t(
-          `已启动 ${command.presetId}：子任务 ${result.subrunId} · Session ${result.sessionId} · Run ${result.runId}`,
-          `Started ${command.presetId}: child ${result.subrunId} · Session ${result.sessionId} · Run ${result.runId}`,
-        ) });
-      })().catch((error: unknown) => {
-        if (activeSession.current === own) push({ kind: 'error', text: t(`预设操作失败：${errorCode(error) ?? 'preset_operation_failed'}`, `Preset operation failed: ${errorCode(error) ?? 'preset_operation_failed'}`) });
-      });
       return;
     }
     if (name === 'subrun') {
@@ -2511,7 +2428,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, resourceCommands, runControlCommands, sessionId, sessionListCommands, sessionMaintenanceCommands, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
+  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, presetCommands, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, resourceCommands, runControlCommands, sessionId, sessionListCommands, sessionMaintenanceCommands, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
