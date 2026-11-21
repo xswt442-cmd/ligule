@@ -15,6 +15,7 @@ import { providerDiagnosticText, runtimeFailureText } from './errors.js';
 import { errorCode, errorMessage } from './error-text.js';
 import { useIntegrationCommands } from './handlers/integrations.js';
 import { useConfigCommands } from './handlers/config.js';
+import { useInfoCommands } from './handlers/info.js';
 import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
 import { collectTranscriptPages } from './transcript-pages.js';
 import { VERSION } from '../version.js';
@@ -28,7 +29,7 @@ import { ApprovalPanel, buildApprovalLayout } from './approval-view.js';
 import { TUI_COLORS } from './ui-style.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
 import { CURRENT, ENGLISH_LABELS, ENGLISH_VIEWS, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
-import { activeRunBudgetSegment, buildStatusLine, contextSegment } from './status-line.js';
+import { buildStatusLine } from './status-line.js';
 import { controlPresets, textOf as chooseText, VIEW_REQUEST_METHOD, type Locale } from '@ligule/core/tui.js';
 import type { TerminalAction } from './keymap.js';
 import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type ControlWizardValues } from './control-wizard.js';
@@ -1656,10 +1657,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     client, sessionId, projectRoot: info.boundary, push, t, locale, openPicker, refreshStatus, changeThinking, setStatus,
   });
 
+  const infoCommands = useInfoCommands({ client, sessionId, setStatus, push, t, locale });
+
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (integrationCommands.handle(name, argument)) return;
     if (configCommands.handle(name, argument)) return;
+    if (infoCommands.handle(name, argument)) return;
     if (name === 'control') {
       const command = parseControlCommand(argument);
       if ('code' in command) {
@@ -2252,30 +2256,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         return;
       }
       push({ kind: 'error', text: t('用法：/queue list|pause|continue|drop <序号>|clear', 'Usage: /queue list|pause|continue|drop <n>|clear') });
-      return;
-    }
-    if (name === 'tools') {
-      void (async () => {
-        const current = await client.request('status.get', { sessionId }).catch(() => null);
-        setStatus(current);
-        push({ kind: 'meta', text: current === null ? t('无法读取状态', 'Could not read status') : t(`工具：${current.tools.join('、')}`, `Tools: ${current.tools.join(', ')}`) });
-      })();
-      return;
-    }
-    if (name === 'status') {
-      void (async () => {
-        const current = await client.request('status.get', { sessionId }).catch(() => null);
-        setStatus(current);
-        const context = contextSegment(current?.usage, locale);
-        const permission = current?.permission === undefined ? '' : t(
-          ` · 权限 ${current.permission.profile} · 网络 ${current.permission.network} · Shell ${current.permission.execution.available ? '可用' : `不可用（${current.permission.execution.code ?? '能力不足'}）`}`,
-          ` · permission ${current.permission.profile} · network ${current.permission.network} · Shell ${current.permission.execution.available ? 'available' : `unavailable (${current.permission.execution.code ?? 'capability limits'})`}`,
-        );
-        const task = activeRunBudgetSegment(current, locale);
-        push({ kind: 'meta', text: current === null ? t('无法读取状态', 'Could not read status')
-          : t(`工具模式 ${current.mode ?? '-'} · 审批 ${current.policy} · 连续拒绝 ${current.denials.consecutive} / 累计 ${current.denials.total} · ${current.eventCount} 条记录`, `Mode ${current.mode ?? '-'} · approvals ${current.policy} · denials ${current.denials.consecutive} consecutive / ${current.denials.total} total · ${current.eventCount} events`)
-            + permission + (context === '' ? '' : ` · ${context}`) + task });
-      })();
       return;
     }
     if (name === 'steer') {
@@ -3079,7 +3059,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
