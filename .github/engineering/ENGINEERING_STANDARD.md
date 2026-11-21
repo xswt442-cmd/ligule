@@ -19,7 +19,7 @@
 | 版本变化 | `CHANGELOG.md` | 已实现的重要变化、修复、兼容性与升级影响 |
 | 发布公告 | GitHub Releases | 从该 Tag 的 CHANGELOG 指定版本自动生成 |
 | 发布操作 | `docs/development/RELEASE.md` | 可重复的准备、发布、验收和回滚步骤 |
-| 项目架构 | `docs/development/ARCHITECTURE.zh-cn.md` / `.en.md` | 当前架构、职责、数据流、系统边界 |
+| 项目架构 | `docs/development/ARCHITECTURE.zh-CN.md` / `.en.md` | 当前架构、职责、数据流、系统边界 |
 | API（可选） | `docs/development/API.zh-CN.md` / `.en.md` | 接口契约、参数、错误与鉴权 |
 | 部署（可选） | `docs/development/DEPLOYMENT.zh-CN.md` / `.en.md` | 通用配置、部署和故障排查 |
 | 术语表（可选） | `docs/development/GLOSSARY.zh-CN.md` / `.en.md` | 专有名词、缩写、核心概念与命名 |
@@ -28,10 +28,27 @@
 | 本地临时材料 | `testplace/`（Git 忽略） | 本机讨论、实验、Agent 交接、草稿 |
 
 - API、DEPLOYMENT、GLOSSARY 等按需创建；不生成空文件。
-- 贡献指南可按需增加 `docs/development/CONTRIBUTING.zh-CN.md` / `.en.md`，只记录可复现操作。
+- 贡献指南放在 `.github/CONTRIBUTING.md`，只记录可复现操作。
 - 复杂项目需要设计决策记录时可按需引入 ADR，不能把一次性计划和调试流水变成正式架构说明。
 - `CLAUDE.md` 等工具专属入口尽量只链接 `AGENTS.md`，不复制规则。
 - 术语文件名为 GLOSSARY，不能拼成 GLOSSORY。
+
+### GitHub 社区健康文件
+
+GitHub 按固定文件名在 `.github/`、仓库根目录、`docs/` 查找下列文件，优先级依次降低。一个仓库只保留一份，避免链接指向不确定的位置。
+
+| 文件 | 标准位置 | 内容职责 |
+| --- | --- | --- |
+| `SECURITY.md` | `.github/SECURITY.md` | 受支持的版本、私密上报渠道、受理范围与处理节奏 |
+| `CONTRIBUTING.md` | `.github/CONTRIBUTING.md` | 分支、PR 正文、文档对、验证命令与发版权责 |
+| `CODE_OF_CONDUCT.md` | `.github/CODE_OF_CONDUCT.md` | 行为准则与执行联系人；确有社区治理需求时创建 |
+| `SUPPORT.md` | `.github/SUPPORT.md` | 求助渠道；Issues 已覆盖时无需创建 |
+
+这类文件由固定名字识别，属于单名文件：不受第 4 节 `.zh-CN.md` / `.en.md` 成对命名约束，不加入 `docs:check` 的文档对，也不进 CHANGELOG。需要双语时在单文件内写 `## 简体中文` 与 `## English` 两段，与 PR 模板一致。
+
+`SECURITY.md` 只写真实存在的联络方式。报告者先开一个不含技术细节的 issue 询问首选安全联系方式，维护者在该 issue 回复后续渠道，漏洞细节只在该渠道交换；不得把站内私信一类不存在的入口写成渠道。`受理范围` 段按该仓库实际的信任边界、守卫与凭据写；`CONTRIBUTING.md` 的验证命令、文档对声明位置与发版入口引用该仓库 `AGENTS.md` 里的真实条目。
+
+权威模板在 `templates/SECURITY.md` 与 `templates/CONTRIBUTING.md`。本维护仓 `.github/` 下的同名文件是字节一致的 GitHub 兼容副本，作为规范自身的示例；本仓是私有维护源，不是对外发行产品的仓库。`scripts/sync-community.mjs` 检查目标仓库的存放位置、必需章节与唯一性，默认只读；`--apply` 只为缺失的文件写入权威模板，从不覆盖已有副本，下游按本仓事实改写的内容因此得以保留。
 
 ## 3. Public Repo 内容准入
 
@@ -176,9 +193,10 @@ Aligned task filtering and pagination.
 - AGENTS 只记录本项目当前架构不变量、模块职责、所需测试和受控操作边界；复杂模块按需设置就近 AGENTS。
 - Agent 修改前读取当前文件和状态；除非用户明确授权，不切分支、不提交/推送、不部署、不改生产数据/凭据。
 - 改用户可见行为时同步相关权威文档和 CHANGELOG，避免同时编辑多处同一细节。
-- CI 至少校验相关构建/测试、文档路径与配对、CHANGELOG 双语章节、Tag 与版本一致。
+- CI 至少校验相关构建/测试、文档路径与配对、CHANGELOG 双语章节、Tag 与版本一致；社区健康文件校验存放位置、必需章节与权威模板的一致性，单名文件不参与双语文档对检查。
 - 可以增加对跟踪文本的私人路径、密钥与过程用语扫描，但要人工复核误报：测试夹具出现模拟路径不代表泄漏。
 - GitHub PR 与 Release 的自动验证不能证明生产已部署；生产发布及验收需按该项目批准流程完成。
+- 提交说明以 Conventional Commit 类型前缀开头：`feat:` / `fix:` / `docs:` / `test:` / `refactor:` / `perf:` / `build:` / `ci:` / `chore:` / `release:`；需要范围时写 `fix(paths):`，冒号后一句说明本次改动。一次提交只属于一个类型，跨主题拆开。
 
 ## 9. 适用性
 
