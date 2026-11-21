@@ -22,6 +22,13 @@ Core's package tests live under `core/tests/`, TUI tests under `tui/tests/`, and
 
 Tests are TypeScript (`*.test.ts`) and run with Node 24 type stripping; `pnpm build` typechecks the Core, TUI, integration, and benchmark projects. Shared Host fixtures live in `core/tests/helpers/`; TUI tests use the thin `tui/tests/helpers/tui-host.ts` adapter. A few platform runners and fixtures stay `.mjs` or `.cjs` where the Electron runtime, native shim, or external tool contract requires it.
 
+Documentation changes use the tracked skills under `.agents/skills/`: `mydocs` covers reader tasks, content ownership, and full-document consistency, while `myshuohua` covers formal technical Chinese. Run both checkers before review and fix every `error`; resolve each `warning` or state why the original wording stays:
+
+```sh
+node .agents/skills/mydocs/scripts/lint-docs.mjs README.md README.en.md docs
+node .agents/skills/myshuohua/scripts/lint-shuohua.mjs README.md README.en.md docs
+```
+
 The MCP integration in `tests/mcp-server.test.ts` uses a real SDK stdio client, a local HTTP model endpoint, persistent Session records, Policy decisions and child processes. Run it directly with `node --experimental-strip-types --test --import ./tests/hooks/isolated-data-root.ts tests/mcp-server.test.ts`. The standalone client in `tests/helpers/mcp-control.mjs` accepts explicit installed CLI and SDK paths so the same control calls can be checked outside the checkout. See the [Agent Control via MCP guide](../agent-control/guide.en.md) for tool and permission semantics. A deterministic model endpoint does not count as a real external model service test.
 
 ## Desktop development

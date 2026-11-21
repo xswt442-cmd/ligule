@@ -38,13 +38,13 @@ npm install -g ligule
 
 ## Agent 框架
 
-Ligule 的 CLI/TUI 与桌面版共用 [Agent Core](core/README.md)。Node.js Host 组织模型、配置和 Session，Kernel 对工具参数、目标及 Policy 执行校验；会话记录支持恢复，未确定结果的工具调用不会自动重放。Electron 桌面版以独立 Host 进程复用相同的执行语义。
+Ligule 的 CLI/TUI 与桌面版共用 [Agent Core](core/README.md)。Node.js Host 组织模型、配置和 Session，Kernel 对工具参数、目标及 Policy 执行校验。会话记录支持恢复，未确定结果的工具调用不会自动重放。Electron 桌面版以独立 Host 进程复用相同的执行语义。
 
 ## 快速开始
 
 CLI 与 TUI 需要 Node.js 24 或更新版本。安装后，在项目目录执行单次任务：
 
-首次运行前，请先配置模型服务和凭据；CLI/TUI 的配置步骤见[模型服务配置](docs/guide.zh-CN.md#配置模型服务)，桌面版可在「设置 → 模型服务」中添加。
+首次运行前，请先配置模型服务和凭据。CLI/TUI 的配置步骤见[模型服务配置](docs/guide.zh-CN.md#配置模型服务)，桌面版可在「设置 → 模型服务」中添加。
 
 ```sh
 cd /path/to/your-project
