@@ -3,7 +3,7 @@
 // 纯函数和命令表从此模块导出，供自动检查和界面复用。
 import { createElement as h, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { answerOf, candidatesOf, describeChange, findUiCommand, insertMention, localizedCommand, mentionToken, parseControlCommand, parseSubrunCommand, resolveSessionId, routeInput, usageText } from './commands.js';
+import { answerOf, candidatesOf, describeChange, findUiCommand, insertMention, localizedCommand, mentionToken, parseControlCommand, resolveSessionId, routeInput, usageText } from './commands.js';
 import { pushHistory } from '@ligule/core/tui.js';
 import { searchHistory } from './history.js';
 import { editDraft, isTypingRun, moveDraftCaret, type DraftState } from './draft.js';
@@ -22,9 +22,9 @@ import { useSessionListCommands } from './handlers/session-list.js';
 import { useSessionMaintenanceCommands } from './handlers/session-maintenance.js';
 import { useResourceCommands } from './handlers/resource.js';
 import { usePresetCommands } from './handlers/preset.js';
+import { useSubrunCommands } from './handlers/subrun.js';
 import { queuedLine } from './queue-text.js';
 import { clearCancelledLocalQuestion } from './local-question.js';
-import { findRecord } from './record-find.js';
 import { isRecord } from './guards.js';
 import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
 import { collectTranscriptPages } from './transcript-pages.js';
@@ -47,7 +47,7 @@ import { createSessionNavigation, type SessionNavigation, type SessionNavigation
 import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionSummary, UsageSummary } from '@ligule/core/tui.js';
 import type { SessionControlSnapshot, SessionReadPage, SubrunReference, SubrunStatus } from '@ligule/core/wire.js';
 import type { AgentPresetPage, AgentPresetPreview } from '@ligule/core/tui.js';
-import type { McpTrustScope, SubrunCommand, TemplateCommand } from './commands.js';
+import type { McpTrustScope, TemplateCommand } from './commands.js';
 import type { EditorOutcome } from './editor.js';
 import type { SavedInput } from './input-store.js';
 import type { BranchResult, CredentialStatus, Exported, LoopResult, ModelSelection, ModelService, PathListing, SearchHit } from '@ligule/core/tui.js';
@@ -332,7 +332,7 @@ interface TuiConfigResult extends Record<string, unknown> {
 
 export type TuiSubrunReference = SubrunReference & { readonly parentRunId: string };
 
-type TuiSubrunStatus = TuiSubrunReference & Pick<SubrunStatus, 'state' | 'phase' | 'errorCode'>;
+export type TuiSubrunStatus = TuiSubrunReference & Pick<SubrunStatus, 'state' | 'phase' | 'errorCode'>;
 
 interface TuiPresetPreview extends Pick<AgentPresetPreview, 'presetId' | 'layer' | 'description'> {
   readonly instruction: string;
@@ -519,6 +519,7 @@ export { queuedLine } from './queue-text.js';
 export { clearCancelledLocalQuestion } from './local-question.js';
 export { findRecord } from './record-find.js';
 export { branchOf } from './branch-reference.js';
+export { subrunReferenceOf } from './subrun-reference.js';
 export { executionReferenceOf } from './execution-reference.js';
 export { requestDiagnosticLines } from './usage-lines.js';
 
@@ -526,18 +527,6 @@ export { capabilityOf, projectRecord, resultParts };
 
 // 上下文状态显示当前投影估算、模型窗口和是否超过压力线。窗口未知时隐藏整段状态。
 
-
-export function subrunReferenceOf(record: TuiRecord | undefined): TuiSubrunReference | null {
-  if (record?.kind !== 'tool' || record.tool !== 'subagent_start') return null;
-  const result = isRecord(record.result) ? record.result : undefined;
-  const content = isRecord(result?.content) ? result.content : undefined;
-  const parentRunId = typeof record.runId === 'string' ? record.runId : content?.parentRunId;
-  const subrunId = content?.subrunId;
-  const sessionId = content?.sessionId;
-  const runId = content?.runId;
-  if (typeof parentRunId !== 'string' || typeof subrunId !== 'string' || typeof sessionId !== 'string' || typeof runId !== 'string') return null;
-  return { parentRunId, subrunId, sessionId, runId };
-}
 
 // `/sub` 使用父记录中的事件序号定位派生结果，并从结果中读取支线会话 ID。
 // 标题注明当前显示的是主会话还是派生会话，因为两者使用各自的事件序号。
@@ -1619,6 +1608,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const presetCommands = usePresetCommands({ client, sessionId, activeSession, knownSubrunReferences, push, t });
 
+  const subrunCommands = useSubrunCommands({ client, sessionId, activeSession, knownSubrunReferences, push, t });
+
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (integrationCommands.handle(name, argument)) return;
@@ -2082,6 +2073,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (sessionMaintenanceCommands.handle(name, argument)) return;
     if (resourceCommands.handle(name, argument)) return;
     if (presetCommands.handle(name, argument)) return;
+    if (subrunCommands.handle(name, argument)) return;
     if (name === 'screen') {
       if (externalControl) {
         push({ kind: 'meta', text: t('外控会话的截图能力由独立 Grant 控制，请在外控授权中管理。', 'Screen capture for an externally controlled Session is managed by its separate grant.') });
@@ -2206,164 +2198,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       return;
     }
-    if (name === 'subrun') {
-      const command: SubrunCommand = parseSubrunCommand(argument);
-      if ('code' in command) {
-        push({ kind: 'error', text: t(
-          `子任务命令格式不正确：${command.code}。用法：/subrun list；/subrun status <序号或 ID>；/subrun wait <序号或 ID> [毫秒]；/subrun message <序号或 ID> <文字>；/subrun cancel <序号或 ID>`,
-          `Invalid subtask command: ${command.code}. Use /subrun list, status <seq or ID>, wait <seq or ID> [ms], message <seq or ID> <text>, or cancel <seq or ID>.`,
-        ) });
-        return;
-      }
-      const own = sessionId;
-      void (async () => {
-        const parent = await client.request('session.read', { sessionId: own, fullResults: true })
-          .catch((error: unknown) => requestFailure(error, 'session_read_failed'));
-        if ('code' in parent) {
-          if (activeSession.current === own) push({ kind: 'error', text: t(`无法读取记录：${parent.code}`, `Could not read conversation: ${parent.code}`) });
-          return;
-        }
-        const references = parent.events.map(subrunReferenceOf).filter((item): item is TuiSubrunReference => item !== null);
-        if (command.action === 'list') {
-          const current = await client.request('status.get', { sessionId: own })
-            .catch((error: unknown) => requestFailure(error, 'status_read_failed'));
-          if ('code' in current) {
-            if (activeSession.current === own) push({ kind: 'error', text: t(`无法读取当前运行：${current.code}`, `Could not read the current run: ${current.code}`) });
-            return;
-          }
-          const parentRunIds: string[] = [];
-          const addParentRun = (runId: unknown) => {
-            if (typeof runId === 'string' && !parentRunIds.includes(runId) && parentRunIds.length < 16) parentRunIds.push(runId);
-          };
-          addParentRun(current.activeRunId);
-          for (const event of [...parent.events].reverse()) {
-            if (event.kind === 'turn') addParentRun(event.runId);
-          }
-          for (const reference of references) addParentRun(reference.parentRunId);
-          if (parentRunIds.length === 0) {
-            if (activeSession.current === own) push({ kind: 'meta', text: t('当前记录没有异步子任务。', 'This conversation has no asynchronous subtasks.') });
-            return;
-          }
-          const pages = await Promise.all(parentRunIds.map(async parentRunId => await client.request('subrun.list', {
-            sessionId: own, parentRunId, limit: 32,
-          }).catch((error: unknown) => requestFailure(error, 'subrun_list_failed'))));
-          if (activeSession.current !== own) return;
-          const statuses = new Map<string, TuiSubrunStatus>();
-          let truncated = false;
-          for (const page of pages) {
-            if ('code' in page) continue;
-            truncated ||= page.truncated;
-            for (const child of page.subruns) {
-              statuses.set(child.subrunId, child);
-              knownSubrunReferences.current.set(`${own}\u0000${child.subrunId}`, child);
-            }
-          }
-          if (statuses.size === 0) {
-            const firstError = pages.find(page => 'code' in page);
-            if (firstError !== undefined && 'code' in firstError) {
-              push({ kind: 'error', text: t(`无法列出子任务：${firstError.code}`, `Could not list subtasks: ${firstError.code}`) });
-              return;
-            }
-            push({ kind: 'meta', text: t('当前记录没有异步子任务。', 'This conversation has no asynchronous subtasks.') });
-            return;
-          }
-          const lines = [...statuses.values()].map(status => {
-            const sequence = parent.events.find(event => subrunReferenceOf(event)?.subrunId === status.subrunId)?.seq;
-            return `${status.subrunId} · ${status.state}${sequence === undefined ? '' : ` · /sub ${sequence}`}`;
-          });
-          if (truncated) lines.push(t('子任务列表达到扫描上限。', 'The subtask list reached its scan limit.'));
-          push({ kind: 'meta', text: lines.join('\n') });
-          return;
-        }
-        let reference: TuiSubrunReference | null = null;
-        if (command.seq !== undefined) {
-          const picked = findRecord(parent.events, String(command.seq));
-          if ('code' in picked || picked.record === null) {
-            if (activeSession.current === own) push({ kind: 'error', text: t(`没有序号为 ${command.seq} 的子任务启动记录。`, `No child start event exists at sequence ${command.seq}.`) });
-            return;
-          }
-          reference = subrunReferenceOf(picked.record);
-          if (reference === null) {
-            if (activeSession.current === own) push({ kind: 'error', text: t(`记录 ${command.seq} 不是异步子任务。`, `Event ${command.seq} is not an asynchronous subtask.`) });
-            return;
-          }
-        } else if (command.subrunId !== undefined) {
-          reference = knownSubrunReferences.current.get(`${own}\u0000${command.subrunId}`) ?? null;
-          if (reference === null) {
-            const current = await client.request('status.get', { sessionId: own })
-              .catch((error: unknown) => requestFailure(error, 'status_read_failed'));
-            if (!('code' in current)) {
-              const parentRunIds: string[] = [];
-              const addParentRun = (runId: unknown) => {
-                if (typeof runId === 'string' && !parentRunIds.includes(runId) && parentRunIds.length < 16) parentRunIds.push(runId);
-              };
-              addParentRun(current.activeRunId);
-              for (const event of [...parent.events].reverse()) if (event.kind === 'turn') addParentRun(event.runId);
-              for (const item of references) addParentRun(item.parentRunId);
-              for (const parentRunId of parentRunIds) {
-                const page = await client.request('subrun.list', { sessionId: own, parentRunId, limit: 32 })
-                  .catch((error: unknown) => requestFailure(error, 'subrun_list_failed'));
-                if ('code' in page) continue;
-                for (const child of page.subruns) {
-                  knownSubrunReferences.current.set(`${own}\u0000${child.subrunId}`, child);
-                }
-              }
-              reference = knownSubrunReferences.current.get(`${own}\u0000${command.subrunId}`) ?? null;
-            }
-          }
-          if (reference === null) {
-            if (activeSession.current === own) push({ kind: 'error', text: t(
-              `没有找到子任务 ${command.subrunId}。先运行 /subrun list 刷新子任务清单。`,
-              `Subtask ${command.subrunId} was not found. Run /subrun list to refresh the list first.`,
-            ) });
-            return;
-          }
-        }
-        if (reference === null) return;
-        if (command.action === 'status') {
-          const result = await client.request('subrun.status', {
-            sessionId: own, parentRunId: reference.parentRunId, subrunId: reference.subrunId,
-          }).catch((error: unknown) => requestFailure(error, 'subrun_status_failed'));
-          if (activeSession.current !== own) return;
-          push({ kind: 'meta', text: 'code' in result ? result.code
-            : `${reference.subrunId}: ${result.state}${result.phase === null ? '' : ` · ${result.phase}`}${result.errorCode === undefined ? '' : ` · ${result.errorCode}`}` });
-          return;
-        }
-        if (command.action === 'wait') {
-          const result = await client.request('subrun.wait', {
-            sessionId: own, parentRunId: reference.parentRunId, subrunIds: [reference.subrunId], timeoutMs: command.timeoutMs,
-          }).catch((error: unknown) => requestFailure(error, 'subrun_wait_failed'));
-          if (activeSession.current !== own) return;
-          if ('code' in result) push({ kind: 'error', text: result.code });
-          else {
-            const state = result.subruns[0]?.state ?? 'unknown';
-            push({ kind: 'meta', text: result.timedOut
-              ? t(`等待结束，子任务仍为 ${state}。`, `Wait timed out; child remains ${state}.`)
-              : t(`子任务状态：${state}。`, `Subtask state: ${state}.`) });
-          }
-          return;
-        }
-        if (command.action === 'message') {
-          const result = await client.request('subrun.message', {
-            sessionId: own, parentRunId: reference.parentRunId, subrunId: reference.subrunId,
-            runId: reference.runId, input: command.input,
-          }).catch((error: unknown) => requestFailure(error, 'subrun_message_failed'));
-          if (activeSession.current !== own) return;
-          push('code' in result ? { kind: 'error', text: t(`子任务输入未接受：${result.code}`, `Child input was not accepted: ${result.code}`) }
-            : { kind: 'meta', text: t(`子任务已接受补充输入（待处理 ${result.pendingCount} 条）。`, `Child accepted the input (${result.pendingCount} pending).`) });
-          return;
-        }
-        const result = await client.request('subrun.cancel', {
-          sessionId: own, parentRunId: reference.parentRunId, subrunId: reference.subrunId, runId: reference.runId,
-        }).catch((error: unknown) => requestFailure(error, 'subrun_cancel_failed'));
-        if (activeSession.current !== own) return;
-        push('code' in result ? { kind: 'error', text: t(`取消请求失败：${result.code}`, `Could not request cancellation: ${result.code}`) }
-          : { kind: 'meta', text: result.cancelRequested
-            ? t('已发出取消请求，等待子任务收束。', 'Cancellation requested; waiting for the child to settle.')
-            : t(`当前子任务状态：${result.state}。`, `Child state: ${result.state}.`) });
-      })();
-      return;
-    }
     if (name === 'help') {
       setDetail(null);
       setSessionPicker(null);
@@ -2373,7 +2207,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, presetCommands, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, resourceCommands, runControlCommands, sessionId, sessionListCommands, sessionMaintenanceCommands, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
+  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, presetCommands, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, resourceCommands, runControlCommands, sessionId, sessionListCommands, sessionMaintenanceCommands, sessionNavigationIsCurrent, status, stdout, subrunCommands, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
