@@ -35,8 +35,11 @@ test('artifact Host verifies current content, rejects arbitrary identities, and 
     await assert.rejects(client.request('artifact.resolve', identity), { code: 'artifact_native_control_required' });
     await writeFile(path, 'A revised report');
     assert.equal((await client.request('artifact.inspect', identity) as { status: string }).status, 'modified');
+    // 预览也要把已知文件变化映射为状态，保持旧合同。
+    assert.equal((await client.request('artifact.preview', identity) as ArtifactPreview).status, 'modified');
     await unlink(path);
     assert.equal((await client.request('artifact.inspect', identity) as { status: string }).status, 'missing');
+    assert.equal((await client.request('artifact.preview', identity) as ArtifactPreview).status, 'missing');
     await client.request('session.close', { sessionId });
     const before = await readFile(join(sessionDirectory, `${sessionId}.jsonl`));
     assert.equal((await client.request('artifact.list', args) as ArtifactListing).items.length, 1);
@@ -56,6 +59,24 @@ test('artifact Host restores successful present metadata when the tool result wa
     assert.equal((await client.request('artifact.inspect', { projectRoot: projectDirectory, sessionId,
       artifactKey: listing.items[0].artifactKey }) as { status: string }).status, 'available');
   }, { config: { policy: { mode: 'auto' }, limits: { resultBytes: 256 } } });
+});
+
+test('artifact resolve keeps its status contract for changed and missing files', async () => {
+  await withTuiHost(async ({ client, projectDirectory, sessionId }) => {
+    const path = join(projectDirectory, 'resolve-report.txt');
+    await writeFile(path, 'Resolvable report');
+    await present(client, sessionId, [{ path: 'resolve-report.txt' }]);
+    const args = { projectRoot: projectDirectory, sessionId };
+    const listing = await client.request('artifact.list', args) as ArtifactListing;
+    const identity = { ...args, artifactKey: listing.items[0].artifactKey };
+    const resolved = await client.request('artifact.resolve', identity) as { artifactKey?: string; path?: string; status?: string };
+    assert.equal(resolved.artifactKey, listing.items[0].artifactKey);
+    assert.ok(resolved.path?.endsWith('resolve-report.txt'));
+    await writeFile(path, 'Changed after resolution');
+    assert.equal((await client.request('artifact.resolve', identity) as { status: string }).status, 'modified');
+    await unlink(path);
+    assert.equal((await client.request('artifact.resolve', identity) as { status: string }).status, 'missing');
+  }, { permissionControl: true, config: { policy: { mode: 'auto' } } });
 });
 
 test('artifact preview never treats an HTML delivery as an application page', async () => {

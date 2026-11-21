@@ -98,8 +98,15 @@ function statusOfFailure(cause: unknown): 'modified' | 'missing' | 'denied' | un
 
 export async function previewArtifact(scope: ArtifactScope, filters: ArtifactFilters, artifactKey: string) {
   const chosen = await pickArtifact(scope, filters, artifactKey);
-  const preview = await previewFileArtifact(chosen.artifact, scope.env.projectRoot, boundaryOf(scope.env.config));
-  return { ...chosen, status: preview.type === 'unsupported_preview' ? 'unsupported_preview' : 'available', preview };
+  try {
+    const preview = await previewFileArtifact(chosen.artifact, scope.env.projectRoot, boundaryOf(scope.env.config));
+    return { ...chosen, status: preview.type === 'unsupported_preview' ? 'unsupported_preview' : 'available', preview };
+  } catch (cause) {
+    // 预览期间的已知文件错误仍按状态返回，客户端据此显示“已修改/缺失/拒绝”，而不是通用错误。
+    const status = statusOfFailure(cause);
+    if (status === undefined) throw cause;
+    return { ...chosen, status };
+  }
 }
 
 export async function inspectArtifact(scope: ArtifactScope, filters: ArtifactFilters, artifactKey: string) {
@@ -119,11 +126,12 @@ export async function resolveArtifact(scope: ArtifactScope, filters: ArtifactFil
   const chosen = await pickArtifact(scope, filters, artifactKey);
   try {
     const current = await verifyArtifact(scope, chosen);
-    if (current.modified) throw new KernelError('artifact_modified');
+    // 文件已变化时保持既有合同：返回状态对象，由客户端提示而不是进入通用错误。
+    if (current.modified) return { ...chosen, status: 'modified' };
     return { artifactKey: chosen.artifactKey, path: resolve(scope.env.projectRoot, current.relativePath) };
   } catch (cause) {
     const status = statusOfFailure(cause);
-    if (status === 'modified') throw new KernelError('artifact_modified');
-    throw cause;
+    if (status === undefined) throw cause;
+    return { ...chosen, status };
   }
 }

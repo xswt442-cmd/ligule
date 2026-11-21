@@ -26,12 +26,12 @@ export type SessionExportScope = {
   readonly environmentOf: (id: string) => ExportEnvironment | undefined;
   readonly defaultEnvironment: ExportEnvironment;
   readonly branchOwner: (id: string) => string | undefined;
-  readonly running: boolean;
+  readonly isRunning: () => boolean;
   readonly readRecord: (id: string, params: { fullResults: boolean }) => Promise<ExportRecordPage>;
 };
 
 export async function exportSession(scope: SessionExportScope) {
-  const { sessionId, path, environmentOf, defaultEnvironment, branchOwner, running, readRecord } = scope;
+  const { sessionId, path, environmentOf, defaultEnvironment, branchOwner, isRunning, readRecord } = scope;
   const record = await readRecord(sessionId, { fullResults: true });
   const exportEnvironment = environmentOf(sessionId) ?? environmentOf(branchOwner(sessionId) ?? '') ?? defaultEnvironment;
   const assets: ExportAsset[] = [];
@@ -102,7 +102,8 @@ export async function exportSession(scope: SessionExportScope) {
     // 对每个导出文件分别返回结果，包括路径冲突和写入失败，并附上主文件路径。
     const main = exportMarkdown(exportRecords, {
       id: sessionId, projectRoot: header?.projectRoot, createdAt: header?.createdAt ?? null,
-      unfinished: running,
+      // 未完成标记取写出时的运行状态，而不是请求开始时的快照。
+      unfinished: isRunning(),
     }, imageUrls, evidence);
     const branchTexts = branches.map(branch => ({ id: branch.id,
       text: exportMarkdown(branch.events, { id: branch.id, projectRoot: header?.projectRoot }, imageUrls, evidence) }));
