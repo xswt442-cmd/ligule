@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,8 +68,10 @@ function sourceRef() {
 
 function sync(repo, apply) {
   if (!existsSync(join(repo, '.git'))) throw new Error('Target is not a Git working tree');
-  const top = resolve(git(repo, ['rev-parse', '--show-toplevel']));
-  if (top.toLowerCase() !== repo.toLowerCase()) throw new Error('Target must be the repository root');
+  // Windows 可能把同一目录报告为短路径或不同大小写；比较真实路径，而不是字符串形式。
+  const top = realpathSync.native(resolve(git(repo, ['rev-parse', '--show-toplevel'])));
+  const root = realpathSync.native(resolve(repo));
+  if (top.toLowerCase() !== root.toLowerCase()) throw new Error('Target must be the repository root');
 
   const changed = [];
   for (const item of plan(repo)) {
