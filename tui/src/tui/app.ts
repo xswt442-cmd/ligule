@@ -1,7 +1,6 @@
 // TUI 负责显示会话记录和流式内容，并将键盘操作转换为 Host 协议调用。
 // 协议帧由 `core/src/host/connection.ts` 处理；此处不直接读写帧。
 // 纯函数和命令表从此模块导出，供自动检查和界面复用。
-import { resolve } from 'node:path';
 import { createElement as h, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
 import { answerOf, candidatesOf, describeChange, findLines, findUiCommand, insertMention, localizedCommand, mentionToken, parseControlCommand, parseExecCommand, parsePresetCommand, parseSubrunCommand, parseToolCommand, resolveSessionId, routeInput, usageText } from './commands.js';
@@ -9,7 +8,7 @@ import { pushHistory } from '@ligule/core/tui.js';
 import { searchHistory } from './history.js';
 import { editDraft, isTypingRun, moveDraftCaret, type DraftState } from './draft.js';
 import { editInExternalEditor } from './editor.js';
-import { copyToClipboard, lastAnswer } from './clipboard.js';
+import { copyToClipboard } from './clipboard.js';
 import { titleEscape, titleText } from './output.js';
 import { providerDiagnosticText, runtimeFailureText } from './errors.js';
 import { errorCode, errorMessage } from './error-text.js';
@@ -17,8 +16,10 @@ import { useIntegrationCommands } from './handlers/integrations.js';
 import { useConfigCommands } from './handlers/config.js';
 import { useInfoCommands } from './handlers/info.js';
 import { useRunControlCommands } from './handlers/run-control.js';
+import { useViewCommands } from './handlers/view.js';
 import { queuedLine } from './queue-text.js';
 import { clearCancelledLocalQuestion } from './local-question.js';
+import { findRecord } from './record-find.js';
 import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
 import { collectTranscriptPages } from './transcript-pages.js';
 import { VERSION } from '../version.js';
@@ -514,18 +515,12 @@ export { editDraft, isTypingRun } from './draft.js';
 export { foldText } from './message-format.js';
 export { queuedLine } from './queue-text.js';
 export { clearCancelledLocalQuestion } from './local-question.js';
+export { findRecord } from './record-find.js';
 
 export { capabilityOf, projectRecord, resultParts };
 
 // 上下文状态显示当前投影估算、模型窗口和是否超过压力线。窗口未知时隐藏整段状态。
 
-
-// `/show` 使用稳定的事件序号，不使用可能随投影变化的屏幕行号。
-export function findRecord(events: readonly TuiRecord[], argument: string): { readonly code: string } | { readonly record: TuiRecord | null } {
-  const seq = Number(argument);
-  if (!Number.isInteger(seq) || seq < 0) return { code: 'tui_show_needs_a_number' };
-  return { record: events.find((event) => event.seq === seq) ?? null };
-}
 
 export function subrunReferenceOf(record: TuiRecord | undefined): TuiSubrunReference | null {
   if (record?.kind !== 'tool' || record.tool !== 'subagent_start') return null;
@@ -1661,6 +1656,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     activeQuestion, inputNow, resetOrdinaryDraft, push, t,
   });
 
+  const viewCommands = useViewCommands({ client, sessionId, push, t, locale, setDetail });
+
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (integrationCommands.handle(name, argument)) return;
@@ -1813,51 +1810,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           }
           finishSessionNavigation(lease);
         }
-      })();
-      return;
-    }
-    if (name === 'copy') {
-      void (async () => {
-        // 只复制记录中已落盘的最后一条回答，不复制尚未完成的流式片段。
-        const read = await client.request('session.read', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
-        if ('code' in read) {
-          push({ kind: 'error', text: t(`无法读取记录：${read.code}`, `Could not read conversation: ${read.code}`) });
-          return;
-        }
-        const answer = lastAnswer(read.events);
-        if (answer === '') {
-          push({ kind: 'meta', text: t('暂无可复制的回答', 'No answer to copy yet') });
-          return;
-        }
-        const done = await copyToClipboard(answer);
-        push('program' in done
-          ? { kind: 'meta', text: t('已复制最近的回答', 'Latest answer copied') }
-          : { kind: 'error', text: t(`复制失败：${done.code}`, `Copy failed: ${done.code}`) });
-      })();
-      return;
-    }
-    if (name === 'export') {
-      if (argument === '') {
-        push({ kind: 'error', text: t('请指定导出路径：/export <路径>', 'Specify an export path: /export <path>') });
-        return;
-      }
-      void (async () => {
-        // 排版和写入由 Host 完成；这里仅根据当前工作目录解析用户提供的目标路径。
-        const done = await client.request('session.export', { sessionId, path: resolve(argument) }).catch((error: unknown) => requestFailure(error, 'session_export_failed'));
-        if ('code' in done) {
-          push({ kind: 'error', text: t(`导出失败：${done.code}`, `Export failed: ${done.code}`) });
-          return;
-        }
-        // 区分派生会话记录读取失败和目标文件已存在两种无法导出的情况。
-        for (const item of done.skipped) {
-          push({ kind: 'error', text: item.code === 'export_target_exists'
-            ? t(`文件已存在，已跳过：${item.path ?? item.id}`, `File already exists; skipped: ${item.path ?? item.id}`)
-            : t(`无法读取子任务 ${item.id}：${item.code}`, `Could not read subtask ${item.id}: ${item.code}`) });
-        }
-        for (const item of done.failed) {
-          push({ kind: 'error', text: t(`写入失败：${item.path}（${item.code}）`, `Write failed: ${item.path} (${item.code})`) });
-        }
-        push({ kind: 'meta', text: t(`已导出 ${done.written.length} 个文件：`, `Exported ${done.written.length} files:`) + `\n${done.written.join('\n')}` });
       })();
       return;
     }
@@ -2212,6 +2164,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     if (runControlCommands.handle(name, argument)) return;
+    if (viewCommands.handle(name, argument)) return;
     if (name === 'usage') {
       const parts = argument.trim().split(/\s+/u).filter((part) => part !== '');
       if (parts[0] === 'requests') {
@@ -2501,30 +2454,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       } else {
         void changePermission({ profile: target });
       }
-      return;
-    }
-    if (name === 'show') {
-      void (async () => {
-        if (argument === '') {
-          setDetail(null);
-          return;
-        }
-        const read = await client.request('session.read', { sessionId, fullResults: true }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
-        if ('code' in read) {
-          push({ kind: 'error', text: t(`无法读取记录：${read.code}`, `Could not read conversation: ${read.code}`) });
-          return;
-        }
-        const picked = findRecord(read.events, argument);
-        if ('code' in picked) {
-          push({ kind: 'error', text: t('请输入记录序号：/show <序号>', 'Enter an event sequence: /show <seq>') });
-          return;
-        }
-        if (picked.record === null) {
-          push({ kind: 'error', text: t(`没有序号为 ${argument} 的记录`, `Event ${argument} was not found`) });
-          return;
-        }
-        setDetail({ seq: picked.record.seq, kind: picked.record.kind ?? 'unknown', rows: projectRecord(picked.record, locale) });
-      })();
       return;
     }
     if (name === 'preset') {
@@ -2975,7 +2904,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, runControlCommands, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, runControlCommands, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui, viewCommands]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
