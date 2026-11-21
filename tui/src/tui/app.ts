@@ -24,6 +24,7 @@ import { useResourceCommands } from './handlers/resource.js';
 import { usePresetCommands } from './handlers/preset.js';
 import { useSubrunCommands } from './handlers/subrun.js';
 import { useCapabilityCommands } from './handlers/capability.js';
+import { useKeybindCommands } from './handlers/keybind.js';
 import { queuedLine } from './queue-text.js';
 import { clearCancelledLocalQuestion } from './local-question.js';
 import { isRecord } from './guards.js';
@@ -39,10 +40,9 @@ import { DraftInput } from './input-view.js';
 import { ApprovalPanel, buildApprovalLayout } from './approval-view.js';
 import { TUI_COLORS } from './ui-style.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
-import { CURRENT, ENGLISH_LABELS, ENGLISH_VIEWS, KEYMAP, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec } from './keymap.js';
+import { CURRENT, applyOverrides, hit, keyHint } from './keymap.js';
 import { buildStatusLine } from './status-line.js';
 import { controlPresets, textOf as chooseText, VIEW_REQUEST_METHOD, type Locale } from '@ligule/core/tui.js';
-import type { TerminalAction } from './keymap.js';
 import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type ControlWizardValues } from './control-wizard.js';
 import { createSessionNavigation, type SessionNavigation, type SessionNavigationLease } from './session-navigation.js';
 import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionSummary, UsageSummary } from '@ligule/core/tui.js';
@@ -487,10 +487,6 @@ interface TuiRequestResults {
 
 export interface TuiClient extends Omit<Connection, 'request'> {
   request<Method extends keyof TuiRequestResults>(method: Method, params?: Record<string, unknown>): Promise<TuiRequestResults[Method]>;
-}
-
-function isTerminalAction(value: string): value is TerminalAction {
-  return Object.hasOwn(KEYMAP, value);
 }
 
 function requestFailure(error: unknown, fallback: string): { readonly code: string } {
@@ -1615,6 +1611,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     client, sessionId, activeSession, externalControl, status, setStatus, refreshStatus, openPicker, changePermission, push, t,
   });
 
+  const keybindCommands = useKeybindCommands({ keys, keyOverrides, setKeyOverrides, locale, push, t });
+
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (integrationCommands.handle(name, argument)) return;
@@ -2004,73 +2002,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
-    if (name === 'bind') {
-      // 只修改动作对应的按键，动作名称保持稳定；显示文本和实际按键行为共用同一配置。
-      const parts = argument.trim().split(/\s+/).filter((part) => part !== '');
-      const save = (next: Record<string, string>) => {
-        if (keys === undefined) {
-          push({ kind: 'meta', text: t('快捷键仅在本次运行生效：未配置存储', 'Shortcuts apply to this run only: storage is unavailable') });
-          return;
-        }
-        void keys.write(next).catch(() => push({ kind: 'error', text: t('无法保存快捷键', 'Could not save shortcuts') }));
-      };
-      if (parts.length === 0) {
-        push({ kind: 'meta', text: [
-          t(`快捷键（${Object.keys(keyOverrides).length} 项自定义）。修改：/bind <动作> <按键>；恢复：/bind reset <动作> 或 /bind default。`, `Shortcuts (${Object.keys(keyOverrides).length} customized). Set: /bind <action> <key>; reset: /bind reset <action> or /bind default.`),
-          ...Object.entries(KEYMAP).flatMap(([name, binding]) => {
-            if (!isTerminalAction(name)) return [];
-            return [`${name} = ${formatKeys(CURRENT[name])} (${locale === 'en' ? ENGLISH_VIEWS[binding.view] : binding.view})`];
-          }),
-        ].join('\n') });
-        return;
-      }
-      if (parts[0] === 'default') {
-        for (const [action, spec] of Object.entries(defaultSpecs())) {
-          if (isTerminalAction(action)) CURRENT[action] = spec;
-        }
-        setKeyOverrides({});
-        save({});
-        push({ kind: 'meta', text: t('已恢复默认快捷键', 'Default shortcuts restored') });
-        return;
-      }
-      if (parts[0] === 'reset') {
-        const action = parts[1];
-        if (action === undefined || !isTerminalAction(action) || KEYMAP[action] === undefined) {
-          push({ kind: 'error', text: t(`未知动作：${action ?? ''}。用 /bind 查看`, `Unknown action: ${action ?? ''}. Use /bind to browse`) });
-          return;
-        }
-        CURRENT[action] = KEYMAP[action].spec;
-        const next = { ...keyOverrides };
-        delete next[action];
-        setKeyOverrides(next);
-        save(next);
-        push({ kind: 'meta', text: t(`${action} 已恢复为 ${formatKeys(KEYMAP[action].spec)}`, `${action} reset to ${formatKeys(KEYMAP[action].spec)}`) });
-        return;
-      }
-      const [action, text] = parts;
-      if (action === undefined || !isTerminalAction(action)) {
-        push({ kind: 'error', text: t(`未知动作：${action}。用 /bind 查看`, `Unknown action: ${action}. Use /bind to browse`) });
-        return;
-      }
-      const binding = KEYMAP[action];
-      const spec = parseSpec(text ?? '');
-      if (spec === null) {
-        push({ kind: 'error', text: t(`无效按键：${text ?? ''}。例如 Ctrl+Shift+K、enter、pageup`, `Invalid key: ${text ?? ''}. Examples: Ctrl+Shift+K, enter, pageup`) });
-        return;
-      }
-      // 保存前校验按键绑定，拒绝同一作用范围内的冲突。
-      const clash = conflictsIn(binding.view, { ...CURRENT, [action]: spec });
-      if (clash.length > 0) {
-        push({ kind: 'error', text: t(`${formatKeys(spec)} 在${binding.view}中冲突：${clash[0].join(' / ')}`, `${formatKeys(spec)} conflicts in ${ENGLISH_VIEWS[binding.view]}: ${clash[0].join(' / ')}`) });
-        return;
-      }
-      CURRENT[action] = spec;
-      const next = { ...keyOverrides, [action]: spec };
-      setKeyOverrides(next);
-      save(next);
-      push({ kind: 'meta', text: `${action} = ${formatKeys(spec)} · ${locale === 'en' ? ENGLISH_LABELS[action] : binding.label}` });
-      return;
-    }
     if (runControlCommands.handle(name, argument)) return;
     if (viewCommands.handle(name, argument)) return;
     if (usageCommands.handle(name, argument)) return;
@@ -2080,6 +2011,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (presetCommands.handle(name, argument)) return;
     if (subrunCommands.handle(name, argument)) return;
     if (capabilityCommands.handle(name, argument)) return;
+    if (keybindCommands.handle(name, argument)) return;
     if (name === 'help') {
       setDetail(null);
       setSessionPicker(null);
@@ -2089,7 +2021,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, capabilityCommands, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, presetCommands, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, resourceCommands, runControlCommands, sessionId, sessionListCommands, sessionMaintenanceCommands, sessionNavigationIsCurrent, status, stdout, subrunCommands, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
+  }, [app, beginSessionNavigation, capabilityCommands, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keybindCommands, keys, locale, presetCommands, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, resourceCommands, runControlCommands, sessionId, sessionListCommands, sessionMaintenanceCommands, sessionNavigationIsCurrent, status, stdout, subrunCommands, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
