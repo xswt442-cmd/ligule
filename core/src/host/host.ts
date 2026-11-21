@@ -53,7 +53,7 @@ import { adoptForSessionDirectory } from '../session/adopt.js';
 import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
-import { listProjectDirectory, readProjectFile, readProjectFileText, saveProjectFile, searchProjectFiles } from './project-files.js';
+import { listProjectDirectory, readProjectFile, saveProjectFile, searchProjectFiles } from './project-files.js';
 import { projectGitDiffVersion, readProjectGitDiff, readProjectGitStatus } from './project-git.js';
 import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
 export { compactionLimitsOf } from './runtime-limits.js';
@@ -94,6 +94,7 @@ import { readForClient, readRecordPage, type SessionReadDeps } from './session-r
 import { applyStorageCleanup, inspectStorage, previewStorageCleanup, type StoragePlanState, type StorageScanState } from './storage-service.js';
 import { createSessionImagePreview } from './image-preview.js';
 import { browserView, createStatusView, sessionPermissionView } from './status-view.js';
+import { verifySideSelection } from './side-selection.js';
 import { createSearchSupport, type SearchStatus } from './search.js';
 import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
 import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
@@ -3664,56 +3665,14 @@ export function createHost({
           if (readDenied !== undefined) throw new KernelError(readDenied.code, { detail: readDenied.reason });
 
           const sourceEvents = await source.session.read();
-          let sourceEvent: Record<string, unknown> | undefined;
-          let sourceEventSeq: number | undefined;
-          let sourcePath: string | undefined;
-          let sourceVersion: string | undefined;
-          if (sourceKind === 'event') {
-            if (!Number.isSafeInteger(message.params.sourceEventSeq) || Number(message.params.sourceEventSeq) < 0
-              || message.params.sourcePath !== undefined || message.params.sourceVersion !== undefined) {
-              throw new KernelError('side_context_reference_invalid');
-            }
-            sourceEventSeq = Number(message.params.sourceEventSeq);
-            const selectedRecord = await readRecordPage(source.id, { at: sourceEventSeq, fullResults: true }, sessionReadDeps) as unknown as { events?: Record<string, unknown>[] };
-            sourceEvent = selectedRecord.events?.[0];
-            if (sourceEvent === undefined) throw new KernelError('side_context_event_not_found');
-            const visibleText: string[] = [];
-            for (const key of ['text', 'raw', 'reason']) if (typeof sourceEvent[key] === 'string') visibleText.push(sourceEvent[key] as string);
-            if (isRecord(sourceEvent.args)) visibleText.push(JSON.stringify(sourceEvent.args));
-            if (isRecord(sourceEvent.result)) {
-              const result = sourceEvent.result;
-              if (typeof result.reason === 'string') visibleText.push(result.reason);
-              if (typeof result.content === 'string') visibleText.push(result.content);
-              if (isRecord(result.content)) {
-                for (const key of ['text', 'summary']) if (typeof result.content[key] === 'string') visibleText.push(result.content[key] as string);
-              }
-            }
-            if (sourceEvent.kind === 'check' && isRecord(sourceEvent.declaration)) {
-              const declaration = sourceEvent.declaration;
-              visibleText.push(`检查结果：${String(declaration.name ?? 'unknown')} · 命令 ${String(sourceEvent.commandStatus ?? 'unknown')}`
-                + ` · 报告 ${String(sourceEvent.reportStatus ?? 'unknown')} · 范围 ${String(sourceEvent.scopeStatus ?? 'unknown')}`);
-            }
-            if (!visibleText.some(text => text.includes(selection))) throw new KernelError('side_context_unverified');
-          } else {
-            sourcePath = requiredString(message.params.sourcePath, 'sourcePath');
-            if (message.params.sourceEventSeq !== undefined) throw new KernelError('side_context_reference_invalid');
-            await requireProjectFileAccess(source);
-            if (sourceKind === 'file') {
-              sourceVersion = requiredString(message.params.sourceVersion, 'sourceVersion');
-              if (!/^[a-f0-9]{16}$/iu.test(sourceVersion)) throw new KernelError('side_context_reference_invalid');
-              const snapshot = await readProjectFileText(source.environment.config, source.id, sourcePath, sourceVersion);
-              if (snapshot.kind === 'stale') throw new KernelError('side_context_version_stale');
-              if (snapshot.kind !== 'text' || !snapshot.text.includes(selection)) {
-                throw new KernelError('side_context_unverified');
-              }
-            } else {
-              if (message.params.sourceVersion !== undefined) throw new KernelError('side_context_reference_invalid');
-              const diff = await readProjectGitDiff(source.environment.projectRoot, boundaryOf(source.environment.config), sourcePath);
-              const diffText = diff.state === 'ready' ? [diff.staged, diff.unstaged].filter((value): value is string => value !== null).join('\n') : '';
-              if (diffText === '' || !diffText.includes(selection)) throw new KernelError('side_context_unverified');
-              sourceVersion = createHash('sha256').update(JSON.stringify([diff.path, diff.staged, diff.unstaged])).digest('hex');
-            }
-          }
+          const verified = await verifySideSelection(sourceKind, selection, message.params, {
+            sourceId: source.id,
+            projectRoot: source.environment.projectRoot,
+            config: source.environment.config,
+            readEvent: seq => readRecordPage(source.id, { at: seq, fullResults: true }, sessionReadDeps) as unknown as Promise<{ events?: Record<string, unknown>[] }>,
+            requireProjectFileAccess: () => requireProjectFileAccess(source),
+          });
+          const { sourceEventSeq, sourcePath, sourceVersion, sourceEvent } = verified;
 
           const eventRun = sourceEvent !== undefined && isRecord(sourceEvent.run) && typeof sourceEvent.run.runId === 'string'
             ? sourceEvent.run.runId : sourceEvent !== undefined && typeof sourceEvent.runId === 'string' ? sourceEvent.runId : undefined;
