@@ -1,6 +1,6 @@
 // 外控授权面板：列出、复制本地 MCP 配置、撤销，以及创建向导的入口。
 // 授权内容与版本由 Host 持有；TUI 只在确认后提交，不保存第二份授权状态。
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import type { MutableRefObject } from 'react';
 import type { TuiClient } from '../app.js';
 import { agentMcpConfig } from '../agent-mcp.js';
@@ -22,7 +22,7 @@ export type ControlCommandDeps = {
   readonly setPanel: (next: null) => void;
   readonly setControlSnapshot: (next: AgentControlSnapshot) => void;
   readonly setControlTarget: (next: string) => void;
-  readonly openPicker: (kind: 'control' | 'control-revoke-confirm') => void;
+  readonly openPicker: (kind: 'control' | 'control-revoke-confirm', requestedControlTarget?: string) => void;
   readonly push: (...items: TranscriptItem[]) => void;
   readonly t: (zh: string, en: string) => string;
 };
@@ -32,6 +32,8 @@ export function useControlCommands(deps: ControlCommandDeps): { handle: (name: s
     client, projectRoot, activeSession, controlWizardGeneration, controlWizardSubmittingRef,
     setControlWizardSubmitting, showControlWizard, setPanel, setControlSnapshot, setControlTarget, openPicker, push, t,
   } = deps;
+  // 授权列表响应可能乱序到达：只允许最近一次请求更新授权面板与撤销目标。
+  const listGeneration = useRef(0);
 
   const handle = useCallback((name: string, argument: string): boolean => {
     if (name !== 'control') return false;
@@ -75,9 +77,12 @@ export function useControlCommands(deps: ControlCommandDeps): { handle: (name: s
       return true;
     }
     const wanted = command.action === 'copy' || command.action === 'revoke' ? command.id : '';
+    const token = ++listGeneration.current;
     void (async () => {
       try {
         const snapshot = await client.request('agent-control.list', {}) as AgentControlSnapshot;
+        // 更晚的授权请求已经发出：较早响应不能改写面板或撤销目标。
+        if (listGeneration.current !== token) return;
         setControlSnapshot(snapshot);
         if (command.action === 'list') {
           const lines = snapshot.grants.length === 0 ? [t('尚未创建外控授权。', 'No external Agent grants have been created.')]
@@ -119,7 +124,8 @@ export function useControlCommands(deps: ControlCommandDeps): { handle: (name: s
           return;
         }
         setControlTarget(grant.id);
-        openPicker('control-revoke-confirm');
+        // 目标随面板一起固定：确认面板显示该授权 ID，确认时仍由 Host 校验版本。
+        openPicker('control-revoke-confirm', grant.id);
       } catch (error) {
         push({ kind: 'error', text: t(`外控授权操作失败：${errorCode(error) ?? 'agent_control_failed'}`, `Agent Control operation failed: ${errorCode(error) ?? 'agent_control_failed'}`) });
       }

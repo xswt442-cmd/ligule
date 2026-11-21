@@ -1418,8 +1418,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           { id: 'back', label: t('返回授权列表', 'Back to grants') },
         ];
       } else if (kind === 'control-revoke-confirm') {
+        // 撤销确认绑定到打开面板时固定的授权 ID，避免并发响应替换目标。
+        const target = requestedControlTarget ?? t('未知授权', 'unknown grant');
         available = [
-          { id: 'confirm', label: t('确认撤销授权', 'Confirm revocation'), description: t('MCP Host 会检查撤销并取消运行中的任务。', 'The MCP Host checks revocation and cancels active work.') },
+          { id: 'confirm', label: t(`确认撤销 ${target}`, `Confirm revocation of ${target}`), description: t('MCP Host 会检查撤销并取消运行中的任务。', 'The MCP Host checks revocation and cancels active work.') },
           { id: 'cancel', label: t('取消', 'Cancel') },
         ];
       } else if (kind === 'model') {
