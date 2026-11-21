@@ -46,7 +46,7 @@ import { POLICY_SEMANTICS, createDecisionChain, isPolicyMode, isPolicyRule, poli
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
-import { createRunAcceptance, findRunReceipt, isRunAcceptance, publishRunResult, readRunResult, runPayloadDigest, runReceipts, runResultPage, type DurableRunReceipt, type RunAcceptance } from '../session/run.js';
+import { createRunAcceptance, findRunReceipt, isRunAcceptance, publishRunResult, readRunResult, runPayloadDigest, type DurableRunReceipt, type RunAcceptance } from '../session/run.js';
 import type { SessionEvent } from '../session/format.js';
 import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDirectory } from '../session/list.js';
 import { adoptForSessionDirectory } from '../session/adopt.js';
@@ -95,6 +95,7 @@ import { applyStorageCleanup, inspectStorage, previewStorageCleanup, type Storag
 import { createSessionImagePreview } from './image-preview.js';
 import { browserView, createStatusView, sessionPermissionView } from './status-view.js';
 import { verifySideSelection } from './side-selection.js';
+import { readRunRecord } from './run-read.js';
 import { createSearchSupport, type SearchStatus } from './search.js';
 import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
 import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
@@ -4226,63 +4227,17 @@ export function createHost({
         case 'run.receipt':
         case 'run.receipts':
         case 'run.result': {
+          // Run 记录读模型在 run-read.ts；入口只解析环境、打开记录并绑定可见性与存活判定。
           const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
           assertSessionId(sessionId);
-          const path = recordPathOf(sessionId, env);
-          try { await access(path); }
-          catch (cause) {
-            if ((cause as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('session_not_found');
-            throw cause;
-          }
           const opened = sessions.get(sessionId);
-          if (opened !== undefined && workspaceIdentity(opened.environment.projectRoot) !== workspaceIdentity(env.projectRoot)) {
-            throw new KernelError('run_owner_mismatch');
-          }
-          const log = opened?.session ?? createSessionLog({ directory: env.directory, id: sessionId });
-          const header = await log.header();
-          const workspace = workspaceIdentity(env.projectRoot);
-          const owner = header?.workspace ?? (header?.projectRoot ? workspaceIdentity(header.projectRoot) : undefined);
-          if (owner !== workspace) throw new KernelError('run_owner_mismatch');
-          const events = await log.read();
-          const visibleReceipts = runScopes === undefined
-            ? runReceipts(events, sessionId)
-            : runScopes.flatMap(scope => runReceipts(events, sessionId, scope)).sort((left, right) => left.userSeq - right.userSeq);
-          if (message.method === 'run.receipts') {
-            const limit = message.params.limit ?? 20;
-            const before = message.params.before;
-            const matching = visibleReceipts.filter(item => before === undefined || item.userSeq < before).reverse();
-            const page = matching.slice(0, limit);
-            return { sessionId, receipts: page.map(receipt =>
-              runReceiptView(receipt, runLivenessOf(sessions.get(sessionId), receipt.runId))),
-              hasMore: matching.length > page.length,
-              nextBefore: matching.length > page.length ? page.at(-1)?.userSeq ?? null : null };
-          }
-          const reference = message.method === 'run.result' ? { runId: message.params.runId } : {
-            ...(message.params.runId === undefined ? {} : { runId: message.params.runId }),
-            ...(message.params.requestKey === undefined ? {} : { requestKey: message.params.requestKey }),
-          };
-          if ((reference.runId === undefined) === (reference.requestKey === undefined)) throw new KernelError('run_reference_invalid');
-          const matches = visibleReceipts.filter(item => reference.runId !== undefined
-            ? item.runId === reference.runId : item.requestKey === reference.requestKey);
-          if (reference.requestKey !== undefined && matches.length > 1) {
-            throw new KernelError('run_request_key_ambiguous', { detail: 'requestKey matches multiple visible run scopes; use runId to select one receipt' });
-          }
-          const receipt = matches[0];
-          if (receipt === undefined) throw new KernelError('run_not_found');
-          if (message.method === 'run.receipt') {
-            const live = runLivenessOf(sessions.get(sessionId), receipt.runId);
-            return runReceiptView(receipt, live);
-          }
-          const result = await readRunResult(env.directory, workspace, sessionId, receipt);
-          const currentEvidence = runEvidenceReferences(events, receipt.runId);
-          const checksByCall = new Map(currentEvidence.checks.map(check => [check.callId, check]));
-          const projectedResult = result.checks === undefined ? result : {
-            ...result,
-            checks: result.checks.map(check => checksByCall.get(check.callId)?.scopeStatus === 'stale'
-              ? { ...check, scopeStatus: 'stale' as const }
-              : check),
-          };
-          return { runId: receipt.runId, ...runResultPage(projectedResult, message.params.offset ?? 0) };
+          return await readRunRecord(message.method, message.params, {
+            sessionId, env, recordPath: recordPathOf(sessionId, env),
+            openedRoot: opened?.environment.projectRoot,
+            log: opened?.session ?? createSessionLog({ directory: env.directory, id: sessionId }),
+            runScopes,
+            live: runId => runLivenessOf(sessions.get(sessionId), runId),
+          });
         }
         case 'run.cancel': {
           const state = open(sessionId);
