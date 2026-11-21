@@ -3,7 +3,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { mkdirSync } from 'node:fs';
-import { access, lstat, opendir, readFile, realpath, stat } from 'node:fs/promises';
+import { access, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import { SETTLE_GRACE_MS, settleWithin } from '../kernel/settle.js';
@@ -48,7 +48,7 @@ import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
 import { createRunAcceptance, findRunReceipt, isRunAcceptance, publishRunResult, readRunResult, runPayloadDigest, runReceipts, runResultPage, type DurableRunReceipt, type RunAcceptance } from '../session/run.js';
 import type { SessionEvent } from '../session/format.js';
-import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDirectory, workspaceDataDirectory } from '../session/list.js';
+import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDirectory } from '../session/list.js';
 import { adoptForSessionDirectory } from '../session/adopt.js';
 import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
@@ -91,12 +91,12 @@ import { listArtifacts, previewArtifact, inspectArtifact, resolveArtifact, type 
 import { readToolResult } from './tool-result-view.js';
 import { exportSession } from './session-export.js';
 import { readForClient, readRecordPage, type SessionReadDeps } from './session-read.js';
+import { applyStorageCleanup, inspectStorage, previewStorageCleanup, type StoragePlanState, type StorageScanState } from './storage-service.js';
 import { createSearchSupport, type SearchStatus } from './search.js';
 import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
 import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
 import { createScreenshotPlugin } from '../tools/screenshot.js';
-import { createMediaStore, imagePreview, type SessionMediaScan } from '../capability/media.js';
-import { previewStorageGarbage, applyStorageGarbage, type StorageGcCandidate } from '../capability/storage-gc.js';
+import { createMediaStore, imagePreview } from '../capability/media.js';
 import { checkedImageReferences } from '../media.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
@@ -1142,9 +1142,8 @@ export function createHost({
     readonly permissionAtStart: PermissionContext;
     readonly currentPermission: () => PermissionContext;
   }>();
-  const storagePlans = new Map<string, { workspace: string; createdAt: number; ids: string[];
-    fingerprints: Readonly<Record<string, string>>; sessionScan: SessionMediaScan; garbage: StorageGcCandidate[] }>();
-  const storageScans = new Map<string, { workspace: string; createdAt: number; scan: SessionMediaScan; busy: boolean }>();
+  const storagePlans = new Map<string, StoragePlanState>();
+  const storageScans = new Map<string, StorageScanState>();
   let imagePreviews = 0;
   const retiringSessions = new Set<string>();
   const retirementProgress = new Map<string, HostSessionRetirement>();
@@ -4202,145 +4201,14 @@ export function createHost({
         case 'storage.inspect':
         case 'storage.cleanup.preview':
         case 'storage.cleanup.apply': {
+          // 存储盘点与媒体清理在 storage-service.ts；入口只解析环境并传递短期扫描/计划状态。
           const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
-          try {
-            const info = await stat(await realpath(env.projectRoot));
-            if (!info.isDirectory()) throw new KernelError('storage_workspace_unavailable');
-          } catch (cause) {
-            if (cause instanceof KernelError) throw cause;
-            throw new KernelError('storage_workspace_unavailable', { cause });
-          }
-          const workspace = workspaceIdentity(env.projectRoot);
-          const root = workspaceDataDirectory({ ...env.config, workspaceRoot: env.projectRoot });
-          const media = createMediaStore({ ...env.config, workspaceRoot: env.projectRoot }, 'workspace-storage');
-          if (message.method === 'storage.inspect') {
-            const folders: { kind: string; bytes: number; entries: number; complete: boolean }[] = [];
-            for (const kind of ['sessions', 'screenshots', 'browser', 'cache', 'tmp']) {
-              // Session records may use an explicit host.sessionDirectory override.
-              const path = kind === 'sessions' ? env.directory : join(root, kind);
-              let entries = 0;
-              let bytes = 0;
-              let complete = true;
-              let rootInfo;
-              try { rootInfo = await lstat(path); }
-              catch (cause) {
-                if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
-                folders.push({ kind, bytes, entries, complete });
-                continue;
-              }
-              if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new KernelError('storage_path_invalid');
-              const pending = [{ path, depth: 0 }];
-              while (pending.length > 0 && complete) {
-                const current = pending.pop()!;
-                let listing;
-                try { listing = await opendir(current.path); }
-                catch (cause) {
-                  if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
-                  complete = false;
-                  break;
-                }
-                for await (const entry of listing) {
-                  if (entries >= 1000) { complete = false; break; }
-                  entries += 1;
-                  let info;
-                  try { info = await lstat(join(current.path, entry.name)); }
-                  catch (cause) {
-                    if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
-                    complete = false;
-                    break;
-                  }
-                  if (info.isSymbolicLink()) throw new KernelError('storage_path_invalid');
-                  if (info.isFile()) bytes += info.size;
-                  else if (info.isDirectory()) {
-                    if (current.depth >= 16) { complete = false; break; }
-                    pending.push({ path: join(current.path, entry.name), depth: current.depth + 1 });
-                  }
-                }
-              }
-              folders.push({ kind, bytes, entries, complete });
-            }
-            return { projectRoot: env.projectRoot, workspace, folders };
-          }
+          const state = { scans: storageScans, plans: storagePlans };
+          if (message.method === 'storage.inspect') return await inspectStorage(env);
           if (message.method === 'storage.cleanup.preview') {
-            const limit = message.params.limit ?? 100;
-            const now = Date.now();
-            for (const [id, saved] of storageScans) {
-              if (now - saved.createdAt > 300_000 || storageScans.size > 8) storageScans.delete(id);
-            }
-            const providedCursor = message.params.cursor;
-            const cursor = providedCursor === undefined ? randomUUID() : requiredString(providedCursor, 'cursor');
-            let scan: SessionMediaScan;
-            let saved = storageScans.get(cursor);
-            if (providedCursor !== undefined) {
-              if (saved === undefined || saved.workspace !== workspace || now - saved.createdAt > 300_000) {
-                throw new KernelError('image_cleanup_cursor_invalid');
-              }
-              scan = saved.scan;
-            } else {
-              scan = await media.beginSessionScan();
-              saved = { workspace, createdAt: now, scan, busy: false };
-              storageScans.set(cursor, saved);
-            }
-            if (saved.busy) throw new KernelError('image_cleanup_cursor_busy');
-            saved.busy = true;
-            let progress: Awaited<ReturnType<typeof media.advanceSessionScan>>;
-            try { progress = await media.advanceSessionScan(scan); }
-            catch (cause) {
-              storageScans.delete(cursor);
-              throw cause;
-            } finally { saved.busy = false; }
-            if (!progress.complete) return { complete: false, nextCursor: cursor,
-              scannedSessions: scan.position, totalSessions: progress.totalSessions, scannedThisPage: progress.scannedSessions,
-              readBytesThisPage: progress.readBytes, ids: [], candidates: 0, removed: 0, bytesFreed: 0 };
-            storageScans.delete(cursor);
-            await media.verifySessionScan(scan);
-            let candidates: Awaited<ReturnType<typeof media.cleanup>>;
-            try { candidates = await media.cleanup({ dryRun: true, limit, withFingerprints: true, sessionScan: scan }); }
-            catch (cause) {
-              if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
-              candidates = { scanned: 0, referenced: 0, candidates: 0, removed: 0, bytesFreed: 0, ids: [], truncated: false };
-            }
-            for (const [id, plan] of storagePlans) {
-              if (Date.now() - plan.createdAt > 300_000 || storagePlans.size >= 64) storagePlans.delete(id);
-            }
-            const reclaim = await previewStorageGarbage(root, workspace, scan.sessions);
-            const garbage = reclaim.candidates.slice(0, Math.max(0, limit - candidates.ids.length));
-            const planId = randomUUID();
-            const { fingerprints, ...visible } = candidates;
-            storagePlans.set(planId, { workspace, createdAt: Date.now(), ids: candidates.ids,
-              fingerprints: fingerprints ?? {}, sessionScan: scan, garbage });
-            return { planId, expiresInMs: 300_000, ...visible, complete: true,
-              scannedSessions: scan.position, totalSessions: progress.totalSessions, nextCursor: null,
-              garbage: garbage.map(({ id, kind, bytes }) => ({ id, kind, bytes })),
-              garbageScanned: reclaim.scannedEntries };
+            return await previewStorageCleanup(env, { limit: message.params.limit, cursor: message.params.cursor }, state);
           }
-          if (message.params.confirm !== true) throw new KernelError('storage_cleanup_confirmation_required');
-          const planId = requiredString(message.params.planId, 'planId');
-          const plan = storagePlans.get(planId);
-          if (plan === undefined || plan.workspace !== workspace || Date.now() - plan.createdAt > 300_000) {
-            throw new KernelError('storage_cleanup_plan_invalid');
-          }
-          storagePlans.delete(planId);
-          // Small histories can be re-read completely at apply time, preserving per-item skipped
-          // reasons when a new Session reference appears after preview. Multi-page proofs instead
-          // fail closed on any record change and require a new cursor scan.
-          let checkedScan = plan.sessionScan;
-          if (checkedScan.entries.length <= 100) {
-            checkedScan = await media.beginSessionScan();
-            const fresh = await media.advanceSessionScan(checkedScan);
-            if (!fresh.complete) throw new KernelError('image_cleanup_scan_incomplete');
-          }
-          await media.verifySessionScan(checkedScan);
-          const cleaned = plan.ids.length === 0
-            ? { removed: 0, bytesFreed: 0, ids: [] as string[], skipped: [] as { id: string; reason: string }[] }
-            : await media.cleanup({ dryRun: false, limit: plan.ids.length,
-              allowedIds: plan.ids, expectedFingerprints: plan.fingerprints, sessionScan: checkedScan });
-          const garbage = await applyStorageGarbage(root, workspace, checkedScan.sessions, plan.garbage,
-            () => media.verifySessionScan(checkedScan));
-          return { planId, ...cleaned,
-            removed: cleaned.removed + garbage.removed, bytesFreed: cleaned.bytesFreed + garbage.bytesFreed,
-            ids: [...cleaned.ids, ...garbage.ids], skipped: [...(cleaned.skipped ?? []), ...garbage.skipped],
-            garbageRemoved: garbage.removed };
+          return await applyStorageCleanup(env, { confirm: message.params.confirm as boolean | undefined, planId: message.params.planId as string }, state);
         }
         case 'artifact.list':
         case 'artifact.inspect':
