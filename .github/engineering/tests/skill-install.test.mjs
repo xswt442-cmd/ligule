@@ -110,10 +110,11 @@ test('a Windows 8.3 short path is accepted as the repository root', (t) => {
     if (!short || !short.includes('~')) return t.skip('this volume does not expose 8.3 names');
     assert.notEqual(short, root);
 
-    const applied = run(['--apply'], short);
+    // 从长路径目录启动 node，只把短路径作为目标参数，避免 runner 在 8.3 cwd 下解析可执行文件失败。
+    const applied = spawnSync(process.execPath, [installer, '--apply', short], { cwd: root, encoding: 'utf8' });
     assert.equal(applied.status, 0, applied.stderr);
     assert.doesNotMatch(applied.stderr, /Target must be the repository root/);
-    assert.equal(run(['--check'], short).status, 0);
+    assert.equal(spawnSync(process.execPath, [installer, '--check', short], { cwd: root, encoding: 'utf8' }).status, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
