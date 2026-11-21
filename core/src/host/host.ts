@@ -88,8 +88,7 @@ import { createTodoWritePlugin } from '../tools/todo-write.js';
 import { createReadImagePlugin } from '../tools/read-image.js';
 import { createReadDocumentPlugin } from '../tools/read-document.js';
 import { createPresentPlugin, type ViewRequestArguments, type ViewRequestResult } from '../tools/present.js';
-import { confirmedFileArtifacts } from '../session/artifact.js';
-import { readFileArtifact, previewFileArtifact } from '../capability/artifact.js';
+import { listArtifacts, previewArtifact, inspectArtifact, resolveArtifact, type ArtifactEnvironment, type ArtifactScope } from './artifacts.js';
 import { createSearchSupport, type SearchStatus } from './search.js';
 import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
 import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
@@ -126,7 +125,7 @@ import { createSessionReviewer, narrowReviewerSettings, reviewerRouteFields, rev
 import type { PolicyReviewRecord, PolicyReviewRequest } from '../kernel/policy.js';
 import type { ReviewFacts } from '../kernel/reviewer.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
-import { runAcceptanceScope, runLivenessOf, runReceiptView, withinRunWindows } from './run-records.js';
+import { runAcceptanceScope, runLivenessOf, runReceiptView } from './run-records.js';
 import { runResourcesOf } from './run-resources.js';
 import { checkedToolResultSpillReference, decodeToolResultCursor, encodeToolResultCursor, readVerifiedToolResultSpillPage } from '../session/tool-result.js';
 import { checkedFileChangeFact, createFileChangeStore, type FileChangeFact, type FileChangeStore } from '../session/file-changes.js';
@@ -1727,7 +1726,7 @@ export function createHost({
   }
 
   // 只为当前页包含的记录读取溢出文件。
-  async function fillSpills(events: SessionEvent[], env: ProjectEnvironment): Promise<SessionEvent[]> {
+  async function fillSpills(events: SessionEvent[], env: ArtifactEnvironment): Promise<SessionEvent[]> {
     const base = await realpath(env.directory);
     const complete = [];
     for (const event of events) {
@@ -4623,70 +4622,23 @@ export function createHost({
         case 'artifact.inspect':
         case 'artifact.preview':
         case 'artifact.resolve': {
+          // 产物读取的归属、可见性与状态判定在 artifacts.ts；入口只解析环境与打开记录。
           const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
           assertSessionId(sessionId);
-          const path = recordPathOf(sessionId, env);
-          try { await access(path); }
-          catch (cause) {
-            if ((cause as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('session_not_found');
-            throw cause;
-          }
           const opened = sessions.get(sessionId);
-          const workspace = workspaceIdentity(env.projectRoot);
-          if (opened !== undefined && workspaceIdentity(opened.environment.projectRoot) !== workspace) throw new KernelError('artifact_owner_mismatch');
-          const log = opened?.session ?? createSessionLog({ directory: env.directory, id: sessionId });
-          const header = await log.header();
-          const owner = header?.workspace ?? (header?.projectRoot ? workspaceIdentity(header.projectRoot) : undefined);
-          if (owner !== workspace) throw new KernelError('artifact_owner_mismatch');
-          const events = await log.read();
-          const visibleRuns = runScopes === undefined
-            ? runReceipts(events, sessionId)
-            : runScopes.flatMap(scope => runReceipts(events, sessionId, scope));
-          let artifactEvents = events;
-          if (message.method === 'artifact.list' && message.params.runId !== undefined) {
-            const receipt = visibleRuns.find(item => item.runId === message.params.runId);
-            if (receipt === undefined) throw new KernelError('run_not_found');
-            artifactEvents = withinRunWindows(events, [receipt]);
-          } else if (runScopes !== undefined) {
-            // 无 Grant 或受限连接只列出自己可见 Run 产生的证据，不枚举其他调用者的产物。
-            artifactEvents = withinRunWindows(events, visibleRuns);
-          }
-          const evidence = artifactEvents.filter(event => event.kind === 'tool' && (event.tool === 'present' || event.tool === 'subagent'));
-          const artifacts = confirmedFileArtifacts(await fillSpills(evidence, env), workspace);
+          const scope: ArtifactScope = {
+            sessionId, env, recordPath: recordPathOf(sessionId, env),
+            openedRoot: opened?.environment.projectRoot,
+            log: opened?.session ?? createSessionLog({ directory: env.directory, id: sessionId }),
+            runScopes, fillSpills,
+          };
           if (message.method === 'artifact.list') {
-            const offset = message.params.offset ?? 0;
-            const limit = message.params.limit ?? 20;
-            return { sessionId, items: artifacts.slice(offset, offset + limit), total: artifacts.length,
-              nextOffset: offset + limit < artifacts.length ? offset + limit : null };
+            return await listArtifacts(scope, { runId: message.params.runId, offset: message.params.offset, limit: message.params.limit });
           }
-          if (message.method === 'artifact.resolve') requireTrustedUi('artifact-native', controlTrust);
-          const chosen = artifacts.find(entry => entry.artifactKey === message.params.artifactKey);
-          if (chosen === undefined) throw new KernelError('artifact_not_in_session');
-          const boundary = boundaryOf(env.config);
-          try {
-            if (message.method === 'artifact.preview') {
-              const preview = await previewFileArtifact(chosen.artifact, env.projectRoot, boundary);
-              return { ...chosen, status: preview.type === 'unsupported_preview' ? 'unsupported_preview' : 'available', preview };
-            }
-            const current = await readFileArtifact({ path: chosen.artifact.path }, chosen.artifact.sessionId, env.projectRoot, boundary);
-            const matches = current.artifact.sha256 === chosen.artifact.sha256 && current.size === chosen.artifact.bytes;
-            if (message.method === 'artifact.resolve') {
-              if (!matches) throw new KernelError('artifact_modified');
-              return { artifactKey: chosen.artifactKey, path: resolve(env.projectRoot, current.artifact.path) };
-            }
-            return { ...chosen, status: matches ? 'available' : 'modified' };
-          } catch (cause) {
-            if (!(cause instanceof KernelError)) throw cause;
-            const reason = cause.code;
-            if (reason === 'artifact_modified' || reason === 'artifact_file_changed') return { ...chosen, status: 'modified' };
-            if (reason === 'artifact_file_unavailable' && (cause.cause as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
-              return { ...chosen, status: 'missing' };
-            }
-            if (['artifact_file_invalid', 'artifact_path_invalid', 'path_escapes_boundary', 'path_escapes_workspace'].includes(reason)) {
-              return { ...chosen, status: 'denied' };
-            }
-            throw cause;
-          }
+          const artifactKey = requiredString(message.params.artifactKey, 'artifactKey');
+          if (message.method === 'artifact.preview') return await previewArtifact(scope, {}, artifactKey);
+          if (message.method === 'artifact.resolve') return await resolveArtifact(scope, {}, artifactKey, controlTrust);
+          return await inspectArtifact(scope, {}, artifactKey);
         }
         case 'run.submit': {
           const submission = await serializeSessionConfiguration(sessionId, async () => {
