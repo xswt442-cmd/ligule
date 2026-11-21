@@ -19,6 +19,7 @@ import { useRunControlCommands } from './handlers/run-control.js';
 import { useViewCommands } from './handlers/view.js';
 import { useUsageCommands } from './handlers/usage.js';
 import { useSessionListCommands } from './handlers/session-list.js';
+import { useSessionMaintenanceCommands } from './handlers/session-maintenance.js';
 import { queuedLine } from './queue-text.js';
 import { clearCancelledLocalQuestion } from './local-question.js';
 import { findRecord } from './record-find.js';
@@ -1630,6 +1631,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     setSessionPicker, setDetail, setExpanded, setSearch, push, t, locale,
   });
 
+  const sessionMaintenanceCommands = useSessionMaintenanceCommands({
+    client, sessionId, setSessionName, setRunning, setStatus, push, t,
+  });
+
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (integrationCommands.handle(name, argument)) return;
@@ -2090,45 +2095,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (viewCommands.handle(name, argument)) return;
     if (usageCommands.handle(name, argument)) return;
     if (sessionListCommands.handle(name, argument)) return;
-    if (name === 'rename' || name === 'archive' || name === 'unarchive') {
-      // 会话名称和归档状态由 Host 写入记录，TUI 不维护第二份副本。
-      const label = name === 'rename' ? { name: argument.trim() } : { archived: name === 'archive' };
-      if (name === 'rename' && label.name === '') {
-        push({ kind: 'error', text: t('请输入会话名称：/rename <名称>', 'Enter a session name: /rename <name>') });
-        return;
-      }
-      void (async () => {
-        const done = await client.request('session.label', { sessionId, ...label }).catch((error: unknown) => requestFailure(error, 'session_label_failed'));
-        if ('code' in done) {
-          push({ kind: 'error', text: t(`无法更新会话：${done.code}`, `Could not update session: ${done.code}`) });
-          return;
-        }
-        setSessionName(done.name ?? '');
-        push({ kind: 'meta', text: t(`${done.name || '未命名会话'} · ${done.archived ? '已归档' : '未归档'}`, `${done.name || 'Untitled session'} · ${done.archived ? 'archived' : 'not archived'}`) });
-      })();
-      return;
-    }
-    if (name === 'compact') {
-      void (async () => {
-        setRunning(true);
-        try {
-        // Host 负责调用模型生成摘要并写入检查点；TUI 显示成功或无法压缩的原因。
-        const done = await client.request('session.compact', { sessionId }).catch((error: unknown) => requestFailure(error, 'session_compact_failed'));
-        if ('code' in done) {
-          push({ kind: 'error', text: t(`无法压缩上下文：${done.code}`, `Could not compact context: ${done.code}`) });
-          return;
-        }
-        setStatus(await client.request('status.get', { sessionId }).catch(() => null));
-        push({
-          kind: 'meta',
-          text: t(`已压缩记录 ${done.fromSeq}–${done.toSeq}：估算 token ${done.tokensBefore} → ${done.tokensAfter}，原文已保留`, `Compacted events ${done.fromSeq}–${done.toSeq}: estimated tokens ${done.tokensBefore} → ${done.tokensAfter}; original content preserved`),
-        });
-        } finally {
-          setRunning(false);
-        }
-      })();
-      return;
-    }
+    if (sessionMaintenanceCommands.handle(name, argument)) return;
     if (name === 'screen') {
       if (externalControl) {
         push({ kind: 'meta', text: t('外控会话的截图能力由独立 Grant 控制，请在外控授权中管理。', 'Screen capture for an externally controlled Session is managed by its separate grant.') });
@@ -2701,7 +2668,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, runControlCommands, sessionId, sessionListCommands, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
+  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, runControlCommands, sessionId, sessionListCommands, sessionMaintenanceCommands, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
