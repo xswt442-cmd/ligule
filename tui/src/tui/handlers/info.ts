@@ -1,5 +1,6 @@
 // 只读信息命令：当前工具清单与会话状态摘要。两者都只读取 Host 的 status.get，并同步界面状态。
 import { useCallback } from 'react';
+import type { MutableRefObject } from 'react';
 import type { Locale } from '@ligule/core/tui.js';
 import type { TuiClient, TuiStatus } from '../app.js';
 import { activeRunBudgetSegment, contextSegment } from '../status-line.js';
@@ -8,6 +9,7 @@ import type { TranscriptItem } from '../transcript.js';
 export type InfoCommandDeps = {
   readonly client: TuiClient;
   readonly sessionId: string;
+  readonly activeSession: MutableRefObject<string>;
   readonly setStatus: (next: TuiStatus | null) => void;
   readonly push: (...items: TranscriptItem[]) => void;
   readonly t: (zh: string, en: string) => string;
@@ -15,12 +17,15 @@ export type InfoCommandDeps = {
 };
 
 export function useInfoCommands(deps: InfoCommandDeps): { handle: (name: string, argument: string) => boolean } {
-  const { client, sessionId, setStatus, push, t, locale } = deps;
+  const { client, sessionId, activeSession, setStatus, push, t, locale } = deps;
 
   const handle = useCallback((name: string): boolean => {
     if (name === 'tools') {
       void (async () => {
-        const current = await client.request('status.get', { sessionId }).catch(() => null);
+        const own = sessionId;
+        const current = await client.request('status.get', { sessionId: own }).catch(() => null);
+        // 等状态期间可能已切换会话：迟到的结果不得覆盖新前台。
+        if (activeSession.current !== own) return;
         setStatus(current);
         push({ kind: 'meta', text: current === null ? t('无法读取状态', 'Could not read status') : t(`工具：${current.tools.join('、')}`, `Tools: ${current.tools.join(', ')}`) });
       })();
@@ -28,7 +33,9 @@ export function useInfoCommands(deps: InfoCommandDeps): { handle: (name: string,
     }
     if (name === 'status') {
       void (async () => {
-        const current = await client.request('status.get', { sessionId }).catch(() => null);
+        const own = sessionId;
+        const current = await client.request('status.get', { sessionId: own }).catch(() => null);
+        if (activeSession.current !== own) return;
         setStatus(current);
         const context = contextSegment(current?.usage, locale);
         const permission = current?.permission === undefined ? '' : t(
@@ -43,7 +50,7 @@ export function useInfoCommands(deps: InfoCommandDeps): { handle: (name: string,
       return true;
     }
     return false;
-  }, [client, locale, push, sessionId, setStatus, t]);
+  }, [activeSession, client, locale, push, sessionId, setStatus, t]);
 
   return { handle };
 }

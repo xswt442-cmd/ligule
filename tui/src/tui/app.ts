@@ -1572,23 +1572,23 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [client]);
 
   const configCommands = useConfigCommands({
-    client, sessionId, projectRoot: info.boundary, push, t, locale, openPicker, refreshStatus, changeThinking, setStatus,
+    client, sessionId, activeSession, projectRoot: info.boundary, push, t, locale, openPicker, refreshStatus, changeThinking, setStatus,
   });
 
-  const infoCommands = useInfoCommands({ client, sessionId, setStatus, push, t, locale });
+  const infoCommands = useInfoCommands({ client, sessionId, activeSession, setStatus, push, t, locale });
 
   const clearCancelledQuestion = useCallback((requestId: string, cancelled: number) => {
     setQuery((current) => clearCancelledLocalQuestion(current, requestId, cancelled));
   }, []);
 
   const runControlCommands = useRunControlCommands({
-    client, projectRoot: info.boundary, sessionId, externalControl,
+    client, projectRoot: info.boundary, sessionId, activeSession, externalControl,
     pendingQuestionId: externalControl || query?.external === true ? undefined : query?.id,
     clearCancelledQuestion, queue, queuePaused, setQueue, setQueuePaused,
     activeQuestion, inputNow, resetOrdinaryDraft, push, t,
   });
 
-  const viewCommands = useViewCommands({ client, sessionId, push, t, locale, setDetail });
+  const viewCommands = useViewCommands({ client, sessionId, activeSession, push, t, locale, setDetail });
 
   const usageCommands = useUsageCommands({ client, projectRoot: info.boundary, sessionId, activeSession, push, t, locale });
 
@@ -1598,7 +1598,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   });
 
   const sessionMaintenanceCommands = useSessionMaintenanceCommands({
-    client, sessionId, setSessionName, setRunning, setStatus, push, t,
+    client, sessionId, activeSession, setSessionName, setRunning, setStatus, status, push, t,
   });
 
   const resourceCommands = useResourceCommands({ client, sessionId, activeSession, push, t });

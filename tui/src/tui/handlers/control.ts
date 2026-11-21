@@ -77,6 +77,10 @@ export function useControlCommands(deps: ControlCommandDeps): { handle: (name: s
       return true;
     }
     const wanted = command.action === 'copy' || command.action === 'revoke' ? command.id : '';
+    if ((command.action === 'copy' || command.action === 'revoke') && wanted.trim() === '') {
+      push({ kind: 'error', text: t('请提供授权 ID：/control copy <ID> 或 /control revoke <ID>', 'Provide a grant ID: /control copy <ID> or /control revoke <ID>') });
+      return true;
+    }
     const token = ++listGeneration.current;
     void (async () => {
       try {

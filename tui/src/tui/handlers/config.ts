@@ -1,6 +1,7 @@
 // 配置与权限类命令：凭据状态、模型选择、思考强度、工具模式、审批方式。
 // 这些命令共享“读当前状态、调用 Host、刷新界面状态”的路径，由 App 传入。
 import { useCallback } from 'react';
+import type { MutableRefObject } from 'react';
 import type { Locale } from '@ligule/core/tui.js';
 import type { TuiClient, TuiStatus } from '../app.js';
 import { errorCode, errorMessage } from '../error-text.js';
@@ -10,6 +11,7 @@ import type { TranscriptItem } from '../transcript.js';
 export type ConfigCommandDeps = {
   readonly client: TuiClient;
   readonly sessionId: string;
+  readonly activeSession: MutableRefObject<string>;
   readonly projectRoot: string | undefined;
   readonly push: (...items: TranscriptItem[]) => void;
   readonly t: (zh: string, en: string) => string;
@@ -21,7 +23,7 @@ export type ConfigCommandDeps = {
 };
 
 export function useConfigCommands(deps: ConfigCommandDeps): { handle: (name: string, argument: string) => boolean } {
-  const { client, sessionId, projectRoot, push, t, locale, openPicker, refreshStatus, changeThinking, setStatus } = deps;
+  const { client, sessionId, activeSession, projectRoot, push, t, locale, openPicker, refreshStatus, changeThinking, setStatus } = deps;
 
   const handle = useCallback((name: string, argument: string): boolean => {
     if (name === 'credentials') {
@@ -80,12 +82,15 @@ export function useConfigCommands(deps: ConfigCommandDeps): { handle: (name: str
     if (name === 'mode') {
       if (argument === '') { openPicker('mode'); return true; }
       void (async () => {
-        const switched = await client.request('mode.set', { sessionId, name: argument }).catch((error: unknown) => ({ code: errorCode(error) ?? 'mode_switch_failed' }));
+        const own = sessionId;
+        const switched = await client.request('mode.set', { sessionId: own, name: argument }).catch((error: unknown) => ({ code: errorCode(error) ?? 'mode_switch_failed' }));
+        if (activeSession.current !== own) return;
         if ('code' in switched) {
           push({ kind: 'error', text: t(`无法切换工具模式：${switched.code}`, `Could not change tool mode: ${switched.code}`) });
           return;
         }
-        setStatus(await client.request('status.get', { sessionId }).catch(() => null));
+        setStatus(await client.request('status.get', { sessionId: own }).catch(() => null));
+        if (activeSession.current !== own) return;
         push({ kind: 'meta', text: switched.pending === null
           ? t(`工具模式：${switched.mode}（${switched.tools.length} 个工具）`, `Tool mode: ${switched.mode} (${switched.tools.length} tools)`)
           : t(`${switched.pending} 将于下轮生效`, `${switched.pending} will apply next turn`) });
@@ -102,12 +107,15 @@ export function useConfigCommands(deps: ConfigCommandDeps): { handle: (name: str
         }
         // 命令行不能绕过二次确认：选择“完全不审批”与选择器走同一条确认路径。
         if (asked === 'never') { openPicker('policy-confirm-never'); return; }
-        const changed = await client.request('policy.set', { sessionId, mode: asked }).catch((error: unknown) => ({ code: errorCode(error) ?? 'policy_change_failed' }));
+        const own = sessionId;
+        const changed = await client.request('policy.set', { sessionId: own, mode: asked }).catch((error: unknown) => ({ code: errorCode(error) ?? 'policy_change_failed' }));
+        if (activeSession.current !== own) return;
         if ('code' in changed) {
           push({ kind: 'error', text: t(`无法修改审批方式：${changed.code}`, `Could not change approval mode: ${changed.code}`) });
           return;
         }
-        setStatus(await client.request('status.get', { sessionId }).catch(() => null));
+        setStatus(await client.request('status.get', { sessionId: own }).catch(() => null));
+        if (activeSession.current !== own) return;
         push({ kind: 'meta', text: changed.policySource === 'session'
           ? t(`当前会话审批方式：${changed.policy}（已生效）`, `Session approval mode: ${changed.policy} (active now)`)
           : t(`已恢复默认审批方式：${changed.policy}`, `Default approval mode restored: ${changed.policy}`) });
@@ -115,7 +123,7 @@ export function useConfigCommands(deps: ConfigCommandDeps): { handle: (name: str
       return true;
     }
     return false;
-  }, [changeThinking, client, locale, openPicker, projectRoot, push, refreshStatus, sessionId, setStatus, t]);
+  }, [activeSession, changeThinking, client, locale, openPicker, projectRoot, push, refreshStatus, sessionId, setStatus, t]);
 
   return { handle };
 }

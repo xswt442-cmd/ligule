@@ -12,13 +12,23 @@ export type CapabilityCommandDeps = {
   readonly activeSession: MutableRefObject<string>;
   readonly externalControl: boolean;
   readonly status: TuiStatus | null;
-  readonly setStatus: (next: TuiStatus | null) => void;
+  readonly setStatus: (next: TuiStatus | null | ((previous: TuiStatus | null) => TuiStatus | null)) => void;
   readonly refreshStatus: () => Promise<void>;
   readonly openPicker: (kind: 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network' | 'permission-confirm-partial') => void;
   readonly changePermission: (change: { readonly profile?: 'read-only' | 'workspace-write' | 'full-access'; readonly network?: 'policy' | 'unrestricted' | 'disabled' }) => Promise<void>;
   readonly push: (...items: TranscriptItem[]) => void;
   readonly t: (zh: string, en: string) => string;
 };
+
+// 同一会话里，浏览器状态的读取可能晚于更新的运行进度：只保留计数更靠前的进度。
+function newerProgress(previous: TuiStatus, next: TuiStatus): TuiStatus {
+  const before = previous.progress ?? null;
+  const after = next.progress ?? null;
+  if (before === null || after === null) return next;
+  const newer = before.modelCalls > after.modelCalls || before.toolCalls > after.toolCalls
+    || before.lastProgressAt > after.lastProgressAt;
+  return newer ? { ...next, running: previous.running, progress: before } : next;
+}
 
 export function useCapabilityCommands(deps: CapabilityCommandDeps): { handle: (name: string, argument: string) => boolean } {
   const { client, sessionId, activeSession, externalControl, status, setStatus, refreshStatus, openPicker, changePermission, push, t } = deps;
@@ -56,6 +66,8 @@ export function useCapabilityCommands(deps: CapabilityCommandDeps): { handle: (n
           await client.request('screen-capture.set', { sessionId: owner, enabled: enabling, ...(enabling ? { confirmScreenCapture: true } : {}) });
           if (activeSession.current !== owner) return;
           await refreshStatus();
+          // 刷新期间可能切换会话：结果只属于发起者。
+          if (activeSession.current !== owner) return;
           push({ kind: 'meta', text: enabling ? t('本会话截图已授权', 'Screen capture allowed for this Session') : t('本会话截图授权已撤销', 'Screen capture consent revoked') });
         } catch (error) {
           if (activeSession.current === owner) push({ kind: 'error', text: errorCode(error) ?? 'screen_capture_update_failed' });
@@ -81,7 +93,9 @@ export function useCapabilityCommands(deps: CapabilityCommandDeps): { handle: (n
           if (activeSession.current === owner) push({ kind: 'error', text: 'browser_status_unavailable' });
           return;
         }
-        setStatus(current);
+        // 浏览器状态读取较慢：会话已切换时丢弃结果，同会话内也不让旧进度覆盖更新的进度。
+        if (activeSession.current !== owner) return;
+        setStatus((previous) => previous === null ? current : newerProgress(previous, current));
         const describe = (browser: NonNullable<TuiStatus['browser']>) => t(
           `浏览器：配置 ${browser.configured ? '已配置' : '未配置'} · 服务 ${browser.available ? '可用' : `不可用（${browser.code ?? 'browser_unavailable'}）`} · 权限 ${browser.permitted ? '允许' : `禁止（${browser.code ?? 'browser_permission_denied'}）`} · 暂停 ${browser.paused ? '是' : '否'} · MCP 连接 ${browser.connected ? '已连接' : '未连接'}`,
           `Browser: configured ${browser.configured ? 'yes' : 'no'} · service ${browser.available ? 'available' : `unavailable (${browser.code ?? 'browser_unavailable'})`} · permitted ${browser.permitted ? 'yes' : `no (${browser.code ?? 'browser_permission_denied'})`} · paused ${browser.paused ? 'yes' : 'no'} · MCP connection ${browser.connected ? 'connected' : 'disconnected'}`,
@@ -134,6 +148,11 @@ export function useCapabilityCommands(deps: CapabilityCommandDeps): { handle: (n
       }
       if (target !== 'read-only' && target !== 'workspace-write' && target !== 'full-access') {
         push({ kind: 'error', text: t('用法：/permission [read-only|workspace-write|full-access|network [policy|disabled|unrestricted]]', 'Usage: /permission [read-only|workspace-write|full-access|network [policy|disabled|unrestricted]]') });
+        return true;
+      }
+      // 权限档位不接受额外参数；多余内容直接拒绝，避免静默忽略。
+      if (value !== undefined) {
+        push({ kind: 'error', text: t('权限档位不接受额外参数：/permission <档位>', 'Permission profiles take no extra arguments: /permission <profile>') });
         return true;
       }
       if (target === 'full-access') {

@@ -156,18 +156,21 @@ export function useIntegrationCommands(deps: IntegrationCommandDeps): { handle: 
       if (command.action === 'revoke') {
         const scope = command.scope;
         void (async () => {
+          const own = sessionId;
           try {
-            const snapshot = await client.request('mcp.trust.list', { projectRoot, sessionId });
+            const snapshot = await client.request('mcp.trust.list', { projectRoot, sessionId: own });
             const server = snapshot.servers.find((item) => item.name === command.server);
             if (server === undefined) throw new Error('mcp_server_unknown');
             await client.request('mcp.trust.set', {
-              projectRoot, sessionId, server: command.server, identityDigest: server.identityDigest, scope, trusted: false,
+              projectRoot, sessionId: own, server: command.server, identityDigest: server.identityDigest, scope, trusted: false,
               ...(scope === 'session' ? {} : { version: snapshot.version }),
             });
+            // 只清除仍属于发起会话的待确认；切换后不要动新会话的卡片。
+            if (!alive.current || activeSession.current !== own) return;
             setPending(null);
             push({ kind: 'meta', text: t(`已撤销 ${command.server} 的 ${scope} 信任。`, `Revoked ${scope} trust for ${command.server}.`) });
           } catch (error) {
-            push({ kind: 'error', text: t(`撤销 MCP Server 信任失败：${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`, `Could not revoke MCP server trust: ${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`) });
+            if (alive.current && activeSession.current === own) push({ kind: 'error', text: t(`撤销 MCP Server 信任失败：${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`, `Could not revoke MCP server trust: ${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`) });
           }
         })();
         return true;

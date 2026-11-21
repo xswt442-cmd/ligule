@@ -1,6 +1,7 @@
 // 会话记录维护命令：重命名、归档/取消归档，以及压缩上下文。
 // 名称与归档状态由 Host 写入记录，TUI 不维护第二份副本。
 import { useCallback } from 'react';
+import type { MutableRefObject } from 'react';
 import type { TuiClient, TuiStatus } from '../app.js';
 import { errorCode } from '../error-text.js';
 import type { TranscriptItem } from '../transcript.js';
@@ -8,15 +9,17 @@ import type { TranscriptItem } from '../transcript.js';
 export type SessionMaintenanceCommandDeps = {
   readonly client: TuiClient;
   readonly sessionId: string;
+  readonly activeSession: MutableRefObject<string>;
   readonly setSessionName: (name: string) => void;
   readonly setRunning: (running: boolean) => void;
   readonly setStatus: (next: TuiStatus | null) => void;
+  readonly status: TuiStatus | null;
   readonly push: (...items: TranscriptItem[]) => void;
   readonly t: (zh: string, en: string) => string;
 };
 
 export function useSessionMaintenanceCommands(deps: SessionMaintenanceCommandDeps): { handle: (name: string, argument: string) => boolean } {
-  const { client, sessionId, setSessionName, setRunning, setStatus, push, t } = deps;
+  const { client, sessionId, activeSession, setSessionName, setRunning, setStatus, status, push, t } = deps;
 
   const handle = useCallback((name: string, argument: string): boolean => {
     if (name === 'rename' || name === 'archive' || name === 'unarchive') {
@@ -27,7 +30,10 @@ export function useSessionMaintenanceCommands(deps: SessionMaintenanceCommandDep
         return true;
       }
       void (async () => {
-        const done = await client.request('session.label', { sessionId, ...label }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_label_failed' }));
+        const own = sessionId;
+        const done = await client.request('session.label', { sessionId: own, ...label }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_label_failed' }));
+        // 等 Host 返回期间可能已切换会话：迟到的名称不得写进新前台。
+        if (activeSession.current !== own) return;
         if ('code' in done) {
           push({ kind: 'error', text: t(`无法更新会话：${done.code}`, `Could not update session: ${done.code}`) });
           return;
@@ -39,27 +45,33 @@ export function useSessionMaintenanceCommands(deps: SessionMaintenanceCommandDep
     }
     if (name === 'compact') {
       void (async () => {
+        const own = sessionId;
+        // 压缩会占用“运行中”标记：结束后回到压缩前的运行状态，不能把仍在跑的轮次标成空闲。
+        const wasRunning = status?.running === true;
         setRunning(true);
         try {
           // Host 负责调用模型生成摘要并写入检查点；TUI 显示成功或无法压缩的原因。
-          const done = await client.request('session.compact', { sessionId }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_compact_failed' }));
+          const done = await client.request('session.compact', { sessionId: own }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_compact_failed' }));
+          if (activeSession.current !== own) return;
           if ('code' in done) {
             push({ kind: 'error', text: t(`无法压缩上下文：${done.code}`, `Could not compact context: ${done.code}`) });
             return;
           }
-          setStatus(await client.request('status.get', { sessionId }).catch(() => null));
+          setStatus(await client.request('status.get', { sessionId: own }).catch(() => null));
+          if (activeSession.current !== own) return;
           push({
             kind: 'meta',
             text: t(`已压缩记录 ${done.fromSeq}–${done.toSeq}：估算 token ${done.tokensBefore} → ${done.tokensAfter}，原文已保留`, `Compacted events ${done.fromSeq}–${done.toSeq}: estimated tokens ${done.tokensBefore} → ${done.tokensAfter}; original content preserved`),
           });
         } finally {
-          setRunning(false);
+          // 只恢复当前会话的标记；切换后的会话由各自的读取结果决定。
+          if (activeSession.current === own) setRunning(wasRunning);
         }
       })();
       return true;
     }
     return false;
-  }, [client, push, sessionId, setRunning, setSessionName, setStatus, t]);
+  }, [activeSession, client, push, sessionId, setRunning, setSessionName, setStatus, status, t]);
 
   return { handle };
 }

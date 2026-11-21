@@ -58,6 +58,13 @@ export function useKeybindCommands(deps: KeybindCommandDeps): { handle: (name: s
         push({ kind: 'error', text: t(`未知动作：${action ?? ''}。用 /bind 查看`, `Unknown action: ${action ?? ''}. Use /bind to browse`) });
         return true;
       }
+      // 恢复单项同样要检查冲突：默认按键可能已被其他动作占用。
+      const resetSpec = KEYMAP[action].spec;
+      const resetClash = conflictsIn(KEYMAP[action].view, { ...CURRENT, [action]: resetSpec });
+      if (resetClash.length > 0) {
+        push({ kind: 'error', text: t(`${formatKeys(resetSpec)} 在${KEYMAP[action].view}中冲突：${resetClash[0].join(' / ')}`, `${formatKeys(resetSpec)} conflicts in ${ENGLISH_VIEWS[KEYMAP[action].view]}: ${resetClash[0].join(' / ')}`) });
+        return true;
+      }
       CURRENT[action] = KEYMAP[action].spec;
       const next = { ...keyOverrides };
       delete next[action];

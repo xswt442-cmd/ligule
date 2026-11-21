@@ -1,7 +1,8 @@
 // 视图与本地交互命令：复制最近回答、导出会话记录、查看单条记录。
 // 复制读取已落盘记录后交给剪贴板；导出由 Host 排版并写入；查看只更新界面详情。
 import { resolve } from 'node:path';
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
+import type { MutableRefObject } from 'react';
 import type { Locale } from '@ligule/core/tui.js';
 import type { TuiClient } from '../app.js';
 import { branchOf } from '../branch-reference.js';
@@ -15,6 +16,7 @@ export type DetailView = { readonly seq: number; readonly kind: string; readonly
 export type ViewCommandDeps = {
   readonly client: TuiClient;
   readonly sessionId: string;
+  readonly activeSession: MutableRefObject<string>;
   readonly push: (...items: TranscriptItem[]) => void;
   readonly t: (zh: string, en: string) => string;
   readonly locale: Locale;
@@ -22,7 +24,9 @@ export type ViewCommandDeps = {
 };
 
 export function useViewCommands(deps: ViewCommandDeps): { handle: (name: string, argument: string) => boolean } {
-  const { client, sessionId, push, t, locale, setDetail } = deps;
+  const { client, sessionId, activeSession, push, t, locale, setDetail } = deps;
+  // 收起详情会让在途读取过期：晚到的结果不再重新打开面板。
+  const readGeneration = useRef(0);
 
   const handle = useCallback((name: string, argument: string): boolean => {
     if (name === 'copy') {
@@ -73,10 +77,13 @@ export function useViewCommands(deps: ViewCommandDeps): { handle: (name: string,
     if (name === 'show') {
       void (async () => {
         if (argument === '') {
+          readGeneration.current += 1;
           setDetail(null);
           return;
         }
+        const token = ++readGeneration.current;
         const read = await client.request('session.read', { sessionId, fullResults: true }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_read_failed' }));
+        if (readGeneration.current !== token || activeSession.current !== sessionId) return;
         if ('code' in read) {
           push({ kind: 'error', text: t(`无法读取记录：${read.code}`, `Could not read conversation: ${read.code}`) });
           return;
@@ -97,10 +104,13 @@ export function useViewCommands(deps: ViewCommandDeps): { handle: (name: string,
     if (name === 'sub') {
       void (async () => {
         if (argument === '') {
+          readGeneration.current += 1;
           setDetail(null);
           return;
         }
+        const token = ++readGeneration.current;
         const parent = await client.request('session.read', { sessionId, fullResults: true }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_read_failed' }));
+        if (readGeneration.current !== token || activeSession.current !== sessionId) return;
         if ('code' in parent) {
           push({ kind: 'error', text: t(`无法读取记录：${parent.code}`, `Could not read conversation: ${parent.code}`) });
           return;
@@ -125,6 +135,7 @@ export function useViewCommands(deps: ViewCommandDeps): { handle: (name: string,
         }
         // 派生会话通过相同的记录读取接口读取；它没有当前运行时状态。
         const read = await client.request('session.read', { sessionId: branch.sessionId, fullResults: true }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_read_failed' }));
+        if (readGeneration.current !== token || activeSession.current !== sessionId) return;
         if ('code' in read) {
           push({ kind: 'error', text: t(`无法读取子任务：${read.code}`, `Could not read subtask: ${read.code}`) });
           return;
@@ -139,7 +150,7 @@ export function useViewCommands(deps: ViewCommandDeps): { handle: (name: string,
       return true;
     }
     return false;
-  }, [client, locale, push, sessionId, setDetail, t]);
+  }, [activeSession, client, locale, push, sessionId, setDetail, t]);
 
   return { handle };
 }

@@ -11,6 +11,7 @@ export type RunControlCommandDeps = {
   readonly client: TuiClient;
   readonly projectRoot: string | undefined;
   readonly sessionId: string;
+  readonly activeSession: MutableRefObject<string>;
   readonly externalControl: boolean;
   readonly pendingQuestionId: string | undefined;
   readonly clearCancelledQuestion: (requestId: string, cancelled: number) => void;
@@ -26,7 +27,7 @@ export type RunControlCommandDeps = {
 };
 
 export function useRunControlCommands(deps: RunControlCommandDeps): { handle: (name: string, argument: string) => boolean } {
-  const { client, projectRoot, sessionId, externalControl, pendingQuestionId, clearCancelledQuestion, queue, queuePaused, setQueue, setQueuePaused, activeQuestion, inputNow, resetOrdinaryDraft, push, t } = deps;
+  const { client, projectRoot, sessionId, activeSession, externalControl, pendingQuestionId, clearCancelledQuestion, queue, queuePaused, setQueue, setQueuePaused, activeQuestion, inputNow, resetOrdinaryDraft, push, t } = deps;
 
   const handle = useCallback((name: string, argument: string): boolean => {
     if (name === 'queue') {
@@ -85,21 +86,25 @@ export function useRunControlCommands(deps: RunControlCommandDeps): { handle: (n
         return true;
       }
       void (async () => {
+        const own = sessionId;
         try {
           const current = externalControl
             ? await client.request('session.control', {
-              projectRoot: projectRoot ?? '', sessionId, request: { action: 'configuration' },
+              projectRoot: projectRoot ?? '', sessionId: own, request: { action: 'configuration' },
             }) as unknown as TuiStatus
-            : await client.request('status.get', { sessionId });
+            : await client.request('status.get', { sessionId: own });
+          if (activeSession.current !== own) return;
           const runId = current.activeRunId;
           if (typeof runId !== 'string' || runId === '') {
             throw Object.assign(new Error('run_not_running'), { code: 'run_not_running' });
           }
           const accepted = externalControl
             ? await client.request('session.control', {
-              projectRoot: projectRoot ?? '', sessionId, request: { action: 'steer', runId, input },
+              projectRoot: projectRoot ?? '', sessionId: own, request: { action: 'steer', runId, input },
             })
-            : await client.request('run.steer', { sessionId, runId, input });
+            : await client.request('run.steer', { sessionId: own, runId, input });
+          // 结果只写给发起时的前台会话，避免切换后污染新会话的卡片与提示。
+          if (activeSession.current !== own) return;
           const pendingCount = typeof accepted.pendingCount === 'number' ? accepted.pendingCount : 0;
           const cancelledInteractions = typeof accepted.cancelledInteractions === 'number' ? accepted.cancelledInteractions : 0;
           if (cancelledInteractions > 0 && pendingQuestionId !== undefined) {
@@ -116,7 +121,7 @@ export function useRunControlCommands(deps: RunControlCommandDeps): { handle: (n
       return true;
     }
     return false;
-  }, [activeQuestion, clearCancelledQuestion, client, externalControl, inputNow, pendingQuestionId, projectRoot, push, queue, queuePaused, resetOrdinaryDraft, sessionId, setQueue, setQueuePaused, t]);
+  }, [activeQuestion, activeSession, clearCancelledQuestion, client, externalControl, inputNow, pendingQuestionId, projectRoot, push, queue, queuePaused, resetOrdinaryDraft, sessionId, setQueue, setQueuePaused, t]);
 
   return { handle };
 }
