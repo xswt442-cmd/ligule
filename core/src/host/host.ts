@@ -93,6 +93,7 @@ import { exportSession } from './session-export.js';
 import { readForClient, readRecordPage, type SessionReadDeps } from './session-read.js';
 import { applyStorageCleanup, inspectStorage, previewStorageCleanup, type StoragePlanState, type StorageScanState } from './storage-service.js';
 import { createSessionImagePreview } from './image-preview.js';
+import { browserView, createStatusView, sessionPermissionView } from './status-view.js';
 import { createSearchSupport, type SearchStatus } from './search.js';
 import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
 import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
@@ -359,9 +360,9 @@ interface HostRunProgress {
 
 type OperationTerminalState = 'exited' | 'failed' | 'cancelled' | 'unknown';
 
-type HostProgressSnapshot = HostRunProgress & { readonly task?: ReturnType<TaskBudget['snapshot']> };
+export type HostProgressSnapshot = HostRunProgress & { readonly task?: ReturnType<TaskBudget['snapshot']> };
 
-interface HostSessionState extends HostSessionBase {
+export interface HostSessionState extends HostSessionBase {
   readonly chain: DecisionChain;
   readonly kernel: Kernel;
   readonly assembly: Assembly;
@@ -469,25 +470,6 @@ function modelSelectionOf(model: Record<string, unknown>): ModelSelection | unde
     : undefined;
 }
 
-function permissionView(permission: PermissionContext, changeAllowed: boolean, changeReason?: string): Record<string, unknown> {
-  const execDenial = permissionDenial(permission, 'exec');
-  return {
-    profile: permission.profile,
-    network: permission.network,
-    capabilities: permission.capabilities,
-    profiles: permission.profiles,
-    limitations: permission.limitations,
-    partialWorkspaceWriteConfirmationRequired: permission.partialWorkspaceWriteConfirmationRequired,
-    partialWorkspaceWriteConfirmed: permission.partialWorkspaceWriteConfirmed,
-    workspaceTrusted: permission.workspaceTrusted,
-    execution: execDenial === undefined
-      ? { available: true, code: null, reason: null }
-      : { available: false, code: execDenial.code, reason: execDenial.reason },
-    changeAllowed,
-    ...(changeReason === undefined ? {} : { changeReason }),
-  };
-}
-
 function permissionOptionsOf(
   permission: PermissionContext,
   partialWorkspaceWriteConfirmed = permission.partialWorkspaceWriteConfirmed,
@@ -500,15 +482,6 @@ function permissionOptionsOf(
     partialWorkspaceWriteConfirmed,
     workspaceTrusted,
   };
-}
-
-function sessionPermissionView(state: HostSessionState, controlAllowed: boolean): Record<string, unknown> {
-  const changeReason = !controlAllowed ? 'permission_control_unavailable'
-    : state.running !== undefined ? 'permission_session_running'
-      : state.permissionChanging === true ? 'permission_change_in_progress'
-        : state.extensions.loaded.length > 0 ? 'permission_extension_restart_required'
-          : undefined;
-  return permissionView(state.permission, changeReason === undefined, changeReason);
 }
 
 function checkedSessionModel(model: Record<string, unknown>, selection: ModelSelection): Record<string, unknown> {
@@ -857,6 +830,8 @@ export function createHost({
   const environments = new Map<string, ProjectEnvironment>([[defaultEnvironment.projectRoot, defaultEnvironment]]);
   const sessionConfigurationTails = new Map<string, Promise<void>>();
   const controlTrust: ControlTrust = { permissionControl, agentControl };
+  // 状态视图在 status-view.ts；这里只固定模型选择的投影方式。
+  const statusView = createStatusView({ modelSelectionOf });
   // 展示的“权限可改”与本机执行判定调用同一个函数，避免两处各维护一套条件。
   // 可信 UI 的 Host 对所有连接可信（它只承载本机 TUI/桌面自身），桥连接按自身通道放行；
   // 普通 MCP 客户端两条路径都不成立，因此展示值必须走这里而不是 Host 级的 permissionControl。
@@ -1004,14 +979,6 @@ export function createHost({
   async function revokeSessionMcp(state: HostSessionState, name: string): Promise<void> {
     await Promise.all([state.mcp, ...state.childMcp.keys()].map(registry => registry.revoke(name)));
     if (name === BROWSER_SERVER) await Promise.all([state.id, ...state.childMcp.values()].map(id => state.browser.clearSession(id)));
-  }
-
-  function browserView(state: HostSessionState) {
-    const denied = permissionDenial(state.permission, 'external');
-    return { ...state.browser.status, permitted: state.browser.status.available && denied === undefined,
-      ...(state.browser.status.code === undefined && denied !== undefined ? { code: denied.code } : {}),
-      paused: state.browserPaused, connected: [state.mcp, ...state.childMcp.keys()].some(registry => registry.activeServers().includes(BROWSER_SERVER)),
-      changeAllowed: permissionControl };
   }
 
   async function readOnlySessionConfig(projectRoot: string): Promise<RuntimeConfig> {
@@ -3190,7 +3157,7 @@ export function createHost({
         permission: sessionPermissionView(state, mayChangePermission(bridge)),
         screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
         search: state.search,
-        browser: browserView(state),
+        browser: browserView(state, permissionControl),
         generation: generationView(state.generation),
       },
       pending,
@@ -4101,7 +4068,7 @@ export function createHost({
               state.browserPaused = true;
               await revokeSessionMcp(state, BROWSER_SERVER);
             }
-            return { sessionId, browser: browserView(state) };
+            return { sessionId, browser: browserView(state, permissionControl) };
           });
         }
         case 'session.control': {
@@ -4663,70 +4630,12 @@ export function createHost({
         }
         case 'status.get': {
           const state = open(sessionId);
-          const currentGrant = await activeDelegation();
-          return {
-            sessionId,
-            running: state.running !== undefined,
-            activeRunId: state.activeRunId ?? null,
-            operation: state.operationOnly === true ? {
-              operationId: state.operationId,
-              sourceSessionId: state.operationSourceSessionId,
-              finished: state.operationFinished === true,
-            } : null,
+          return await statusView(state, {
+            grant: await activeDelegation(),
+            controlAllowed: mayChangePermission(bridge),
+            permissionControl,
             progress: progressSnapshotOf(state),
-            // 只返回当前模式可用的工具，不返回全部已登记工具。
-            tools: state.kernel.manifest().map((entry) => entry.name),
-            mode: state.mode.file?.name ?? null,
-            modeLayer: state.mode.file?.layer ?? null,
-            pendingMode: state.pending?.name ?? null,
-            // 返回会话当前使用的模型，以及等待下一轮边界生效的设置。
-            model: state.generation.provider.model ?? null,
-            outputTokens: state.generation.provider.outputTokens ?? null,
-            selectedModel: modelSelectionOf(state.generation.model)?.model ?? state.generation.provider.model ?? null,
-            serviceId: modelSelectionOf(state.generation.model)?.provider ?? resolveModel(state.generation.model).serviceId ?? 'legacy',
-            pendingServiceId: state.pendingGeneration === undefined ? null : modelSelectionOf(state.pendingGeneration.model)?.provider ?? null,
-            pendingModel: state.pendingGeneration?.provider.model ?? null,
-            contextTokens: state.generation.provider.contextTokens ?? null,
-            thinking: {
-              available: state.generation.provider.thinkingCapability?.efforts ?? [],
-              defaultEffort: state.generation.provider.thinkingCapability?.defaultEffort ?? null,
-              effective: state.generation.options.thinkingEffort ?? 'default',
-              pending: state.pendingGeneration?.options.thinkingEffort ?? null,
-            },
-            // 分别返回当前模式和策略，并说明策略来自配置默认值还是会话覆盖。
-            policy: state.chain.mode,
-            policySource: state.chain.modeSource,
-            policyDefault: state.chain.configuredMode(),
-            permission: sessionPermissionView(state, mayChangePermission(bridge)),
-            screenCapture: { enabled: state.screenCapture.enabled, source: state.screenCapture.source, changeAllowed: permissionControl },
-            search: state.search,
-            browser: browserView(state),
-            taskLimits: taskLimitsOf(state.environment.config, state.loopModelCalls),
-            task: state.taskBudget?.snapshot() ?? state.lastTask ?? null,
-            denials: state.chain.denials(),
-            delegation: currentGrant === undefined ? null : {
-              grantId: currentGrant.id,
-              name: currentGrant.name,
-              source: currentGrant.source,
-              defaultPermissionProfile: currentGrant.defaultPermissionProfile,
-              maxPermissionProfile: currentGrant.maxPermissionProfile,
-              defaultNetwork: currentGrant.defaultNetwork,
-              maxNetwork: currentGrant.maxNetwork,
-              defaultPolicy: currentGrant.defaultPolicy,
-              allowedPolicies: currentGrant.allowedPolicies,
-              allowOperator: currentGrant.allowOperator,
-              allowScreenCapture: currentGrant.allowScreenCapture,
-              allowedMcpServers: currentGrant.allowedMcpServers,
-              allowedMcpTools: currentGrant.allowedMcpTools,
-            },
-            // 这里只返回条数；记录内容由 `session.read` 提供。
-            eventCount: (await state.session.read()).length,
-            // 返回工具名称、说明和参数模式，供客户端选择工具。
-            templates: state.templates.templates.map(({ command, description, hint }) => ({ command, description, hint })),
-            // 返回上下文窗口、压力阈值、投影 Token 数和提供方最近报告的用量。
-            // 模型窗口未知时返回 null，因为此时无法估算上下文压力。
-            usage: state.compaction === null ? null : await state.compaction.context(),
-          };
+          });
         }
         case 'session.configure': {
           return await serializeSessionConfiguration(sessionId, () => configureSession(open(sessionId), message.params, bridge));
