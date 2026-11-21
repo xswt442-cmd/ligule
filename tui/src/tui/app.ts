@@ -17,9 +17,11 @@ import { useConfigCommands } from './handlers/config.js';
 import { useInfoCommands } from './handlers/info.js';
 import { useRunControlCommands } from './handlers/run-control.js';
 import { useViewCommands } from './handlers/view.js';
+import { useUsageCommands } from './handlers/usage.js';
 import { queuedLine } from './queue-text.js';
 import { clearCancelledLocalQuestion } from './local-question.js';
 import { findRecord } from './record-find.js';
+import { isRecord } from './guards.js';
 import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
 import { collectTranscriptPages } from './transcript-pages.js';
 import { VERSION } from '../version.js';
@@ -38,7 +40,7 @@ import { controlPresets, textOf as chooseText, VIEW_REQUEST_METHOD, type Locale 
 import type { TerminalAction } from './keymap.js';
 import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type ControlWizardValues } from './control-wizard.js';
 import { createSessionNavigation, type SessionNavigation, type SessionNavigationLease } from './session-navigation.js';
-import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionSummary, UsageBucket, UsageSummary } from '@ligule/core/tui.js';
+import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionSummary, UsageSummary } from '@ligule/core/tui.js';
 import type { SessionControlSnapshot, SessionReadPage, SubrunReference, SubrunStatus } from '@ligule/core/wire.js';
 import type { AgentPresetPage, AgentPresetPreview } from '@ligule/core/tui.js';
 import type { McpTrustScope, PresetCommand, SubrunCommand, TemplateCommand } from './commands.js';
@@ -55,10 +57,6 @@ const CANDIDATE_ROWS = 6;
 const MENTION_ROWS = 8;
 // 表示当前没有文本组合输入；有效光标位置不会是 -1。
 const NO_TOKEN = { start: -1, text: '' } as const;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function isSessionEvent(value: unknown): value is SessionEvent {
   return isRecord(value) && typeof value.seq === 'number'
@@ -516,6 +514,7 @@ export { foldText } from './message-format.js';
 export { queuedLine } from './queue-text.js';
 export { clearCancelledLocalQuestion } from './local-question.js';
 export { findRecord } from './record-find.js';
+export { requestDiagnosticLines } from './usage-lines.js';
 
 export { capabilityOf, projectRecord, resultParts };
 
@@ -557,41 +556,6 @@ export function branchOf(record: TuiRecord | undefined): { readonly code: 'tui_s
     return { code: 'tui_sub_reference_spilled', spilled: typeof result?.spilled === 'string' ? result.spilled : undefined };
   }
   return { sessionId };
-}
-
-export function requestDiagnosticLines(entries: readonly Record<string, unknown>[], locale: Locale = 'zh'): string[] {
-  const t = (zh: string, en: string) => chooseText(locale, zh, en);
-  return entries.map((entry) => {
-    const components = isRecord(entry.components) ? entry.components : {};
-    const compaction = isRecord(entry.compaction) ? entry.compaction : {};
-    const truncation = isRecord(entry.truncation) ? entry.truncation : {};
-    const resolvedImages = isRecord(entry.resolvedImages) ? entry.resolvedImages : {};
-    const cache = isRecord(entry.cache) ? entry.cache : undefined;
-    const request = typeof entry.requestId === 'string' ? entry.requestId.slice(0, 8) : 'request';
-    const attempt = typeof entry.attempt === 'number' ? entry.attempt : '?';
-    const provider = typeof entry.provider === 'string' ? entry.provider : 'unknown';
-    const model = typeof entry.model === 'string' ? entry.model : 'unknown';
-    const number = (value: unknown) => typeof value === 'number' ? value : 0;
-    const usage = (value: unknown) => typeof value === 'number' ? String(value) : t('未知', 'unknown');
-    const blocks = Array.isArray(compaction.blocks) ? compaction.blocks : [];
-    const ranges = blocks.flatMap((item) => isRecord(item) && typeof item.fromSeq === 'number' && typeof item.toSeq === 'number'
-      ? [`${item.fromSeq}–${item.toSeq}`] : []);
-    const cacheSummary = cache === undefined ? t('缓存用量未报', 'cache usage unreported')
-      : t(`缓存命中 ${usage(cache.hitInputTokens)}、未命中 ${usage(cache.missInputTokens)}`, `cache hit ${usage(cache.hitInputTokens)}, miss ${usage(cache.missInputTokens)}`);
-    return [
-      `${request} · ${provider}/${model} · ${t(`尝试 ${attempt}`, `attempt ${attempt}`)} · ${String(entry.status ?? 'unknown')}`,
-      t(`估算 ${number(entry.estimatedInputTokens)} tokens（${String(entry.estimateMethod ?? 'unknown')}）；实报输入 ${usage(entry.inputTokens)}、输出 ${usage(entry.outputTokens)}`,
-        `estimated ${number(entry.estimatedInputTokens)} tokens (${String(entry.estimateMethod ?? 'unknown')}); reported input ${usage(entry.inputTokens)}, output ${usage(entry.outputTokens)}`) + ` · ${cacheSummary}`,
-      t(`字节：系统 ${number(components.systemBytes)}（前缀 ${number(components.systemPrefixBytes)}、指南 ${number(components.projectGuideBytes)}、动态 ${number(components.dynamicContextBytes)}），工具 Schema ${number(components.toolSchemaBytes)}，历史 ${number(components.historyBytes)}，图片 ${number(components.imageReferenceCount)} 个（引用 ${number(components.imageReferenceBytes)} 字节；已解析 ${number(resolvedImages.count)} 个、${number(resolvedImages.bytes)} 字节）`,
-        `bytes: system ${number(components.systemBytes)} (prefix ${number(components.systemPrefixBytes)}, guides ${number(components.projectGuideBytes)}, dynamic ${number(components.dynamicContextBytes)}), tool schemas ${number(components.toolSchemaBytes)}, history ${number(components.historyBytes)}, images ${number(components.imageReferenceCount)} (${number(components.imageReferenceBytes)} reference bytes; ${number(resolvedImages.count)} resolved, ${number(resolvedImages.bytes)} bytes)`),
-      t(`投影准备：提示片段截断 ${number(truncation.promptFragments)} 处，消息 ${number(truncation.messagesBeforePreparation)} → ${number(truncation.messagesAfterPreparation)}；${truncation.preparationChangedProjection === true ? '压缩或提醒改变了投影' : '未改变投影'}`,
-        `request preparation: ${number(truncation.promptFragments)} prompt fragments truncated, ${number(truncation.messagesBeforePreparation)} → ${number(truncation.messagesAfterPreparation)} messages; ${truncation.preparationChangedProjection === true ? 'compaction or reminder changed it' : 'unchanged'}`),
-      t(`压缩块 ${ranges.length === 0 ? '无' : ranges.join('、')}；摘要请求 ${number(compaction.summaryRequests)} 次（${String(compaction.summaryUsageScope ?? 'unknown')}）：输入 ${usage(compaction.summaryInputTokens)}、输出 ${usage(compaction.summaryOutputTokens)}、缓存 ${usage(compaction.summaryCachedInputTokens)}`,
-        `compaction blocks ${ranges.length === 0 ? 'none' : ranges.join(', ')}; ${number(compaction.summaryRequests)} summary requests (${String(compaction.summaryUsageScope ?? 'unknown')}): input ${usage(compaction.summaryInputTokens)}, output ${usage(compaction.summaryOutputTokens)}, cached ${usage(compaction.summaryCachedInputTokens)}`)
-        + t(` · 检查点 ${String(compaction.checkpointValidation ?? 'unknown')}${typeof compaction.checkpointValidationReason === 'string' ? ` (${compaction.checkpointValidationReason})` : ''}`,
-          ` · checkpoint ${String(compaction.checkpointValidation ?? 'unknown')}${typeof compaction.checkpointValidationReason === 'string' ? ` (${compaction.checkpointValidationReason})` : ''}`),
-    ].join('\n');
-  });
 }
 
 // 标题注明当前显示的是主会话还是派生会话，因为两者使用各自的事件序号。
@@ -1658,6 +1622,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const viewCommands = useViewCommands({ client, sessionId, push, t, locale, setDetail });
 
+  const usageCommands = useUsageCommands({ client, projectRoot: info.boundary, sessionId, activeSession, push, t, locale });
+
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (integrationCommands.handle(name, argument)) return;
@@ -2165,134 +2131,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     if (runControlCommands.handle(name, argument)) return;
     if (viewCommands.handle(name, argument)) return;
-    if (name === 'usage') {
-      const parts = argument.trim().split(/\s+/u).filter((part) => part !== '');
-      if (parts[0] === 'requests') {
-        const action = parts[1] ?? 'read';
-        if (parts.length > 2 || !['read', 'on', 'off'].includes(action)) {
-          push({ kind: 'error', text: t('用法：/usage requests [on|off]', 'Usage: /usage requests [on|off]') });
-          return;
-        }
-        const own = sessionId;
-        void client.request('usage.diagnostics', {
-          sessionId: own,
-          action: action === 'on' ? 'enable' : action === 'off' ? 'disable' : 'read',
-        }).then((diagnostics) => {
-          if (activeSession.current !== own) return;
-          if (action === 'on') {
-            push({ kind: 'meta', text: t('本地请求诊断已开启；最多保留最近 32 次请求。', 'Local request diagnostics enabled; the last 32 requests are retained.') });
-            return;
-          }
-          if (action === 'off') {
-            push({ kind: 'meta', text: t('本地请求诊断已关闭并清空。', 'Local request diagnostics disabled and cleared.') });
-            return;
-          }
-          if (!diagnostics.enabled) {
-            push({ kind: 'meta', text: t('本地请求诊断未开启；运行 /usage requests on 后才开始收集。', 'Local request diagnostics are off; run /usage requests on to start collecting.') });
-            return;
-          }
-          const lines = requestDiagnosticLines(diagnostics.entries, locale);
-          push({ kind: 'meta', text: lines.length === 0 ? t('开启后还没有新的模型请求。', 'No model requests were sent after diagnostics were enabled.') : lines.join('\n\n') });
-        }, (error: unknown) => {
-          if (activeSession.current === own) push({ kind: 'error', text: t(
-            `无法读取本地请求诊断：${errorCode(error) ?? 'request_diagnostics_failed'}`,
-            `Could not read local request diagnostics: ${errorCode(error) ?? 'request_diagnostics_failed'}`,
-          ) });
-        });
-        return;
-      }
-      if (parts.length > 0) {
-        push({ kind: 'error', text: t('用法：/usage [requests [on|off]]', 'Usage: /usage [requests [on|off]]') });
-        return;
-      }
-      // 用量按用途分开读：主机返回只读聚合，TUI 不自己累加事件。
-      // 记录按会话所属项目定位：别的项目的会话不在本进程默认目录里。
-      const root = info.boundary ?? '';
-      void (async () => {
-        const measured = await client.request('usage.get', root === '' ? { sessionId } : { sessionId, projectRoot: root })
-          .catch((error: unknown) => requestFailure(error, 'usage_read_failed'));
-        if (measured === null || typeof measured !== 'object' || 'code' in measured) {
-          const code = measured !== null && typeof measured === 'object' && 'code' in measured
-            ? String((measured as { code: unknown }).code) : 'usage_read_failed';
-          push({ kind: 'error', text: t(`无法读取用量：${code}`, `Could not read usage: ${code}`) });
-          return;
-        }
-        const summary = (measured as { summary?: UsageSummary }).summary;
-        if (summary === undefined) {
-          push({ kind: 'error', text: t('无法读取用量：返回里没有汇总', 'Could not read usage: the reply has no summary') });
-          return;
-        }
-        const line = (label: string, bucket: UsageBucket): string => {
-          if (bucket.requests === 0) return t(`${label}：暂无调用`, `${label}: no calls yet`);
-          const input = bucket.unknownInputRequests === 0
-            ? t(`输入 ${bucket.input}`, `input ${bucket.input}`)
-            : t(`输入未知（${bucket.unknownInputRequests} 次未报）`, `input unknown (${bucket.unknownInputRequests} unreported)`);
-          const output = bucket.unknownOutputRequests === 0
-            ? t(`输出 ${bucket.output}`, `output ${bucket.output}`)
-            : t(`输出未知（${bucket.unknownOutputRequests} 次未报）`, `output unknown (${bucket.unknownOutputRequests} unreported)`);
-          const cached = bucket.cachedInput === 0 ? '' : t(`，其中缓存 ${bucket.cachedInput}`, ` (${bucket.cachedInput} cached)`);
-          return t(`${label}：${bucket.requests} 次请求，${input}${cached}，${output}`, `${label}: ${bucket.requests} calls, ${input}${cached}, ${output}`);
-        };
-        // 最近一次复审也从会话记录里读，TUI 不自己推断裁决。
-        // 外控会话由别的 Host 持有写入锁，`session.read` 会报 `session_not_open`；
-        // 这时改用不取锁的 `session.observe`，并按 `before` 向更早的页翻，
-        // 否则复审早于最新一页时，命令会把“存在但没翻到”说成“没有复审”。
-        interface ReviewEvent { kind?: string; seq?: number; review?: string; reasonCode?: string; evidenceSeqs?: readonly number[] }
-        // 分页预算上限：100 页 × 400 条足够覆盖常见会话；翻到上限就如实说“没查完”。
-        const REVIEW_PAGE_LIMIT = 100;
-        const readReviews = async (): Promise<{ reviews: readonly ReviewEvent[] } | { code: string } | { incomplete: true }> => {
-          const direct = await client.request('session.read', { sessionId }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_read_failed' }));
-          if (!('code' in direct)) {
-            return { reviews: (direct.events as readonly ReviewEvent[]).filter((event) => event.kind === 'policyReview') };
-          }
-          let cursor: number | undefined;
-          for (let page = 0; page < REVIEW_PAGE_LIMIT; page += 1) {
-            const params: { projectRoot: string; sessionId: string; limit: number; before?: number } = {
-              projectRoot: info.boundary ?? '', sessionId, limit: 400,
-            };
-            if (cursor !== undefined) params.before = cursor;
-            const observed = await client.request('session.observe', params).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_observe_failed' }));
-            if ('code' in observed) return { code: observed.code };
-            const events = observed.events as readonly ReviewEvent[];
-            const found = events.filter((event) => event.kind === 'policyReview');
-            if (found.length > 0) return { reviews: found };
-            const oldest = events[0];
-            // 空页或已经翻到 seq 1 才说明真的没有更早的记录；否则只是还没翻到。
-            if (oldest?.seq === undefined || oldest.seq <= 1) return { reviews: [] };
-            cursor = oldest.seq;
-          }
-          // 翻到页数上限仍未找到：结论是“没查完”，不是“没有复审”。
-          return { incomplete: true };
-        };
-        const page = await readReviews();
-        if (activeSession.current !== sessionId) return;
-        const lines = [
-          line(t('主 Agent', 'Agent'), summary.agent),
-          line(t('复审', 'Reviewer'), summary.reviewer),
-        ];
-        // 记录读不出来时不能把“读不到”说成“没有复审”：用量那本账仍然照实显示，
-        // 但复审这一行必须明确报错，否则用户会以为这段时间一次复审都没发生。
-        if ('code' in page) {
-          push({ kind: 'meta', text: lines.join('\n') });
-          push({ kind: 'error', text: t(`无法读取会话记录，最近复审未知：${page.code}`, `Cannot read the session log, so the last review is unknown: ${page.code}`) });
-          return;
-        }
-        // 翻到页数上限也没找到复审：只能报“没查完”，不能声称一次复审都没有。
-        if ('incomplete' in page) {
-          push({ kind: 'meta', text: lines.join('\n') });
-          push({ kind: 'error', text: t(`查询未完成（已向前翻 ${REVIEW_PAGE_LIMIT} 页仍未找到复审），最近复审未知`, `The lookup stopped at its ${REVIEW_PAGE_LIMIT}-page limit, so the last review is unknown`) });
-          return;
-        }
-        const last = page.reviews[page.reviews.length - 1];
-        if (last?.review !== undefined) {
-          const code = last.reasonCode ?? 'review_unspecified';
-          const count = last.evidenceSeqs?.length ?? 0;
-          lines.push(t(`最近复审：${last.review}（${code}，证据 ${count} 条）`, `Last review: ${last.review} (${code}, ${count} evidence items)`));
-        }
-        push({ kind: 'meta', text: lines.join('\n') });
-      })();
-      return;
-    }
+    if (usageCommands.handle(name, argument)) return;
     if (name === 'rename' || name === 'archive' || name === 'unarchive') {
       // 会话名称和归档状态由 Host 写入记录，TUI 不维护第二份副本。
       const label = name === 'rename' ? { name: argument.trim() } : { archived: name === 'archive' };
@@ -2904,7 +2743,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, runControlCommands, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui, viewCommands]);
+  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, runControlCommands, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
