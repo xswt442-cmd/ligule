@@ -47,7 +47,7 @@ import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
 import { createRunAcceptance, findRunReceipt, isRunAcceptance, publishRunResult, readRunResult, runPayloadDigest, runReceipts, runResultPage, type DurableRunReceipt, type RunAcceptance } from '../session/run.js';
-import type { SessionEvent, SessionHeader } from '../session/format.js';
+import type { SessionEvent } from '../session/format.js';
 import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDirectory, workspaceDataDirectory } from '../session/list.js';
 import { adoptForSessionDirectory } from '../session/adopt.js';
 import { searchSessionDirectories } from '../session/search.js';
@@ -55,7 +55,6 @@ import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
 import { listProjectDirectory, readProjectFile, readProjectFileText, saveProjectFile, searchProjectFiles } from './project-files.js';
 import { projectGitDiffVersion, readProjectGitDiff, readProjectGitStatus } from './project-git.js';
-import { branchSessionId, exportImageUrl, exportMarkdown, exportRecordOf, MAX_EXPORT_ASSETS, readExportEvidence, writeExport, type ExportAsset, type ExportRecord } from './export.js';
 import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
 export { compactionLimitsOf } from './runtime-limits.js';
 import { createCompaction } from '../session/compaction.js';
@@ -90,13 +89,14 @@ import { createReadDocumentPlugin } from '../tools/read-document.js';
 import { createPresentPlugin, type ViewRequestArguments, type ViewRequestResult } from '../tools/present.js';
 import { listArtifacts, previewArtifact, inspectArtifact, resolveArtifact, type ArtifactEnvironment, type ArtifactScope } from './artifacts.js';
 import { readToolResult } from './tool-result-view.js';
+import { exportSession } from './session-export.js';
 import { createSearchSupport, type SearchStatus } from './search.js';
 import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
 import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
 import { createScreenshotPlugin } from '../tools/screenshot.js';
 import { createMediaStore, imagePreview, type SessionMediaScan } from '../capability/media.js';
 import { previewStorageGarbage, applyStorageGarbage, type StorageGcCandidate } from '../capability/storage-gc.js';
-import { checkedImageReferences, IMAGE_LIMITS, type ImageReference } from '../media.js';
+import { checkedImageReferences } from '../media.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
 import { createSubagentPlugin, type SubagentRuntime } from '../tools/subagent.js';
@@ -4195,92 +4195,15 @@ export function createHost({
           };
         }
         case 'session.export': {
-          // 导出会把完整 RunResult 与图片写到用户选择的路径，只允许可信本地 UI 发起。
-          // Host 负责读取和排版完整记录并写出文件，客户端只选择目标路径。
-          // 用户通过保存对话框选择的导出路径不属于模型工具写入，不受项目边界限制。
-          const record = await readRecord(sessionId, { fullResults: true });
-          const path = requiredString(message.params.path, 'path');
-          const exportEnvironment = sessions.get(sessionId)?.environment
-            ?? sessions.get(branchOwner(sessionId) ?? '')?.environment ?? defaultEnvironment;
-          const assets: ExportAsset[] = [];
-          const assetFailures: { path: string; code: string }[] = [];
-          const imageUrls = new Map<string, string>();
-          const seenImages = new Map<string, ImageReference>();
-          let assetBytes = 0;
-          const collectImages = async (id: string, records: readonly ExportRecord[]) => {
-            const references = records.flatMap(item => item.result?.images ?? []);
-            if (references.length === 0) return;
-            const media = createMediaStore({ ...exportEnvironment.config, workspaceRoot: exportEnvironment.projectRoot }, id, references);
-            for (const reference of references) {
-              const previous = seenImages.get(reference.id);
-              if (previous !== undefined && (Object.keys(previous) as (keyof ImageReference)[]).every(key => previous[key] === reference[key])) continue;
-              const failedPath = join(dirname(path), decodeURIComponent(exportImageUrl(path, reference.id)));
-              if (previous !== undefined) {
-                imageUrls.delete(reference.id);
-                assetFailures.push({ path: failedPath, code: 'export_asset_conflict' });
-                continue;
-              }
-              seenImages.set(reference.id, reference);
-              if (assets.length >= MAX_EXPORT_ASSETS || assetBytes + reference.bytes > IMAGE_LIMITS.storageBytes) {
-                assetFailures.push({ path: failedPath, code: 'export_asset_limit_exceeded' });
-                continue;
-              }
-              try {
-                const data = await media.read(reference);
-                assets.push({ reference, data });
-                assetBytes += data.length;
-                imageUrls.set(reference.id, exportImageUrl(path, reference.id));
-              } catch (error) {
-                assetFailures.push({ path: failedPath, code: errorCode(error) ?? 'image_unavailable' });
-              }
-            }
-          };
-          const header: SessionHeader | undefined = record.header ?? undefined;
-          const exportRecords = record.events.flatMap((event) => {
-            const item = exportRecordOf(event);
-            return item === undefined ? [] : [item];
+          // 导出的读取、排版与逐文件写出在 session-export.ts；入口只解析目标路径与运行环境。
+          return await exportSession({
+            sessionId, path: requiredString(message.params.path, 'path'),
+            environmentOf: id => sessions.get(id)?.environment,
+            defaultEnvironment,
+            branchOwner,
+            running: sessions.get(sessionId)?.running !== undefined,
+            readRecord: (id, params) => readRecord(id, params),
           });
-          await collectImages(sessionId, exportRecords);
-          // 同时导出父会话记录引用的派生会话内容。
-          const branches = [];
-          const skipped = [];
-          for (const event of record.events) {
-            const item = exportRecordOf(event);
-            if (item === undefined) continue;
-            const branchId = branchSessionId(item);
-            if (branchId === undefined) continue;
-            let branch;
-            try {
-              branch = await readRecord(branchId, { fullResults: true });
-            } catch (error) {
-              skipped.push({ id: branchId, code: errorCode(error) ?? 'session_read_failed' });
-              continue;
-            }
-            const branchEvents = branch.events.flatMap((event) => {
-              const exported = exportRecordOf(event);
-              return exported === undefined ? [] : [exported];
-            });
-            await collectImages(branchId, branchEvents);
-            branches.push({ id: branchId, events: branchEvents });
-          }
-          // 导出件要能离线读到日志与基线正文；读不到就写明原因，不能静默保留一个悬空引用。
-          const evidence = await readExportEvidence(exportEnvironment.directory,
-            [...exportRecords, ...branches.flatMap((branch) => branch.events)]);
-          try {
-            // 对每个导出文件分别返回结果，包括路径冲突和写入失败，并附上主文件路径。
-            const main = exportMarkdown(exportRecords, {
-              id: sessionId, projectRoot: header?.projectRoot, createdAt: header?.createdAt ?? null,
-              unfinished: sessions.get(sessionId)?.running !== undefined,
-            }, imageUrls, evidence);
-            const branchTexts = branches.map(branch => ({ id: branch.id,
-              text: exportMarkdown(branch.events, { id: branch.id, projectRoot: header?.projectRoot }, imageUrls, evidence) }));
-            const done = await writeExport(path, main, branchTexts, assets);
-            return { written: done.written, skipped: [...skipped, ...done.skipped], failed: [...assetFailures, ...done.failed] };
-          } catch (cause) {
-            if (cause instanceof KernelError) throw cause;
-            // 无法创建目标目录时，报告整批导出尚未开始。
-            throw new KernelError('host_export_write_failed', { cause, detail: `${message.params.path}: ${errorMessage(cause) ?? String(cause)}` });
-          }
         }
         case 'run.start': {
           const started = await serializeSessionConfiguration(sessionId, async () => {
