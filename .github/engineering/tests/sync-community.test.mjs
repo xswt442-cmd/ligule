@@ -100,6 +100,10 @@ test('apply places a missing file next to the existing community file', () => {
     assert.equal(apply.status, 0, apply.stderr);
     assert.equal(existsSync(join(root, 'CONTRIBUTING.md')), true);
     assert.equal(existsSync(join(root, '.github/CONTRIBUTING.md')), false);
+    const generated = readFileSync(join(root, 'CONTRIBUTING.md'), 'utf8');
+    assert.match(generated, /\]\(docs\/development\/CONTRIBUTING\.en\.md\)/);
+    assert.match(generated, /\]\(\.github\/PULL_REQUEST_TEMPLATE\.md\)/);
+    assert.doesNotMatch(generated, /\]\(\.\.\//);
     assert.equal(run(['--check'], root).status, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });

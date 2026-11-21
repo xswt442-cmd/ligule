@@ -76,7 +76,14 @@ function sync(repo, apply) {
     const relative = companion === undefined ? '.github' : companion.dir === 'repository root' ? '' : companion.dir;
     const target = join(repo, relative, result.spec.name);
     mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, readFileSync(join(sourceRoot, result.spec.template)));
+    let template = readFileSync(join(sourceRoot, result.spec.template), 'utf8');
+    // 模板链接按 .github/ 编写；写到仓库根目录时要改写成根目录相对路径。
+    if (relative === '') {
+      template = template
+        .replaceAll('](../', '](')
+        .replaceAll('](PULL_REQUEST_TEMPLATE.md)', '](.github/PULL_REQUEST_TEMPLATE.md)');
+    }
+    writeFileSync(target, template);
     console.log(`Created: ${target.slice(repo.length + 1)}`);
   }
   if (unresolved) {
