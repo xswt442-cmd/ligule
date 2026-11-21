@@ -9,6 +9,7 @@ import {
   openWorkbenchResource,
   registerWorkbenchCommand,
   registerWorkbenchResource,
+  workbenchTabIndex,
   selectWorkbenchTab,
   selectWorkbenchCommand,
   updateWorkbenchFileDraft,
@@ -26,6 +27,8 @@ test('registering a background resource keeps an empty workbench closed and inac
   assert.equal(registered.tabs.length, 1);
   // 规范化仍保留显式 null，后台回执不会把侧聊页切到前台。
   assert.equal(workbenchStateFrom(registered).activeKey, null);
+  // 没有活动标签时，第一个标签仍可通过 Tab 获得焦点。
+  assert.equal(workbenchTabIndex(registered, registered.tabs[0].key), 0);
   const visible = registerWorkbenchResource(openWorkbenchResource(closed,
     { kind: 'file', projectRoot: 'C:/repo', path: 'src/app.tsx' }, 'app.tsx'),
   { kind: 'side-session', projectRoot: 'C:/repo', sessionId: 'side-2', originSessionId: 'origin-1' }, 'Side chat source');

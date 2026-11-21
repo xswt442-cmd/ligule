@@ -390,6 +390,11 @@ export function updateWorkbenchFileDraft(state: WorkbenchState, key: string, val
   return checkedState({ ...current, tabs });
 }
 
+export function workbenchTabIndex(state: WorkbenchState, key: string): number {
+  // 没有活动标签时让第一个标签进入 Tab 顺序，但不自动激活它。
+  return key === state.activeKey || (state.activeKey === null && key === state.tabs[0]?.key) ? 0 : -1;
+}
+
 export function registerWorkbenchResource(state: WorkbenchState, input: WorkbenchResource, rawTitle: string): WorkbenchState {
   // 只登记 tab：保留调用前的 rightOpen 与 activeKey（含显式 null），不把新资源切到前台。
   const current = checkedState(state);
