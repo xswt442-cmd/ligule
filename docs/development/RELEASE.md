@@ -33,7 +33,7 @@ Ligule 分为两条独立发行线，版本可分别推进：
 - Release 正文标题只写产品名和版本，例如 `Desktop vX.Y.Z`，不加“更新说明 / Release highlights”。正文按 `### 简体中文`、`### English` 分区；安装、下载和校验信息均放在对应语言区块中，不在末尾追加中英混排的内容。
 - **CLI/TUI：** 说明交互模式、工作区/会话行为与可靠性变化；`scripts/release-notes.js` 将 Node.js 版本、安装命令、使用方式和 npm 链接分别放进简体中文与英文区块，不上传重复安装包。
 - **Desktop：** 说明架构变动、工作区/审批与保存导出、原生运行时以及实际提供的安装资产；`scripts/release-notes.js` 在两个语言区块内分别生成本地化下载表。正式 Release 的直链必须来自先通过 SHA-256 和来源校验的 `desktop-release-manifest.json`；不要根据版本号猜测安装包名称，更不能保留“稍后上传草稿附件”的占位文案。
-- Desktop 的 `publish=false` 草稿工作流通过 `node --experimental-strip-types scripts/desktop-release-manifest.ts verify` 校验资产，再调用 `node scripts/release-notes.js desktop-vX.Y.Z --manifest dist-release/desktop-release-manifest.json`。预览时不提供 manifest 只生成各语言的支持平台表和附件区链接，**不会伪造文件直链**。每个语言区块内分别提供 `SHA256SUMS` 与 manifest 链接；只列出该版本实际发布的目标和架构。
+- Desktop 的 `publish=false` 草稿工作流通过 `node --experimental-strip-types scripts/desktop-release-manifest.ts verify` 校验资产，再调用 `node scripts/release-notes.js desktop-vX.Y.Z --manifest dist-release/desktop-release-manifest.json`。预览时不提供 Manifest，只生成各语言的支持平台表和附件区链接，**不会伪造文件直链**。每个语言区块内分别提供 `SHA256SUMS` 与 Manifest 链接；只列出该版本实际发布的目标和架构。
 - 已公开 Release 的说明如需修订，应验证对应真实 Tag、安装包资产和目标 Registry 后修改 Release 正文；不移动 Tag、不覆盖二进制，不会因此重新发布 npm 包。
 
 版本、更新记录和发布渠道必须保持产品隔离。不要重用标签或 npm 版本。重试前先检查 [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases) 与 [npm 包](https://www.npmjs.com/package/ligule)。正式发布前须为 `npm-publish` 和 `desktop-publish` GitHub Environments 配置必需审核者。
