@@ -64,8 +64,11 @@ export function useSessionMaintenanceCommands(deps: SessionMaintenanceCommandDep
             ? await client.request('status.get', { sessionId: own }).catch(() => null)
             : null;
           if (activeSession.current !== own) return;
-          setStatus(latest);
-          setRunning(latest?.running === true);
+          // 读取失败时保留现有状态，避免把仍在运行的轮次清成空闲。
+          if (latest !== null) {
+            setStatus(latest);
+            setRunning(latest.running === true);
+          }
         }
       })();
       return true;
