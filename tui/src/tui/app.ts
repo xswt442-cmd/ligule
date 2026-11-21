@@ -39,6 +39,7 @@ import { SessionPicker } from './session-picker.js';
 import { MessageRow as Row, MarkdownRows } from './message-view.js';
 import { foldText } from './message-format.js';
 import { ConfigurationLine, ProgressLine, Welcome } from './chrome.js';
+import { queueShouldSend } from './compaction-status.js';
 import { DraftInput } from './input-view.js';
 import { ApprovalPanel, buildApprovalLayout } from './approval-view.js';
 import { TUI_COLORS } from './ui-style.js';
@@ -1612,7 +1613,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   });
 
   const sessionMaintenanceCommands = useSessionMaintenanceCommands({
-    client, sessionId, activeSession, setSessionName, setRunning, runningGeneration, setCompacting, setStatus, push, t,
+    client, sessionId, activeSession, compacting, setSessionName, setRunning, runningGeneration, setCompacting, setStatus, push, t,
   });
 
   const resourceCommands = useResourceCommands({ client, sessionId, activeSession, push, t });
@@ -2267,11 +2268,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   // 轮次结束后每次发送一条队列消息；取消后队列保持暂停，需用户明确继续。
   useEffect(() => {
-    if (running || queuePaused || queue.length === 0) return;
+    if (!queueShouldSend({ running, compacting, paused: queuePaused, pending: queue.length })) return;
     const [next, ...rest] = queue;
     setQueue(rest);
     void submit(next);
-  }, [queue, queuePaused, running, submit]);
+  }, [compacting, queue, queuePaused, running, submit]);
 
   // 审批面板和普通输入共用同一取消处理，统一暂停队列。
   const cancelRound = useCallback(() => {

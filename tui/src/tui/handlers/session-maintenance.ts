@@ -3,7 +3,7 @@
 import { useCallback } from 'react';
 import type { MutableRefObject } from 'react';
 import type { TuiClient, TuiStatus } from '../app.js';
-import { applyCompactionStatus } from '../compaction-status.js';
+import { applyCompactionStatus, compactionStartAllowed } from '../compaction-status.js';
 import { errorCode } from '../error-text.js';
 import type { TranscriptItem } from '../transcript.js';
 
@@ -13,6 +13,7 @@ export type SessionMaintenanceCommandDeps = {
   readonly activeSession: MutableRefObject<string>;
   readonly runningGeneration: MutableRefObject<number>;
   readonly setCompacting: (busy: boolean) => void;
+  readonly compacting: boolean;
   readonly setSessionName: (name: string) => void;
   readonly setRunning: (running: boolean) => void;
   readonly setStatus: (next: TuiStatus | null) => void;
@@ -21,7 +22,7 @@ export type SessionMaintenanceCommandDeps = {
 };
 
 export function useSessionMaintenanceCommands(deps: SessionMaintenanceCommandDeps): { handle: (name: string, argument: string) => boolean } {
-  const { client, sessionId, activeSession, runningGeneration, setCompacting, setSessionName, setRunning, setStatus, push, t } = deps;
+  const { client, sessionId, activeSession, runningGeneration, compacting, setCompacting, setSessionName, setRunning, setStatus, push, t } = deps;
 
   const handle = useCallback((name: string, argument: string): boolean => {
     if (name === 'rename' || name === 'archive' || name === 'unarchive') {
@@ -46,6 +47,10 @@ export function useSessionMaintenanceCommands(deps: SessionMaintenanceCommandDep
       return true;
     }
     if (name === 'compact') {
+      if (!compactionStartAllowed(compacting)) {
+        push({ kind: 'meta', text: t('压缩正在进行，完成后才能再次压缩。', 'Compaction is already running; wait for it to finish.') });
+        return true;
+      }
       void (async () => {
         const own = sessionId;
         setCompacting(true);
@@ -77,7 +82,7 @@ export function useSessionMaintenanceCommands(deps: SessionMaintenanceCommandDep
       return true;
     }
     return false;
-  }, [activeSession, client, push, runningGeneration, sessionId, setCompacting, setRunning, setSessionName, setStatus, t]);
+  }, [activeSession, client, compacting, push, runningGeneration, sessionId, setCompacting, setRunning, setSessionName, setStatus, t]);
 
   return { handle };
 }
