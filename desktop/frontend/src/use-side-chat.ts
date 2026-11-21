@@ -1,6 +1,6 @@
 // Side chat 的界面状态与异步创建：捕获选区、打开确认框、调用 Host 创建 side session 并切换前台。
 // 选区与目标会话绑定；创建期间的旧响应不会覆盖已切换的前台会话（由 openSession 的身份校验负责）。
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { code, type Client } from './protocol';
 import { MAX_SIDE_CHAT_CONTEXT_BYTES, sideChatContextBytes, sideChatPrompt, type SideChatSelection } from './side-chat';
 import type { Status } from './status';
@@ -32,6 +32,9 @@ export function useSideChat(deps: {
   const [question, setQuestion] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 创建请求等待期间用户可能已切换前台：迟到的回执不能把前台强行切回 side 会话。
+  const latestSession = useRef(sessionId);
+  latestSession.current = sessionId;
 
   useEffect(() => {
     let frame = 0;
@@ -125,6 +128,15 @@ export function useSideChat(deps: {
       const sourceLabel = context.source.kind === 'event' ? `Session event ${context.source.eventSeq}`
         : context.source.kind === 'file' ? `file ${context.source.path}` : `Git diff ${context.source.path}`;
       const promptText = sideChatPrompt(context.text, prompt, sourceLabel);
+      // 用户已离开发起会话：不切换前台，但已创建的 Side 会话与草稿仍要保留。
+      if (latestSession.current !== sourceSessionId) {
+        setDraft(promptText, { root, id: created.sessionId });
+        openSideSessionResource(created.sessionId, sourceSessionId, root);
+        setDialog(null);
+        setQuestion('');
+        setSelection(null);
+        return;
+      }
       const opened = await openSession(created.sessionId, undefined, false, root);
       if (opened !== true) throw Object.assign(new Error('side_session_open_failed'), { code: 'side_session_open_failed' });
       setDraft(promptText, { root, id: created.sessionId });
