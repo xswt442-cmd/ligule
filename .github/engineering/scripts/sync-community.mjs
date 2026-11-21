@@ -14,12 +14,12 @@ const files = [
   {
     name: 'SECURITY.md',
     template: 'templates/SECURITY.md',
-    headings: ['## Supported versions', '## Reporting', '## Scope', '## Handling'],
+    headings: ['## Supported versions', '## Reporting'],
   },
   {
     name: 'CONTRIBUTING.md',
     template: 'templates/CONTRIBUTING.md',
-    headings: ['## Branches', '## Pull request descriptions', '## Commit messages', '## Documentation', '## Verification', '## Security reports'],
+    headings: ['## Verification'],
     reference: 'SECURITY.md',
   },
 ];
@@ -68,23 +68,10 @@ function sync(repo, apply) {
       unresolved += 1;
       continue;
     }
-    // 与已有社区文件保持同一位置：仓库把 SECURITY.md 放在根目录时，缺失的 CONTRIBUTING.md 也放在根目录。
-    const companion = files
-      .filter((spec) => spec.name !== result.spec.name)
-      .map((spec) => copies(repo, spec.name)[0])
-      .find((entry) => entry !== undefined);
-    const relative = companion === undefined ? '.github' : companion.dir === 'repository root' ? '' : companion.dir;
-    const target = join(repo, relative, result.spec.name);
+    const target = join(repo, '.github', result.spec.name);
     mkdirSync(dirname(target), { recursive: true });
-    let template = readFileSync(join(sourceRoot, result.spec.template), 'utf8');
-    // 模板链接按 .github/ 编写；写到仓库根目录时要改写成根目录相对路径。
-    if (relative === '') {
-      template = template
-        .replaceAll('](../', '](')
-        .replaceAll('](PULL_REQUEST_TEMPLATE.md)', '](.github/PULL_REQUEST_TEMPLATE.md)');
-    }
-    writeFileSync(target, template);
-    console.log(`Created: ${target.slice(repo.length + 1)}`);
+    writeFileSync(target, readFileSync(join(sourceRoot, result.spec.template)));
+    console.log(`Created: .github/${result.spec.name}`);
   }
   if (unresolved) {
     console.error(`${unresolved} file(s) need a manual review; this tool never overwrites an existing copy.`);

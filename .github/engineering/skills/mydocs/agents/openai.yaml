@@ -1,0 +1,3 @@
+interface:
+  display_name: "Repository docs"
+  short_description: "Write README, docs/ guides, and CHANGELOG entries for external readers"

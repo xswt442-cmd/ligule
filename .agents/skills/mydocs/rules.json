@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "about": "这里只放骨架的量尺：内容有没有放错文件、中英两版有没有走形。词和句子归 myshuohua 的 rules.json。maxH2 与 internal 是拿 ligule、tasklutein、muxshift、DiggerTerm 四个仓的 README 校的，改之前先在这几个仓上跑一遍。",
+  "rules": [
+    {
+      "id": "readme-headings",
+      "level": "info",
+      "maxH2": 8,
+      "internal": [
+        "架构", "设计", "实现", "内部", "状态机", "数据流", "模块", "测试", "验证", "覆盖",
+        "发布流程", "发版", "排查", "重构", "接口约定", "边界原则",
+        "Architecture", "Design", "Implementation", "Internals", "State machine",
+        "Data flow", "Modules", "Test coverage", "Verification", "Release process"
+      ],
+      "why": "README 里出现内部文档的标题，这段就该拆进 docs。二级标题超过 maxH2，也先看能不能合并。只提示，不拦。"
+    },
+    {
+      "id": "zh-en-parity",
+      "level": "warning",
+      "why": "两份 README 的标题、段落、条目数量要对得上。对不上通常意味着改了一份忘了另一份。"
+    }
+  ]
+}
