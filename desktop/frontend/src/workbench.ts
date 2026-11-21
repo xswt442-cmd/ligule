@@ -284,8 +284,9 @@ export function workbenchStateFrom(value: unknown): WorkbenchState {
     seen.add(tab.key);
     tabs.push(tab);
   }
-  const requestedActive = typeof value.activeKey === 'string' ? value.activeKey : null;
-  const activeKey = requestedActive !== null && seen.has(requestedActive) ? requestedActive : tabs.at(-1)?.key ?? null;
+  const requestedActive = value.activeKey === null ? null : typeof value.activeKey === 'string' ? value.activeKey : undefined;
+  const activeKey = requestedActive === null ? null
+    : requestedActive !== undefined && seen.has(requestedActive) ? requestedActive : tabs.at(-1)?.key ?? null;
   const commandCandidates = Array.isArray(value.commandTabs) ? value.commandTabs.slice(-MAX_WORKBENCH_COMMANDS) : [];
   const commandTabs: WorkbenchCommandReference[] = [];
   const commandKeys = new Set<string>();
@@ -297,9 +298,10 @@ export function workbenchStateFrom(value: unknown): WorkbenchState {
     commandKeys.add(key);
     commandTabs.push(reference);
   }
-  const requestedCommand = typeof value.activeCommandKey === 'string' ? value.activeCommandKey : null;
-  const activeCommandKey = requestedCommand !== null && commandKeys.has(requestedCommand)
-    ? requestedCommand : commandTabs.at(-1) === undefined ? null : commandReferenceKey(commandTabs.at(-1)!);
+  const requestedCommand = typeof value.activeCommandKey === 'string' ? value.activeCommandKey : value.activeCommandKey === null ? null : undefined;
+  const activeCommandKey = requestedCommand === null ? null
+    : requestedCommand !== undefined && commandKeys.has(requestedCommand) ? requestedCommand
+      : commandTabs.at(-1) === undefined ? null : commandReferenceKey(commandTabs.at(-1)!);
   return {
     version: 1,
     rightOpen: value.rightOpen === true,
@@ -386,6 +388,13 @@ export function updateWorkbenchFileDraft(state: WorkbenchState, key: string, val
   const tabs = [...current.tabs];
   tabs[index] = nextTab;
   return checkedState({ ...current, tabs });
+}
+
+export function registerWorkbenchResource(state: WorkbenchState, input: WorkbenchResource, rawTitle: string): WorkbenchState {
+  // 只登记 tab：保留调用前的 rightOpen 与 activeKey（含显式 null），不把新资源切到前台。
+  const current = checkedState(state);
+  const opened = openWorkbenchResource(current, input, rawTitle);
+  return { ...opened, rightOpen: current.rightOpen, activeKey: current.activeKey };
 }
 
 export function openWorkbenchResource(state: WorkbenchState, input: WorkbenchResource, rawTitle: string): WorkbenchState {

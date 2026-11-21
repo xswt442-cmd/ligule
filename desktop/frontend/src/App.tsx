@@ -40,7 +40,7 @@ import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { appendProjectedRecords, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
 import { taskSummaryLabelOf, taskSummaryOf, type Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, saveWorkbenchSettings, updateSettings, type Settings } from './settings';
-import { addWorkbenchCommand, closeWorkbenchCommand, closeWorkbenchTab, openWorkbenchResource, registerWorkbenchCommand, selectWorkbenchCommand,
+import { addWorkbenchCommand, closeWorkbenchCommand, closeWorkbenchTab, openWorkbenchResource, registerWorkbenchCommand, registerWorkbenchResource, selectWorkbenchCommand,
   selectWorkbenchTab, updateWorkbenchFileDraft, workbenchStateFrom,
   type WorkbenchCommandReference, type WorkbenchFileDraft, type WorkbenchResource } from './workbench';
 import { LocaleProvider, localeOf } from './locale';
@@ -715,11 +715,9 @@ export function App({ transport }: { transport: Transport }) {
   }, [applyWorkbenchState, leaveDock, t]);
   // 后台回执只登记资源，不激活工作台页面，也不改变前台正在看的文件。
   const registerSideSessionResource = useCallback((sideSessionId: string, originSessionId: string, root: string) => {
-    const previous = workbenchRef.current;
     try {
-      const opened = openWorkbenchResource(previous,
-        { kind: 'side-session', projectRoot: root, sessionId: sideSessionId, originSessionId }, t('侧聊来源', 'Side chat source'));
-      applyWorkbenchState({ ...opened, rightOpen: previous.rightOpen, activeKey: previous.activeKey });
+      applyWorkbenchState(registerWorkbenchResource(workbenchRef.current,
+        { kind: 'side-session', projectRoot: root, sessionId: sideSessionId, originSessionId }, t('侧聊来源', 'Side chat source')));
       setWorkbenchError(null);
     } catch (error) { setWorkbenchError(code(error)); }
   }, [applyWorkbenchState, t]);

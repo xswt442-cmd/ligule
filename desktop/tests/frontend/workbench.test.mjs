@@ -8,12 +8,29 @@ import {
   closeWorkbenchCommand,
   openWorkbenchResource,
   registerWorkbenchCommand,
+  registerWorkbenchResource,
   selectWorkbenchTab,
   selectWorkbenchCommand,
   updateWorkbenchFileDraft,
   workbenchStateFrom,
 } from '../../frontend/src/workbench.ts';
 import { defaultSettings, loadSettings, saveWorkbenchSettings, updateSettings } from '../../frontend/src/settings.ts';
+
+test('registering a background resource keeps an empty workbench closed and inactive', () => {
+  const closed = workbenchStateFrom({ ...DEFAULT_WORKBENCH_STATE, rightOpen: false, activeKey: null });
+  assert.equal(closed.activeKey, null);
+  const registered = registerWorkbenchResource(closed,
+    { kind: 'side-session', projectRoot: 'C:/repo', sessionId: 'side-1', originSessionId: 'origin-1' }, 'Side chat source');
+  assert.equal(registered.rightOpen, false);
+  assert.equal(registered.activeKey, null);
+  assert.equal(registered.tabs.length, 1);
+  // 规范化仍保留显式 null，后台回执不会把侧聊页切到前台。
+  assert.equal(workbenchStateFrom(registered).activeKey, null);
+  const visible = registerWorkbenchResource(openWorkbenchResource(closed,
+    { kind: 'file', projectRoot: 'C:/repo', path: 'src/app.tsx' }, 'app.tsx'),
+  { kind: 'side-session', projectRoot: 'C:/repo', sessionId: 'side-2', originSessionId: 'origin-1' }, 'Side chat source');
+  assert.equal(visible.activeKey, visible.tabs[0].key);
+});
 
 test('opening the same file focuses its existing tab and updates only its location', () => {
   const first = openWorkbenchResource(DEFAULT_WORKBENCH_STATE,
