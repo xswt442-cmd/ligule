@@ -14,12 +14,12 @@ const files = [
   {
     name: 'SECURITY.md',
     template: 'templates/SECURITY.md',
-    headings: ['## Supported versions', '## Reporting'],
+    headings: ['## Supported versions', '## Reporting', '## Scope', '## Handling'],
   },
   {
     name: 'CONTRIBUTING.md',
     template: 'templates/CONTRIBUTING.md',
-    headings: ['## Verification'],
+    headings: ['## Branches', '## Pull request descriptions', '## Commit messages', '## Documentation', '## Verification', '## Security reports'],
     reference: 'SECURITY.md',
   },
 ];
@@ -68,10 +68,16 @@ function sync(repo, apply) {
       unresolved += 1;
       continue;
     }
-    const target = join(repo, '.github', result.spec.name);
+    // 与已有社区文件保持同一位置：仓库把 SECURITY.md 放在根目录时，缺失的 CONTRIBUTING.md 也放在根目录。
+    const companion = files
+      .filter((spec) => spec.name !== result.spec.name)
+      .map((spec) => copies(repo, spec.name)[0])
+      .find((entry) => entry !== undefined);
+    const relative = companion === undefined ? '.github' : companion.dir === 'repository root' ? '' : companion.dir;
+    const target = join(repo, relative, result.spec.name);
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, readFileSync(join(sourceRoot, result.spec.template)));
-    console.log(`Created: .github/${result.spec.name}`);
+    console.log(`Created: ${target.slice(repo.length + 1)}`);
   }
   if (unresolved) {
     console.error(`${unresolved} file(s) need a manual review; this tool never overwrites an existing copy.`);

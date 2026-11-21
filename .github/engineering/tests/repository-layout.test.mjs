@@ -11,6 +11,14 @@ test('GitHub PR template matches the canonical engineering template', () => {
   assert.deepEqual(applied, canonical);
 });
 
+test('GitHub community health copies match the canonical engineering templates', () => {
+  for (const name of ['SECURITY.md', 'CONTRIBUTING.md']) {
+    const canonical = readFileSync(new URL(`../templates/${name}`, import.meta.url));
+    const applied = readFileSync(new URL(`../../${name}`, import.meta.url));
+    assert.deepEqual(applied, canonical, `community health copy differs: ${name}`);
+  }
+});
+
 test('PR Skill copies match the canonical engineering files', () => {
   for (const path of ['SKILL.md', 'CREDITS.md', 'agents/openai.yaml']) {
     const canonical = readFileSync(new URL(`../skills/pr/${path}`, import.meta.url));

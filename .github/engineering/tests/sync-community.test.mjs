@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -72,6 +72,35 @@ test('a second copy in another location is reported as a duplicate', () => {
     const check = run(['--check'], root);
     assert.equal(check.status, 1);
     assert.match(check.stdout, /Duplicate: SECURITY\.md/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('every required section is checked for both community files', () => {
+  const root = fixture();
+  try {
+    mkdirSync(join(root, '.github'), { recursive: true });
+    writeFileSync(join(root, '.github/SECURITY.md'), '# Security\n\n## Supported versions\n\n## Reporting\n');
+    writeFileSync(join(root, '.github/CONTRIBUTING.md'), '# Contributing\n\n## Verification\n\nSee SECURITY.md.\n');
+    const check = run(['--check'], root);
+    assert.equal(check.status, 1);
+    assert.match(check.stdout, /Incomplete: SECURITY\.md .*## Scope/);
+    assert.match(check.stdout, /Incomplete: CONTRIBUTING\.md .*## Branches/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('apply places a missing file next to the existing community file', () => {
+  const root = fixture();
+  try {
+    writeFileSync(join(root, 'SECURITY.md'), readFileSync(join(standards, 'templates/SECURITY.md')));
+    const apply = run(['--apply'], root);
+    assert.equal(apply.status, 0, apply.stderr);
+    assert.equal(existsSync(join(root, 'CONTRIBUTING.md')), true);
+    assert.equal(existsSync(join(root, '.github/CONTRIBUTING.md')), false);
+    assert.equal(run(['--check'], root).status, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
