@@ -68,10 +68,13 @@ function sourceRef() {
 
 function sync(repo, apply) {
   if (!existsSync(join(repo, '.git'))) throw new Error('Target is not a Git working tree');
-  // Windows 可能把同一目录报告为短路径或不同大小写；比较真实路径，而不是字符串形式。
-  const top = realpathSync.native(resolve(git(repo, ['rev-parse', '--show-toplevel'])));
-  const root = realpathSync.native(resolve(repo));
-  if (top.toLowerCase() !== root.toLowerCase()) throw new Error('Target must be the repository root');
+  // On Windows the caller's path can carry an 8.3 short name (RUNNER~1) while git always
+  // reports the long one, so a string comparison rejects the correct repository. Resolve
+  // both sides to their real path first. realpathSync.native expands short names; the plain
+  // version does not.
+  const real = (path) => realpathSync.native(path);
+  const top = real(git(repo, ['rev-parse', '--show-toplevel']));
+  if (top.toLowerCase() !== real(repo).toLowerCase()) throw new Error('Target must be the repository root');
 
   const changed = [];
   for (const item of plan(repo)) {

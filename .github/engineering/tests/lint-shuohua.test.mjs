@@ -279,3 +279,18 @@ test('a bullet with a colon is still one sentence for the bullet rule', () => {
   });
   assert.doesNotMatch(output, /bullet-sentences/);
 });
+
+test('a two-character filler is not matched inside a longer technical word', () => {
+  // 「幸存进程」包含「存进」。子串匹配会把准确的技术词报成伪口语。
+  const { output } = run({
+    'README.md': '## 归因\n\n上一个宿主留下的幸存进程仍在进程树里。\n',
+  });
+  assert.doesNotMatch(output, /banned-phrases/);
+});
+
+test('badge alt text and badge URLs are not prose', () => {
+  const { output } = run({
+    'README.md': '## 说明\n\n[![DSH](https://img.shields.io/static/v1?label=DSH&message=plugin)](https://example.com)\n\n正文用 `dsh` 命令启动。\n',
+  });
+  assert.doesNotMatch(output, /term-casing/);
+});

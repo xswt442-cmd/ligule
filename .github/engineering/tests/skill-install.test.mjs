@@ -99,3 +99,40 @@ test('source reports the commit the copy came from', () => {
   // 刚同步进来、还没提交的副本没有历史，--source 只能报 unknown。
   assert.match(source.stdout, /^mypr: ([0-9a-f]{7,} \d{4}-\d{2}-\d{2}|unknown)$/m);
 });
+
+test('a Windows 8.3 short path is accepted as the repository root', (t) => {
+  if (process.platform !== 'win32') return t.skip('8.3 short names only exist on Windows');
+  const root = fixture();
+  try {
+    // git always reports the long name; only the caller can arrive with RUNNER~1.
+    const asked = spawnSync('cmd', ['/c', `for %I in ("${root}") do @echo %~sI`], { encoding: 'utf8' });
+    const short = asked.stdout.trim();
+    if (!short || !short.includes('~')) return t.skip('this volume does not expose 8.3 names');
+    assert.notEqual(short, root);
+
+    const applied = run(['--apply'], short);
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.doesNotMatch(applied.stderr, /Target must be the repository root/);
+    assert.equal(run(['--check'], short).status, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the repository root is compared by real path, not by spelling', () => {
+  const root = fixture();
+  const holder = mkdtempSync(join(tmpdir(), 'engineering-cmd-link-'));
+  const link = join(holder, 'repo');
+  try {
+    // 同一个目录，两种写法。git 报告的是真路径，调用方给的是这个链接，
+    // 直接比字符串会判定「不是仓库根」。
+    symlinkSync(root, link, process.platform === 'win32' ? 'junction' : 'dir');
+    const applied = run(['--apply'], link);
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.doesNotMatch(applied.stderr, /Target must be the repository root/);
+    assert.equal(run(['--check'], link).status, 0);
+  } finally {
+    rmSync(holder, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -71,7 +71,7 @@ const skillFiles = {
   mydocs: ['SKILL.md', 'agents/openai.yaml', 'rules.json', 'references/file-types.md', 'scripts/lint-docs.mjs'],
   myshuohua: [
     'SKILL.md', 'CREDITS.md', 'agents/openai.yaml', 'rules.json',
-    'references/bad-good.md', 'references/language-zh.md', 'scripts/lint-shuohua.mjs',
+    'references/language-zh.md', 'scripts/lint-shuohua.mjs',
   ],
 };
 
