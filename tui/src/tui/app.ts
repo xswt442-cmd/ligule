@@ -3,7 +3,7 @@
 // 纯函数和命令表从此模块导出，供自动检查和界面复用。
 import { createElement as h, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { answerOf, candidatesOf, describeChange, findUiCommand, insertMention, localizedCommand, mentionToken, parseControlCommand, resolveSessionId, routeInput, usageText } from './commands.js';
+import { answerOf, candidatesOf, describeChange, findUiCommand, insertMention, localizedCommand, mentionToken, resolveSessionId, routeInput } from './commands.js';
 import { pushHistory } from '@ligule/core/tui.js';
 import { searchHistory } from './history.js';
 import { editDraft, isTypingRun, moveDraftCaret, type DraftState } from './draft.js';
@@ -26,6 +26,8 @@ import { useSubrunCommands } from './handlers/subrun.js';
 import { useCapabilityCommands } from './handlers/capability.js';
 import { useKeybindCommands } from './handlers/keybind.js';
 import { useShellCommands } from './handlers/shell.js';
+import { useControlCommands } from './handlers/control.js';
+import { agentMcpConfig } from './agent-mcp.js';
 import { queuedLine } from './queue-text.js';
 import { clearCancelledLocalQuestion } from './local-question.js';
 import { isRecord } from './guards.js';
@@ -187,7 +189,7 @@ interface SearchState {
 type PickerKind = 'model' | 'thinking' | 'mode' | 'policy' | 'policy-confirm-never' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network' | 'permission-confirm-partial'
   | 'control' | 'control-action' | 'control-revoke-confirm';
 type PolicyValue = 'always' | 'ask' | 'auto' | 'never';
-type AgentGrant = {
+export type AgentGrant = {
   readonly id: string;
   readonly name: string;
   readonly projectRoot: string;
@@ -206,7 +208,7 @@ type AgentGrant = {
   readonly expiresAt: string | null;
   readonly revokedAt: string | null;
 };
-type AgentControlSnapshot = { readonly version: string; readonly grants: readonly AgentGrant[] };
+export type AgentControlSnapshot = { readonly version: string; readonly grants: readonly AgentGrant[] };
 type McpServerSummary = {
   readonly name: string;
   readonly command: string;
@@ -219,11 +221,6 @@ type McpServerSummary = {
 };
 type McpTrustSnapshot = { readonly version: string; readonly servers: readonly McpServerSummary[] };
 type McpToolsSnapshot = { readonly server: string; readonly identityDigest: string; readonly tools: readonly { readonly name: string; readonly description: string; readonly digest: string }[] };
-function agentMcpConfig(grant: AgentGrant): string {
-  const args = ['mcp-server', '--project', grant.projectRoot, '--grant', grant.id];
-  if (grant.allowOperator) args.push('--operator');
-  return JSON.stringify({ mcpServers: { ligule: { command: 'ligule', args } } }, null, 2);
-}
 
 interface RuntimeChoice extends PanelChoice {
   readonly selection?: ModelSelection;
@@ -1616,103 +1613,16 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const shellCommands = useShellCommands({ exitTui, setPanel, setDetail, setSessionPicker, setSearch, setMention });
 
+  const controlCommands = useControlCommands({
+    client, projectRoot: info.boundary, activeSession, controlWizardGeneration, controlWizardSubmittingRef,
+    setControlWizardSubmitting, showControlWizard, setPanel, setControlSnapshot, setControlTarget, openPicker, push, t,
+  });
+
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (integrationCommands.handle(name, argument)) return;
     if (configCommands.handle(name, argument)) return;
     if (infoCommands.handle(name, argument)) return;
-    if (name === 'control') {
-      const command = parseControlCommand(argument);
-      if ('code' in command) {
-        const [zh, en] = usageText(command.code);
-        push({ kind: 'error', text: t(zh, en) });
-        return;
-      }
-      if (command.action === 'picker') {
-        openPicker('control');
-        return;
-      }
-      if (command.action === 'create') {
-        if (info.boundary === undefined || info.boundary === '') {
-          push({ kind: 'error', text: t('当前没有已选择的项目目录。', 'No project directory is selected.') });
-          return;
-        }
-        const owner = activeSession.current;
-        const generation = ++controlWizardGeneration.current;
-        controlWizardSubmittingRef.current = false;
-        setControlWizardSubmitting(false);
-        void (async () => {
-          try {
-            const trust = await client.request('mcp.trust.list', { projectRoot: info.boundary });
-            if (generation !== controlWizardGeneration.current || activeSession.current !== owner) return;
-            const mcpServers = trust.servers.filter((server) =>
-              server.trustScopes.project?.trusted === true || server.trustScopes.user?.trusted === true,
-            ).map((server) => server.name);
-            showControlWizard({ step: 0, values: {}, mcpServers, mcpTools: [] });
-            setPanel(null);
-            push({ kind: 'meta', text: t(
-              `开始创建授权；每一步按 Enter 确认，输入 cancel 可取消。已信任的 MCP Server：${mcpServers.join(', ') || '无'}`,
-              `Grant setup started. Press Enter after each answer; type cancel to stop. Trusted MCP servers: ${mcpServers.join(', ') || 'none'}`,
-            ) });
-          } catch (error) {
-            if (generation !== controlWizardGeneration.current || activeSession.current !== owner) return;
-            push({ kind: 'error', text: t(`无法读取 MCP Server 信任状态：${errorCode(error) ?? 'mcp_trust_list_failed'}`, `Could not read MCP server trust: ${errorCode(error) ?? 'mcp_trust_list_failed'}`) });
-          }
-        })();
-        return;
-      }
-      const wanted = command.action === 'copy' || command.action === 'revoke' ? command.id : '';
-      void (async () => {
-        try {
-          const snapshot = await client.request('agent-control.list', {}) as AgentControlSnapshot;
-          setControlSnapshot(snapshot);
-          if (command.action === 'list') {
-            const lines = snapshot.grants.length === 0 ? [t('尚未创建外控授权。', 'No external Agent grants have been created.')]
-              : snapshot.grants.map((grant) => {
-                const state = grant.revokedAt !== null ? t('已撤销', 'revoked')
-                  : grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now() ? t('已到期', 'expired') : t('可用', 'available');
-                const expiry = grant.expiresAt === null ? t('无到期时间', 'no expiry') : `${t('到期', 'expires')} ${new Date(grant.expiresAt).toLocaleString()}`;
-                const source = grant.source === 'trusted-ui'
-                  ? t('可信界面创建', 'Trusted UI')
-                  : t('历史记录未保存来源', 'Legacy record; source not recorded');
-                return `${grant.id} · ${grant.name} · ${state} · ${t('权限', 'permission')} ${grant.defaultPermissionProfile} / ${grant.maxPermissionProfile} · ${t('网络', 'network')} ${grant.defaultNetwork} / ${grant.maxNetwork} · Policy ${grant.defaultPolicy} (${grant.allowedPolicies.join(', ')}) · MCP ${grant.allowedMcpServers.join(', ') || t('无', 'none')} · ${t('工具', 'tools')} ${grant.allowedMcpTools.join(', ') || t('无', 'none')} · ${expiry} · ${t('来源', 'source')} ${source} · ${grant.projectRoot} · ${t('在线状态未知', 'online status unknown')}`;
-              });
-            const invalid = snapshot.grants.filter((grant) => grant.revokedAt !== null
-              || (grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now())).length;
-            push({ kind: 'meta', text: invalid === 0 ? lines.join('\n') : [
-              lines.join('\n'),
-              t(`其中 ${invalid} 张已失效（撤销/到期）：不能建立新的外控连接；已建立的会话按原记录继续，需要时请重新创建授权。`,
-                `${invalid} grant(s) are no longer valid (revoked/expired): they cannot open new external control connections; open sessions continue from their record. Create a new grant when needed.`),
-            ].join('\n') });
-            return;
-          }
-          const matches = snapshot.grants.filter((grant) => grant.id === wanted || grant.id.startsWith(wanted));
-          if (matches.length !== 1) {
-            push({ kind: 'error', text: matches.length === 0
-              ? t(`未找到授权 ${wanted}`, `Grant ${wanted} was not found`)
-              : t(`授权编号 ${wanted} 不唯一，请输入更多字符`, `Grant ID ${wanted} is ambiguous; enter more characters`) });
-            return;
-          }
-          const grant = matches[0]!;
-          if (command.action === 'copy') {
-            const copied = await copyToClipboard(agentMcpConfig(grant));
-            push('program' in copied
-              ? { kind: 'meta', text: t(`已复制授权 ${grant.id} 的本地 MCP 配置`, `Copied local MCP configuration for grant ${grant.id}`) }
-              : { kind: 'error', text: t(`复制配置失败：${copied.code}`, `Could not copy configuration: ${copied.code}`) });
-            return;
-          }
-          if (grant.revokedAt !== null || (grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now())) {
-            push({ kind: 'error', text: t('此授权已撤销或到期，不能再次撤销。', 'This grant is revoked or expired and cannot be revoked again.') });
-            return;
-          }
-          setControlTarget(grant.id);
-          openPicker('control-revoke-confirm');
-        } catch (error) {
-          push({ kind: 'error', text: t(`外控授权操作失败：${errorCode(error) ?? 'agent_control_failed'}`, `Agent Control operation failed: ${errorCode(error) ?? 'agent_control_failed'}`) });
-        }
-      })();
-      return;
-    }
     if (name === 'new') {
       const lease = beginSessionNavigation(sessionId);
       if (lease === undefined) return;
@@ -2012,8 +1922,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (capabilityCommands.handle(name, argument)) return;
     if (keybindCommands.handle(name, argument)) return;
     if (shellCommands.handle(name)) return;
+    if (controlCommands.handle(name, argument)) return;
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, capabilityCommands, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keybindCommands, keys, locale, presetCommands, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, resourceCommands, runControlCommands, sessionId, sessionListCommands, sessionMaintenanceCommands, sessionNavigationIsCurrent, shellCommands, status, stdout, subrunCommands, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
+  }, [app, beginSessionNavigation, capabilityCommands, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, controlCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keybindCommands, keys, locale, presetCommands, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, resourceCommands, runControlCommands, sessionId, sessionListCommands, sessionMaintenanceCommands, sessionNavigationIsCurrent, shellCommands, status, stdout, subrunCommands, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
