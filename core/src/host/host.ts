@@ -4055,7 +4055,7 @@ export function createHost({
             environmentOf: id => sessions.get(id)?.environment,
             defaultEnvironment,
             branchOwner,
-            isRunning: () => sessions.get(sessionId)?.running !== undefined,
+            unfinished: sessions.get(sessionId)?.running !== undefined,
             readRecord: (id, params) => readRecordPage(id, params, sessionReadDeps),
           });
         }
