@@ -25,6 +25,7 @@ import { usePresetCommands } from './handlers/preset.js';
 import { useSubrunCommands } from './handlers/subrun.js';
 import { useCapabilityCommands } from './handlers/capability.js';
 import { useKeybindCommands } from './handlers/keybind.js';
+import { useShellCommands } from './handlers/shell.js';
 import { queuedLine } from './queue-text.js';
 import { clearCancelledLocalQuestion } from './local-question.js';
 import { isRecord } from './guards.js';
@@ -1613,6 +1614,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const keybindCommands = useKeybindCommands({ keys, keyOverrides, setKeyOverrides, locale, push, t });
 
+  const shellCommands = useShellCommands({ exitTui, setPanel, setDetail, setSessionPicker, setSearch, setMention });
+
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (integrationCommands.handle(name, argument)) return;
@@ -1708,10 +1711,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t(`外控授权操作失败：${errorCode(error) ?? 'agent_control_failed'}`, `Agent Control operation failed: ${errorCode(error) ?? 'agent_control_failed'}`) });
         }
       })();
-      return;
-    }
-    if (name === 'quit') {
-      exitTui('');
       return;
     }
     if (name === 'new') {
@@ -2012,16 +2011,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (subrunCommands.handle(name, argument)) return;
     if (capabilityCommands.handle(name, argument)) return;
     if (keybindCommands.handle(name, argument)) return;
-    if (name === 'help') {
-      setDetail(null);
-      setSessionPicker(null);
-      setSearch(null);
-      setMention(null);
-      setPanel('help');
-      return;
-    }
+    if (shellCommands.handle(name)) return;
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, capabilityCommands, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keybindCommands, keys, locale, presetCommands, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, resourceCommands, runControlCommands, sessionId, sessionListCommands, sessionMaintenanceCommands, sessionNavigationIsCurrent, status, stdout, subrunCommands, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
+  }, [app, beginSessionNavigation, capabilityCommands, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keybindCommands, keys, locale, presetCommands, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, resourceCommands, runControlCommands, sessionId, sessionListCommands, sessionMaintenanceCommands, sessionNavigationIsCurrent, shellCommands, status, stdout, subrunCommands, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
