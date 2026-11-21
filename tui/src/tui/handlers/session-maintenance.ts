@@ -3,6 +3,7 @@
 import { useCallback } from 'react';
 import type { MutableRefObject } from 'react';
 import type { TuiClient, TuiStatus } from '../app.js';
+import { applyCompactionStatus } from '../compaction-status.js';
 import { errorCode } from '../error-text.js';
 import type { TranscriptItem } from '../transcript.js';
 
@@ -10,6 +11,8 @@ export type SessionMaintenanceCommandDeps = {
   readonly client: TuiClient;
   readonly sessionId: string;
   readonly activeSession: MutableRefObject<string>;
+  readonly runningGeneration: MutableRefObject<number>;
+  readonly setCompacting: (busy: boolean) => void;
   readonly setSessionName: (name: string) => void;
   readonly setRunning: (running: boolean) => void;
   readonly setStatus: (next: TuiStatus | null) => void;
@@ -18,7 +21,7 @@ export type SessionMaintenanceCommandDeps = {
 };
 
 export function useSessionMaintenanceCommands(deps: SessionMaintenanceCommandDeps): { handle: (name: string, argument: string) => boolean } {
-  const { client, sessionId, activeSession, setSessionName, setRunning, setStatus, push, t } = deps;
+  const { client, sessionId, activeSession, runningGeneration, setCompacting, setSessionName, setRunning, setStatus, push, t } = deps;
 
   const handle = useCallback((name: string, argument: string): boolean => {
     if (name === 'rename' || name === 'archive' || name === 'unarchive') {
@@ -45,7 +48,7 @@ export function useSessionMaintenanceCommands(deps: SessionMaintenanceCommandDep
     if (name === 'compact') {
       void (async () => {
         const own = sessionId;
-        setRunning(true);
+        setCompacting(true);
         try {
           // Host 负责调用模型生成摘要并写入检查点；TUI 显示成功或无法压缩的原因。
           const done = await client.request('session.compact', { sessionId: own }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_compact_failed' }));
@@ -59,22 +62,22 @@ export function useSessionMaintenanceCommands(deps: SessionMaintenanceCommandDep
             text: t(`已压缩记录 ${done.fromSeq}–${done.toSeq}：估算 token ${done.tokensBefore} → ${done.tokensAfter}，原文已保留`, `Compacted events ${done.fromSeq}–${done.toSeq}: estimated tokens ${done.tokensBefore} → ${done.tokensAfter}; original content preserved`),
           });
         } finally {
-          // 运行标记以 Host 当前状态为准：期间结束的轮次不能被压缩前的快照重新标成运行中。
-          const latest = activeSession.current === own
-            ? await client.request('status.get', { sessionId: own }).catch(() => null)
-            : null;
+          if (activeSession.current !== own) { setCompacting(false); return; }
+          // 运行标记以代次为准：读取期间若轮次状态已变化，旧响应不能把它覆盖回去。
+          const generation = runningGeneration.current;
+          const latest = await client.request('status.get', { sessionId: own }).catch(() => null);
+          setCompacting(false);
           if (activeSession.current !== own) return;
-          // 读取失败时保留现有状态，避免把仍在运行的轮次清成空闲。
-          if (latest !== null) {
-            setStatus(latest);
-            setRunning(latest.running === true);
-          }
+          const outcome = applyCompactionStatus(generation, runningGeneration.current, latest);
+          if (!outcome.apply) return;
+          if (latest !== null) setStatus(latest);
+          if (outcome.running !== undefined) setRunning(outcome.running);
         }
       })();
       return true;
     }
     return false;
-  }, [activeSession, client, push, sessionId, setRunning, setSessionName, setStatus, t]);
+  }, [activeSession, client, push, runningGeneration, sessionId, setCompacting, setRunning, setSessionName, setStatus, t]);
 
   return { handle };
 }

@@ -6,6 +6,7 @@ import type { TuiClient } from '../app.js';
 import { agentMcpConfig } from '../agent-mcp.js';
 import { copyToClipboard } from '../clipboard.js';
 import { parseControlCommand, usageText } from '../commands.js';
+import { controlRevokeBinding } from '../control-binding.js';
 import type { ControlWizard } from '../control-wizard.js';
 import { errorCode } from '../error-text.js';
 import type { AgentControlSnapshot, AgentGrant } from '../app.js';
@@ -22,7 +23,7 @@ export type ControlCommandDeps = {
   readonly setPanel: (next: null) => void;
   readonly setControlSnapshot: (next: AgentControlSnapshot) => void;
   readonly setControlTarget: (next: string) => void;
-  readonly openPicker: (kind: 'control' | 'control-revoke-confirm', requestedControlTarget?: string) => void;
+  readonly openPicker: (kind: 'control' | 'control-revoke-confirm', requestedControlTarget?: string | null, requestedControlVersion?: string) => void;
   readonly push: (...items: TranscriptItem[]) => void;
   readonly t: (zh: string, en: string) => string;
 };
@@ -127,9 +128,14 @@ export function useControlCommands(deps: ControlCommandDeps): { handle: (name: s
           push({ kind: 'error', text: t('此授权已撤销或到期，不能再次撤销。', 'This grant is revoked or expired and cannot be revoked again.') });
           return;
         }
-        setControlTarget(grant.id);
-        // 目标随面板一起固定：确认面板显示该授权 ID，确认时仍由 Host 校验版本。
-        openPicker('control-revoke-confirm', grant.id);
+        const binding = controlRevokeBinding(snapshot, grant.id);
+        if (binding === null) {
+          push({ kind: 'error', text: t('此授权已不在最新列表中，请重新读取。', 'This grant is no longer in the latest list; reload it.') });
+          return;
+        }
+        setControlTarget(binding.grantId);
+        // 目标与版本随面板一起固定：确认面板显示该授权 ID，确认时仍由 Host 校验版本。
+        openPicker('control-revoke-confirm', binding.grantId, binding.version);
       } catch (error) {
         push({ kind: 'error', text: t(`外控授权操作失败：${errorCode(error) ?? 'agent_control_failed'}`, `Agent Control operation failed: ${errorCode(error) ?? 'agent_control_failed'}`) });
       }

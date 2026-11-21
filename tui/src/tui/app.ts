@@ -608,7 +608,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [query, setQuery] = useState<QuestionState | null>(null);
   const activeQuestion = useRef(query?.id);
   activeQuestion.current = query?.id;
-  const [running, setRunning] = useState(false);
+  const [running, setRunningState] = useState(false);
+  // 运行标记的代次：每次权威状态变化都递增，迟到的 status 响应不能覆盖更新的状态。
+  const runningGeneration = useRef(0);
+  const setRunning = useCallback((next: boolean) => {
+    runningGeneration.current += 1;
+    setRunningState(next);
+  }, []);
+  // 压缩占用与轮次运行分开：压缩不改变输入路由或取消语义，只显示忙碌提示。
+  const [compacting, setCompacting] = useState(false);
   const [tick, setTick] = useState(0);
   const [seconds, setSeconds] = useState(0);
   const [expanded, setExpanded] = useState(false);
@@ -617,6 +625,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [choicesLoading, setChoicesLoading] = useState(false);
   const [controlSnapshot, setControlSnapshot] = useState<AgentControlSnapshot | null>(null);
   const [controlTarget, setControlTarget] = useState<string | null>(null);
+  // 撤销确认绑定打开面板时的授权 ID 与版本；后续列表响应不能改变这次确认的目标。
+  const [controlBinding, setControlBinding] = useState<{ readonly grantId: string; readonly version: string } | null>(null);
   const [controlWizard, setControlWizard] = useState<ControlWizard | null>(null);
   const [controlWizardSubmitting, setControlWizardSubmitting] = useState(false);
   const controlWizardSubmittingRef = useRef(false);
@@ -1375,7 +1385,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     client, projectRoot: info.boundary, sessionId, activeSession, sessionIdentityGeneration, alive, push, t, trust, exitTui, reportMcpTrustOutcome,
   });
 
-  const openPicker = useCallback((kind: PickerKind, requestedControlTarget = controlTarget) => {
+  const openPicker = useCallback((kind: PickerKind, requestedControlTarget = controlTarget, requestedControlVersion = controlSnapshot?.version) => {
     if (controlWizard === null && (kind === 'model' || kind === 'mode' || kind === 'policy')) {
       controlWizardGeneration.current += 1;
     }
@@ -1392,6 +1402,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       let available: RuntimeChoice[];
       if (kind === 'control') {
         const snapshot = await client.request('agent-control.list', {}) as AgentControlSnapshot;
+        // 面板已被关闭或替换时，迟到的列表响应不得改写快照。
+        if (pickerRequest.current !== token) return;
         setControlSnapshot(snapshot);
         available = [
           { id: 'preset:reader', label: t('安全预设 · 信任此项目并以只读观察', 'Safe preset · trust this project and observe read-only'), description: t(`信任 ${info.boundary ?? ''} 并创建上限为只读的外控授权：控制器只能读取会话与运行结果，不能写文件、执行 Shell、联网或操作其他能力。`, `Trust ${info.boundary ?? ''} and create an Agent Control grant capped at read-only: the controller can read the session and run results, but cannot write files, run Shell, use the network, or operate other capabilities.`) },
@@ -1418,8 +1430,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           { id: 'back', label: t('返回授权列表', 'Back to grants') },
         ];
       } else if (kind === 'control-revoke-confirm') {
-        // 撤销确认绑定到打开面板时固定的授权 ID，避免并发响应替换目标。
+        // 撤销确认绑定到打开面板时的授权 ID 与版本，避免并发列表响应替换目标或版本。
         const target = requestedControlTarget ?? t('未知授权', 'unknown grant');
+        setControlBinding(requestedControlTarget === null || requestedControlVersion === undefined
+          ? null : { grantId: requestedControlTarget, version: requestedControlVersion });
         available = [
           { id: 'confirm', label: t(`确认撤销 ${target}`, `Confirm revocation of ${target}`), description: t('MCP Host 会检查撤销并取消运行中的任务。', 'The MCP Host checks revocation and cancels active work.') },
           { id: 'cancel', label: t('取消', 'Cancel') },
@@ -1598,7 +1612,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   });
 
   const sessionMaintenanceCommands = useSessionMaintenanceCommands({
-    client, sessionId, activeSession, setSessionName, setRunning, setStatus, push, t,
+    client, sessionId, activeSession, setSessionName, setRunning, runningGeneration, setCompacting, setStatus, push, t,
   });
 
   const resourceCommands = useResourceCommands({ client, sessionId, activeSession, push, t });
@@ -1944,7 +1958,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       if (id.startsWith('grant:')) {
         const target = controlTargetFromChoice(id, controlTarget);
-        setControlTarget(target);
+        if (target !== null) setControlTarget(target);
         openPicker('control-action', target ?? undefined);
       }
       return;
@@ -1957,22 +1971,25 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         void copyToClipboard(agentMcpConfig(grant)).then((copied) => push('program' in copied
           ? { kind: 'meta', text: t(`已复制授权 ${grant.id} 的本地 MCP 配置`, `Copied local MCP configuration for grant ${grant.id}`) }
           : { kind: 'error', text: t(`复制失败：${copied.code}`, `Copy failed: ${copied.code}`) }));
-      } else if (id === 'revoke') openPicker('control-revoke-confirm');
+      } else if (id === 'revoke') openPicker('control-revoke-confirm', grant.id, controlSnapshot?.version);
       return;
     }
     if (currentPanel === 'control-revoke-confirm') {
       if (id !== 'confirm') return;
-      const target = controlTarget;
-      const version = controlSnapshot?.version;
-      if (target === null || version === undefined) { push({ kind: 'error', text: t('无法确认授权版本，请重新读取。', 'Grant version is unavailable. Reload the list.') }); return; }
-      void client.request('agent-control.revoke', { grantId: target, version }).then((result) => {
+      // 只使用打开确认面板时绑定的目标与版本；期间到达的列表响应不能改变这次撤销。
+      const binding = controlBinding;
+      if (binding === null) { push({ kind: 'error', text: t('无法确认授权版本，请重新读取。', 'Grant version is unavailable. Reload the list.') }); return; }
+      const target = binding.grantId;
+      void client.request('agent-control.revoke', { grantId: binding.grantId, version: binding.version }).then((result) => {
         const updated = result as AgentControlSnapshot;
         setControlSnapshot(updated);
+        setControlBinding(null);
         push({ kind: 'meta', text: t(`授权 ${target} 已撤销。`, `Grant ${target} revoked.`) });
       }, async (error: unknown) => {
         push({ kind: 'error', text: t(`撤销失败：${errorCode(error) ?? 'agent_control_revoke_failed'}`, `Could not revoke grant: ${errorCode(error) ?? 'agent_control_revoke_failed'}`) });
         const refreshed = await client.request('agent-control.list', {}).catch(() => null) as AgentControlSnapshot | null;
         if (refreshed !== null) setControlSnapshot(refreshed);
+        setControlBinding(null);
       });
       return;
     }
@@ -2755,7 +2772,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         ? t('请求已提交，不能取消或重复提交', 'The request is submitted and cannot be canceled or repeated')
         : t('Enter 提交当前项 · 输入 cancel 取消', 'Enter submits this value · type cancel to stop'))),
     externalControl ? h(Text, { color: running ? 'yellow' : 'cyan', wrap: 'truncate-end' }, externalControlLabel) : null,
-    running && showSettings ? h(ProgressLine, { progress: status?.progress, seconds, marker: SPINNER[tick % SPINNER.length], columns: geometry.columns, locale }) : null,
+    (running || compacting) && showSettings ? h(ProgressLine, { progress: status?.progress, seconds, marker: SPINNER[tick % SPINNER.length], columns: geometry.columns, locale }) : null,
     showComposer ? h(DraftInput, {
       draft, caret, columns: geometry.columns, height: composerHeight,
       placeholder: query !== null ? t('输入回答', 'Type your answer')
