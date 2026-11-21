@@ -14,6 +14,7 @@ import { titleEscape, titleText } from './output.js';
 import { providerDiagnosticText, runtimeFailureText } from './errors.js';
 import { errorCode, errorMessage } from './error-text.js';
 import { useIntegrationCommands } from './handlers/integrations.js';
+import { useConfigCommands } from './handlers/config.js';
 import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
 import { collectTranscriptPages } from './transcript-pages.js';
 import { VERSION } from '../version.js';
@@ -76,7 +77,7 @@ function isAskQuestion(value: unknown): value is AskQuestion {
     && value.options.every((option) => isRecord(option) && typeof option.label === 'string');
 }
 
-interface TuiStatus {
+export interface TuiStatus {
   readonly running?: boolean;
   readonly activeRunId?: string | null;
   readonly screenCapture?: { readonly enabled: boolean; readonly source: string; readonly changeAllowed?: boolean };
@@ -1651,9 +1652,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     return 'code' in closed ? closed.code : undefined;
   }, [client]);
 
+  const configCommands = useConfigCommands({
+    client, sessionId, projectRoot: info.boundary, push, t, locale, openPicker, refreshStatus, changeThinking, setStatus,
+  });
+
   const runCommand = useCallback((name: string, argument = '') => {
     pickerRequest.current += 1;
     if (integrationCommands.handle(name, argument)) return;
+    if (configCommands.handle(name, argument)) return;
     if (name === 'control') {
       const command = parseControlCommand(argument);
       if ('code' in command) {
@@ -2477,96 +2483,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
-    if (name === 'credentials') {
-      void (async () => {
-        try {
-          const [current, config] = await Promise.all([
-            client.request('status.get', { sessionId }),
-            client.request('config.get', { projectRoot: info.boundary }),
-          ]);
-          const service = config.services.find(item => item.id === current.serviceId);
-          const reference = service?.apiKeyEnv ?? config.model?.apiKeyEnv ?? 'LIGULE_API_KEY';
-          const credential = await client.request('credentials.status', { reference });
-          const source = credential.source === 'environment' ? t('环境变量', 'environment') : credential.source === 'keyring' ? t('系统凭据', 'OS credential store') : t('未设置', 'not set');
-          push({ kind: credential.configured ? 'meta' : 'error', text: [
-            `${t('模型', 'Model')}: ${current.selectedModel ?? current.model ?? t('未选择', 'not selected')}`,
-            `${t('凭据引用', 'Credential reference')}: ${reference} · ${source}`,
-            ...(credential.configured ? [] : [runtimeFailureText('provider_credential_missing', locale) ?? 'provider_credential_missing']),
-          ].join('\n') });
-        } catch (error) {
-          const code = errorCode(error) ?? 'credential_status_failed';
-          push({ kind: 'error', text: `${code}\n${runtimeFailureText(code, locale) ?? t('无法检查凭据状态', 'Could not check credential status')}` });
-        }
-      })();
-      return;
-    }
-    if (name === 'model') {
-      if (argument.trim() === '') { openPicker('model'); return; }
-      void (async () => {
-        try {
-          const [provider, model, ...extra] = argument.trim().split(/\s+/);
-          if (model === undefined || extra.length > 0) {
-            push({ kind: 'error', text: t('用法：/model <服务> <模型>', 'Usage: /model <service> <model>') });
-            return;
-          }
-          const changed = await client.request('model.select', { sessionId, provider, model });
-          await refreshStatus();
-          push({ kind: 'meta', text: changed.when === 'round'
-            ? t(`下轮使用 ${changed.model}`, `${changed.model} will apply next turn`)
-            : t(`已切换至 ${changed.model}`, `Switched to ${changed.model}`) });
-        } catch (error) {
-          push({ kind: 'error', text: t(`无法选择模型：${errorCode(error) ?? errorMessage(error) ?? 'unknown'}`, `Could not select model: ${errorCode(error) ?? errorMessage(error) ?? 'unknown'}`) });
-        }
-      })();
-      return;
-    }
-    if (name === 'think') {
-      const asked = argument.trim();
-      if (asked === '') { openPicker('thinking'); return; }
-      if (!['default', 'none', 'low', 'high', 'max'].includes(asked)) {
-        push({ kind: 'error', text: t('用法：/think [none|low|high|max|default]', 'Usage: /think [none|low|high|max|default]') });
-        return;
-      }
-      changeThinking(asked);
-      return;
-    }
-    if (name === 'mode') {
-      if (argument === '') { openPicker('mode'); return; }
-      void (async () => {
-        const switched = await client.request('mode.set', { sessionId, name: argument }).catch((error: unknown) => requestFailure(error, 'mode_switch_failed'));
-        if ('code' in switched) {
-          push({ kind: 'error', text: t(`无法切换工具模式：${switched.code}`, `Could not change tool mode: ${switched.code}`) });
-          return;
-        }
-        setStatus(await client.request('status.get', { sessionId }).catch(() => null));
-        push({ kind: 'meta', text: switched.pending === null
-          ? t(`工具模式：${switched.mode}（${switched.tools.length} 个工具）`, `Tool mode: ${switched.mode} (${switched.tools.length} tools)`)
-          : t(`${switched.pending} 将于下轮生效`, `${switched.pending} will apply next turn`) });
-      })();
-      return;
-    }
-    if (name === 'policy') {
-      if (argument === '') { openPicker('policy'); return; }
-      void (async () => {
-        const asked = argument === 'reset' ? 'default' : argument === 'none' ? 'ask' : argument;
-        if (asked !== 'default' && asked !== 'always' && asked !== 'ask' && asked !== 'auto' && asked !== 'never') {
-          push({ kind: 'error', text: t('用法：/policy always|ask|auto|never|reset（旧 none 等同 ask）', 'Usage: /policy always|ask|auto|never|reset (legacy none equals ask)') });
-          return;
-        }
-        // 命令行不能绕过二次确认：选择“完全不审批”与选择器走同一条确认路径。
-        if (asked === 'never') { openPicker('policy-confirm-never'); return; }
-        const changed = await client.request('policy.set', { sessionId, mode: asked }).catch((error: unknown) => requestFailure(error, 'policy_change_failed'));
-        if ('code' in changed) {
-          push({ kind: 'error', text: t(`无法修改审批方式：${changed.code}`, `Could not change approval mode: ${changed.code}`) });
-          return;
-        }
-        setStatus(await client.request('status.get', { sessionId }).catch(() => null));
-        push({ kind: 'meta', text: changed.policySource === 'session'
-          ? t(`当前会话审批方式：${changed.policy}（已生效）`, `Session approval mode: ${changed.policy} (active now)`)
-          : t(`已恢复默认审批方式：${changed.policy}`, `Default approval mode restored: ${changed.policy}`) });
-      })();
-      return;
-    }
     if (name === 'screen') {
       if (externalControl) {
         push({ kind: 'meta', text: t('外控会话的截图能力由独立 Grant 控制，请在外控授权中管理。', 'Screen capture for an externally controlled Session is managed by its separate grant.') });
@@ -3163,7 +3079,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, externalControl, finishSessionNavigation, info, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, externalControl, finishSessionNavigation, info, integrationCommands, keyOverrides, keys, locale, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
