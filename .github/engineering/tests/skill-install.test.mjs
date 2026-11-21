@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -108,6 +108,10 @@ test('a Windows 8.3 short path is accepted as the repository root', (t) => {
     const asked = spawnSync('cmd', ['/c', `for %I in ("${root}") do @echo %~sI`], { encoding: 'utf8' });
     const short = asked.stdout.trim();
     if (!short || !short.includes('~')) return t.skip('this volume does not expose 8.3 names');
+    // runner 的短名别名不总是指向可用的 Git 工作树；确认它确实等价于长路径后再测。
+    if (!existsSync(join(short, '.git')) || realpathSync.native(short).toLowerCase() !== realpathSync.native(root).toLowerCase()) {
+      return t.skip('the 8.3 alias is not usable for this checkout');
+    }
     assert.notEqual(short, root);
 
     // 从长路径目录启动 node，只把短路径作为目标参数，避免 runner 在 8.3 cwd 下解析可执行文件失败。
