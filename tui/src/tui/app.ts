@@ -1983,13 +1983,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       void client.request('agent-control.revoke', { grantId: binding.grantId, version: binding.version }).then((result) => {
         const updated = result as AgentControlSnapshot;
         setControlSnapshot(updated);
-        setControlBinding(null);
+        setControlBinding((current) => current === binding ? null : current);
         push({ kind: 'meta', text: t(`授权 ${target} 已撤销。`, `Grant ${target} revoked.`) });
       }, async (error: unknown) => {
         push({ kind: 'error', text: t(`撤销失败：${errorCode(error) ?? 'agent_control_revoke_failed'}`, `Could not revoke grant: ${errorCode(error) ?? 'agent_control_revoke_failed'}`) });
         const refreshed = await client.request('agent-control.list', {}).catch(() => null) as AgentControlSnapshot | null;
         if (refreshed !== null) setControlSnapshot(refreshed);
-        setControlBinding(null);
+        setControlBinding((current) => current === binding ? null : current);
       });
       return;
     }
@@ -2217,6 +2217,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const send = useCallback((text: string) => {
     const route = routeInput(text, running);
     const answering = query !== null && !text.trim().startsWith('/');
+    // 压缩占用会话时 Host 会拒绝新的轮次：先提示，不把注定失败的请求发出去。
+    if (compacting && route.kind !== 'command') {
+      push({ kind: 'meta', text: t('正在压缩上下文，请等压缩完成后再发送。', 'Context compaction is running; send again when it finishes.') });
+      return;
+    }
     // New input supersedes an unfinished grant-wizard setup before the wizard itself appears.
     if (controlWizardRef.current === null && text.trim() !== '') controlWizardGeneration.current += 1;
     if (navigationOf().activeToken !== 0 && !answering && !(route.kind === 'command' && route.name === 'quit')) {
@@ -2258,7 +2263,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     void submit(route.text);
-  }, [advanceControlWizard, answerQuery, controlWizard, loadApprovalDetails, locale, push, query, remember, resetDraft, runCommand, running, submit, t]);
+  }, [advanceControlWizard, answerQuery, compacting, controlWizard, loadApprovalDetails, locale, push, query, remember, resetDraft, runCommand, running, submit, t]);
 
   // 轮次结束后每次发送一条队列消息；取消后队列保持暂停，需用户明确继续。
   useEffect(() => {
