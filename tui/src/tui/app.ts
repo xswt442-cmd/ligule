@@ -518,6 +518,7 @@ export { foldText } from './message-format.js';
 export { queuedLine } from './queue-text.js';
 export { clearCancelledLocalQuestion } from './local-question.js';
 export { findRecord } from './record-find.js';
+export { branchOf } from './branch-reference.js';
 export { executionReferenceOf } from './execution-reference.js';
 export { requestDiagnosticLines } from './usage-lines.js';
 
@@ -539,18 +540,6 @@ export function subrunReferenceOf(record: TuiRecord | undefined): TuiSubrunRefer
 }
 
 // `/sub` 使用父记录中的事件序号定位派生结果，并从结果中读取支线会话 ID。
-export function branchOf(record: TuiRecord | undefined): { readonly code: 'tui_sub_needs_a_branch' } | { readonly sessionId: string } | { readonly code: 'tui_sub_reference_spilled'; readonly spilled: string | undefined } {
-  if (record?.kind !== 'tool' || (record.tool !== 'subagent' && record.tool !== 'subagent_start')) return { code: 'tui_sub_needs_a_branch' };
-  const result = isRecord(record.result) ? record.result : undefined;
-  const content = isRecord(result?.content) ? result.content : undefined;
-  const sessionId = content?.sessionId ?? (record.tool === 'subagent_start' ? content?.subrunId : undefined);
-  // 结果超出限制时存入溢出文件；此时支线 ID 可能不在记录内容中。
-  if (typeof sessionId !== 'string' || sessionId === '') {
-    return { code: 'tui_sub_reference_spilled', spilled: typeof result?.spilled === 'string' ? result.spilled : undefined };
-  }
-  return { sessionId };
-}
-
 // 标题注明当前显示的是主会话还是派生会话，因为两者使用各自的事件序号。
 interface DetailTitleOptions {
   readonly seq: number | null;
@@ -2372,50 +2361,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           : { kind: 'meta', text: result.cancelRequested
             ? t('已发出取消请求，等待子任务收束。', 'Cancellation requested; waiting for the child to settle.')
             : t(`当前子任务状态：${result.state}。`, `Child state: ${result.state}.`) });
-      })();
-      return;
-    }
-    if (name === 'sub') {
-      void (async () => {
-        if (argument === '') {
-          setDetail(null);
-          return;
-        }
-        const parent = await client.request('session.read', { sessionId, fullResults: true }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
-        if ('code' in parent) {
-          push({ kind: 'error', text: t(`无法读取记录：${parent.code}`, `Could not read conversation: ${parent.code}`) });
-          return;
-        }
-        const picked = findRecord(parent.events, argument);
-        if ('code' in picked) {
-          push({ kind: 'error', text: t('请输入子任务结果的记录序号：/sub <序号>', 'Enter a subtask result’s sequence: /sub <seq>') });
-          return;
-        }
-        if (picked.record === null) {
-          push({ kind: 'error', text: t(`没有序号为 ${argument} 的记录`, `Event ${argument} was not found`) });
-          return;
-        }
-        const branch = branchOf(picked.record);
-        if (!('sessionId' in branch) && branch.code === 'tui_sub_needs_a_branch') {
-          push({ kind: 'error', text: t(`记录 ${argument} 不是子任务结果`, `Event ${argument} is not a subtask result`) });
-          return;
-        }
-        if (!('sessionId' in branch) && branch.code === 'tui_sub_reference_spilled') {
-          push({ kind: 'error', text: t(`子任务编号未保留；请查看完整结果 ${branch.spilled ?? ''}`, `Subtask ID is unavailable; see the full result ${branch.spilled ?? ''}`) });
-          return;
-        }
-        // 派生会话通过相同的记录读取接口读取；它没有当前运行时状态。
-        const read = await client.request('session.read', { sessionId: branch.sessionId, fullResults: true }).catch((error: unknown) => requestFailure(error, 'session_read_failed'));
-        if ('code' in read) {
-          push({ kind: 'error', text: t(`无法读取子任务：${read.code}`, `Could not read subtask: ${read.code}`) });
-          return;
-        }
-        setDetail({
-          seq: picked.record.seq,
-          kind: 'subagent',
-          branch: branch.sessionId,
-          rows: read.events.flatMap((event) => projectRecord(event, locale)),
-        });
       })();
       return;
     }
