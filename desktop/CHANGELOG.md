@@ -6,6 +6,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-21
+
 ### 简体中文
 
 **改进**

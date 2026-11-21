@@ -6,6 +6,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-21
+
 ### 简体中文
 
 **改进**
