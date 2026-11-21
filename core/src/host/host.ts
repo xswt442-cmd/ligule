@@ -87,9 +87,10 @@ import { createTodoWritePlugin } from '../tools/todo-write.js';
 import { createReadImagePlugin } from '../tools/read-image.js';
 import { createReadDocumentPlugin } from '../tools/read-document.js';
 import { createPresentPlugin, type ViewRequestArguments, type ViewRequestResult } from '../tools/present.js';
-import { listArtifacts, previewArtifact, inspectArtifact, resolveArtifact, type ArtifactEnvironment, type ArtifactScope } from './artifacts.js';
+import { listArtifacts, previewArtifact, inspectArtifact, resolveArtifact, type ArtifactScope } from './artifacts.js';
 import { readToolResult } from './tool-result-view.js';
 import { exportSession } from './session-export.js';
+import { readForClient, readRecordPage, type SessionReadDeps } from './session-read.js';
 import { createSearchSupport, type SearchStatus } from './search.js';
 import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
 import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
@@ -131,7 +132,7 @@ import { runResourcesOf } from './run-resources.js';
 import { createFileChangeStore, type FileChangeFact, type FileChangeStore } from '../session/file-changes.js';
 import { checkedCheckDeclaration, type CheckDeclaration } from '../session/checks.js';
 import { checkedExecutionLogReference } from '../session/execution-log.js';
-import { effectiveCheckScopeStatus, runEvidenceReferences } from '../session/run-evidence.js';
+import { runEvidenceReferences } from '../session/run-evidence.js';
 import { checkEventOf, sampleCheckScope } from './checks.js';
 import { parseInitialGenerationSettings } from './session-initial-settings.js';
 import { settingsToolCatalog as buildSettingsToolCatalog } from './tool-catalog.js';
@@ -1720,13 +1721,13 @@ export function createHost({
     }
   }
 
-  function recordPathOf(id: string, env: ProjectEnvironment = defaultEnvironment): string {
+  function recordPathOf(id: string, env: { readonly directory: string } = defaultEnvironment): string {
     assertSessionId(id);
     return join(env.directory, `${id}.jsonl`);
   }
 
   // 只为当前页包含的记录读取溢出文件。
-  async function fillSpills(events: SessionEvent[], env: ArtifactEnvironment): Promise<SessionEvent[]> {
+  async function fillSpills(events: SessionEvent[], env: { readonly directory: string }): Promise<SessionEvent[]> {
     const base = await realpath(env.directory);
     const complete = [];
     for (const event of events) {
@@ -1754,73 +1755,15 @@ export function createHost({
     return complete;
   }
 
-  // 使用稳定递增的事件序号分页；向前读取时以当前页第一条序号为边界。
-  // 翻页期间追加的新事件不会造成旧记录重复或遗漏。`endSeq` 标记本次快照的末尾，`hasMore` 表示是否还有更早记录。
-  async function readForClient(
-    session: SessionLog,
-    sessionId: string,
-    { fullResults, limit, before, at }: { fullResults?: boolean; limit?: number; before?: number; at?: number } = {},
-    env: ProjectEnvironment = defaultEnvironment,
-  ) {
-    const events = await session.read();
-    const header = await session.header();
-    let provisionalOutput = null;
-    let provisionalOutputError: string | null = null;
-    try { provisionalOutput = await session.readProvisionalOutput(events); }
-    catch (error) {
-      if (!(error instanceof KernelError) || error.code !== 'session_stream_invalid') throw error;
-      provisionalOutputError = error.code;
-    }
-    if (at !== undefined && before !== undefined) {
-      throw new KernelError('protocol_args_invalid', { detail: 'session.read at and before are mutually exclusive' });
-    }
-    // 游标未指向当前会话的事件时应返回错误，不能静默退回第一页。
-    const cursor = at ?? before;
-    if (cursor !== undefined && !events.some((event) => event.seq === cursor)) {
-      throw new KernelError('session_cursor_invalid', { detail: `${sessionId} has no event ${cursor}` });
-    }
-    const page = at !== undefined
-      ? events.filter((event) => event.seq === at)
-      : (before === undefined ? events : events.filter((event) => event.seq < before)).slice(-(limit ?? events.length));
-    // 检查记录里的范围状态是写入当时的快照；客户端要看到的是此刻的事实。
-    // 结论基于完整事件流而不是当前页，因此分页不会让一条已过期检查重新显示为有效。
-    const projected = new Map<number, SessionEvent>();
-    for (const event of events) {
-      projected.set(event.seq, event.kind === 'check' && typeof event.runId === 'string'
-        ? { ...event, scopeStatus: effectiveCheckScopeStatus(events, event.runId, event) }
-        : event);
-    }
-    const visible = page.map((event) => projected.get(event.seq) ?? event);
-    return {
-      sessionId,
-      events: fullResults ? await fillSpills(visible, env) : visible,
-      header: header ?? null,
-      provisionalOutput,
-      provisionalOutputError,
-      label: foldLabel(events),
-      endSeq: page.at(-1)?.seq ?? null,
-      hasMore: page.length > 0 && page[0].seq > 1,
-    };
-  }
-
-  // 打开中的会话从运行时读取，派生会话从已保存记录读取；两者使用相同的响应结构。
-  // 此方法只读取指定会话。使用会话列表查找记录，使用 `session.open` 重新打开会话。
-  // 分页和溢出内容选项原样交给 `readForClient`。
-  async function readRecord(id: string, params: { fullResults?: boolean; limit?: number; before?: number; at?: number }) {
-    const state = sessions.get(id);
-    if (state !== undefined) return await readForClient(state.session, id, params, state.environment);
-    // 父轮次结束后，派生会话没有运行时状态，因此从已保存记录读取。
-    assertSessionId(id);
-    const owner = branchOwner(id);
-    if (owner === undefined) throw new KernelError('session_not_open', { detail: id });
-    const env = sessions.get(owner)?.environment ?? defaultEnvironment;
-    try {
-      await access(recordPathOf(id, env));
-    } catch {
-      throw new KernelError('session_not_found', { detail: id });
-    }
-    return await readForClient(createSessionLog({ directory: env.directory, id }), id, params, env);
-  }
+  // 使用稳定递增的事件序号分页；读模型在 session-read.ts，这里只绑定打开中的会话与环境。
+  const sessionReadDeps: SessionReadDeps = {
+    opened: id => sessions.get(id),
+    defaultEnvironment,
+    branchOwner,
+    assertSessionId,
+    recordPathOf,
+    fillSpills,
+  };
 
   // 每个会话拥有自己的 Kernel、权限状态和循环。
   // 审批请求属于发起它的会话；客户端未明确允许时一律拒绝。
@@ -3758,7 +3701,7 @@ export function createHost({
               throw new KernelError('side_context_reference_invalid');
             }
             sourceEventSeq = Number(message.params.sourceEventSeq);
-            const selectedRecord = await readRecord(source.id, { at: sourceEventSeq, fullResults: true }) as { events?: Record<string, unknown>[] };
+            const selectedRecord = await readRecordPage(source.id, { at: sourceEventSeq, fullResults: true }, sessionReadDeps) as unknown as { events?: Record<string, unknown>[] };
             sourceEvent = selectedRecord.events?.[0];
             if (sourceEvent === undefined) throw new KernelError('side_context_event_not_found');
             const visibleText: string[] = [];
@@ -4105,7 +4048,7 @@ export function createHost({
         case 'session.read': {
           // 返回已持久化记录，让客户端重连后可以恢复会话内容。
           // `limit` 和 `before` 用于分页，`at` 指定一条事件；派生会话也走同一读取流程。
-          return await readRecord(sessionId, message.params);
+          return await readRecordPage(sessionId, message.params, sessionReadDeps);
         }
         case 'tool.result': {
           // 结果读模型在 tool-result-view.ts：入口只校验调用属于哪个 Run，并传入已可见的事件。
@@ -4133,7 +4076,7 @@ export function createHost({
             ...(message.params.limit === undefined ? {} : { limit: message.params.limit as number }),
             ...(message.params.before === undefined ? {} : { before: message.params.before as number }),
             ...(message.params.at === undefined ? {} : { at: message.params.at as number }),
-          }, env);
+          }, { env, fillSpills });
           return { ...snapshot, writerActive: opened?.running !== undefined || await sessionWriterActive(path) };
         }
         case 'session.image.preview': {
@@ -4202,7 +4145,7 @@ export function createHost({
             defaultEnvironment,
             branchOwner,
             running: sessions.get(sessionId)?.running !== undefined,
-            readRecord: (id, params) => readRecord(id, params),
+            readRecord: (id, params) => readRecordPage(id, params, sessionReadDeps),
           });
         }
         case 'run.start': {
