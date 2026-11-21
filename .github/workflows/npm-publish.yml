@@ -78,19 +78,6 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
-      - name: require configured npm-publish reviewers
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          environment=$(gh api "repos/${GITHUB_REPOSITORY}/environments/npm-publish")
-          if ! jq -e '[.protection_rules[]? | select(.type == "required_reviewers" and (.reviewers | length > 0))] | length > 0' <<< "$environment" >/dev/null; then
-            echo "::error::npm-publish must have at least one required reviewer configured before npm publication"
-            exit 1
-          fi
-          echo "npm-publish required reviewers are configured." >> "$GITHUB_STEP_SUMMARY"
-
   checks:
     name: pack and check the release artifact
     needs: preflight
@@ -239,9 +226,6 @@ jobs:
     name: publish to npm
     needs: [preflight, checks, registry-check, verify]
     runs-on: ubuntu-24.04
-    # Approval is bound to the publishing job itself: the gate holds the job until
-    # a required reviewer approves, and only then does it receive the OIDC token.
-    environment: npm-publish
     permissions:
       contents: read
       id-token: write

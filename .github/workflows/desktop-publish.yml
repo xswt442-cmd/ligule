@@ -8,7 +8,7 @@ on:
         type: string
         required: true
       publish:
-        description: Publish the verified draft after desktop-publish Environment approval
+        description: Publish the verified draft immediately
         type: boolean
         required: true
         default: false
@@ -295,35 +295,12 @@ jobs:
           done <<< "$expected_names"
           echo "Verified ${TAG} draft assets against source commit ${{ needs.preflight.outputs.commit }}." >> "$GITHUB_STEP_SUMMARY"
 
-  publish-preflight:
-    name: require configured Desktop release reviewers
-    if: inputs.publish
-    needs: preflight
-    runs-on: ubuntu-24.04
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - name: require configured desktop-publish reviewers
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          environment=$(gh api "repos/${GITHUB_REPOSITORY}/environments/desktop-publish")
-          if ! jq -e '[.protection_rules[]? | select(.type == "required_reviewers" and (.reviewers | length > 0))] | length > 0' <<< "$environment" >/dev/null; then
-            echo "::error::desktop-publish must have at least one required reviewer configured before Desktop publication"
-            exit 1
-          fi
-          echo "desktop-publish required reviewers are configured." >> "$GITHUB_STEP_SUMMARY"
-
   publish:
     name: publish the verified Desktop Release
     if: inputs.publish
-    needs: [preflight, publish-preflight]
+    needs: preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    environment: desktop-publish
     permissions:
       actions: read
       contents: write
@@ -338,7 +315,7 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           package-manager-cache: false
 
-      - name: verify the existing draft and publish after approval
+      - name: verify the existing draft and publish
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.preflight.outputs.tag }}

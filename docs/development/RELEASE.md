@@ -12,12 +12,12 @@ Ligule 分为两条独立发行线，版本可分别推进：
 ## 发行流程
 
 1. **版本准备随功能或修复的 PR 一起完成，不创建版本专用 PR。** 决定随某次合并发行时，把对应产品的版本号（`node scripts/release-version.js prepare cli minor` 等命令的产物：`package.json`、`tui/src/version.ts`）与中英双语 Changelog 条目放进该功能或修复的同一个 PR，随正常审查与 CI 合并进 `main`。合并完成后该提交即具备发布资格；功能 PR 收尾时把「是否随本次合并发行」当作一项检查，未准备版本号的合并不具备发布资格。不为版本准备再额外创建 `release/*` 分支或版本专用 PR。
-2. **在 CI 通过的 `main` 头部打 Tag，发布自动衔接。** 运行 [`tag.yml`](../../.github/workflows/tag.yml)，选择 `product=cli|desktop` 与精确 `version=X.Y.Z`（在 `main` 上执行）。工作流核验版本与 Manifest、双语 Changelog、Tag 不存在、提交等于当前 `main` 头部、该提交的 `main` push CI 成功，创建 annotated `cli-vX.Y.Z` 或 `desktop-vX.Y.Z` Tag，并按产品自动分发发布工作流（`GITHUB_TOKEN` 推送的 Tag 不触发 push 工作流，因此分发走 `workflow_dispatch`）。若 CI 未通过、`main` 前进、版本不匹配或 Tag 已存在，**失败关闭，不做自动版本提交、强制 Tag 或跳过检查**。不采用监听 Manifest 变化的全自动发版：日常合并不等于立即发布，两条产品线各自选择发行时机，发布仍保留人工启动与审批。
-3. **CLI/TUI：** Tag 创建后 [`npm-publish.yml`](../../.github/workflows/npm-publish.yml) 被自动分发；重试或补发时可手动 dispatch 并输入 `cli-vX.Y.Z`。工作流核验 Tag 属于 `main` 历史（`main` 此后前进不受影响）、该准确 SHA 的 `main` CI 成功，重新打包并双平台安装验证；发布使用 npm Trusted Publishing/OIDC。**审批直接绑定发布 Job**（`npm-publish` Environment）：打包与验证全部通过后，必需审核者批准，发布 Job 才获得 OIDC 凭据并发布 npm。**仅在 npm 发布流程成功且 Registry 可查后**，工作流使用标签提交的 `tui/CHANGELOG.md` 创建独立的 `CLI/TUI vX.Y.Z` GitHub Release（标题只含产品与版本；**不附安装包，也不抢占 Desktop 的 Latest 标记**）。重试时保留已有公开 Release，不自动覆盖已有正文或重新执行已存在版本的 npm 发布。
+2. **在 CI 通过的 `main` 头部打 Tag，发布自动衔接。** 运行 [`tag.yml`](../../.github/workflows/tag.yml)，选择 `product=cli|desktop` 与精确 `version=X.Y.Z`（在 `main` 上执行）。工作流核验版本与 Manifest、双语 Changelog、Tag 不存在、提交等于当前 `main` 头部、该提交的 `main` push CI 成功，创建 annotated `cli-vX.Y.Z` 或 `desktop-vX.Y.Z` Tag，并按产品自动分发发布工作流（`GITHUB_TOKEN` 推送的 Tag 不触发 push 工作流，因此分发走 `workflow_dispatch`）。若 CI 未通过、`main` 前进、版本不匹配或 Tag 已存在，**失败关闭，不做自动版本提交、强制 Tag 或跳过检查**。不采用监听 Manifest 变化的全自动发版：日常合并不等于立即发布，两条产品线各自选择发行时机，发布仍由维护者手动启动。
+3. **CLI/TUI：** Tag 创建后 [`npm-publish.yml`](../../.github/workflows/npm-publish.yml) 被自动分发；重试或补发时可手动 dispatch 并输入 `cli-vX.Y.Z`。工作流核验 Tag 属于 `main` 历史（`main` 此后前进不受影响）、该准确 SHA 的 `main` CI 成功，重新打包并双平台安装验证。打包与验证全部通过后，发布 Job 直接使用 npm Trusted Publishing/OIDC 发布，不再等待环境审批。**仅在 npm 发布流程成功且 Registry 可查后**，工作流使用标签提交的 `tui/CHANGELOG.md` 创建独立的 `CLI/TUI vX.Y.Z` GitHub Release（标题只含产品与版本；**不附安装包，也不抢占 Desktop 的 Latest 标记**）。重试时保留已有公开 Release，不自动覆盖已有正文或重新执行已存在版本的 npm 发布。
 4. **Desktop 草稿：** Tag 创建后 [`desktop-publish.yml`](../../.github/workflows/desktop-publish.yml) 被自动分发（`publish=false`）。工作流从标签提交构建 Windows 与 Linux 三种安装包、校验发行资产并创建或补齐 GitHub Release 草稿。
-5. **公开 Desktop：** 检查草稿说明、三种安装包和 SHA-256 后，再手动 dispatch 同一工作流并设置 `publish=true`。工作流重新核对标签、历史草稿运行与全部资产，检查 `desktop-publish` Environment 已配置必需审核者，然后等待该 Environment 审批；获批后才公开 Release。
+5. **公开 Desktop：** 检查草稿说明、三种安装包和 SHA-256 后，再手动 dispatch 同一工作流并设置 `publish=true`。工作流重新核对标签、历史草稿运行与全部资产，校验通过后直接公开 Release，不再等待环境审批。
 
-**打 Tag 前最后核对：** 确认本地 `dev`、`main` 与远端分支已同步，工作区干净；`main` 最新提交的完整 push CI 成功，两个产品的 Manifest 版本与中英 Changelog 对应，目标 Tag 都尚不存在。使用上面的 `tag.yml` 分别创建产品标签，而不是手工推送轻量 Tag：该工作流还会校验精确 SHA 并自动分发后续流程。**创建 CLI Tag 会立即启动 npm 打包验证并最终等待 `npm-publish` Environment 审批；创建 Desktop Tag 会启动安装包构建和 Release 草稿流程，但不会公开 Desktop。** 不要把“Tag 已创建”或“草稿已生成”当成产品已正式发布。
+**打 Tag 前最后核对：** 确认本地 `dev`、`main` 与远端分支已同步，工作区干净；`main` 最新提交的完整 push CI 成功，两个产品的 Manifest 版本与中英 Changelog 对应，目标 Tag 都尚不存在。使用上面的 `tag.yml` 分别创建产品标签，而不是手工推送轻量 Tag：该工作流还会校验精确 SHA 并自动分发后续流程。**创建 CLI Tag 会立即启动 npm 打包验证并直接发布；创建 Desktop Tag 会启动安装包构建和 Release 草稿流程，但不会自动公开 Desktop。** 不要把“Tag 已创建”或“草稿已生成”当成产品已正式发布。
 
 ## 发行故障处理与回退
 
@@ -36,7 +36,7 @@ Ligule 分为两条独立发行线，版本可分别推进：
 - Desktop 的 `publish=false` 草稿工作流通过 `node --experimental-strip-types scripts/desktop-release-manifest.ts verify` 校验资产，再调用 `node scripts/release-notes.js desktop-vX.Y.Z --manifest dist-release/desktop-release-manifest.json`。预览时不提供 Manifest，只生成各语言的支持平台表和附件区链接，**不会伪造文件直链**。每个语言区块内分别提供 `SHA256SUMS` 与 Manifest 链接；只列出该版本实际发布的目标和架构。
 - 已公开 Release 的说明如需修订，应验证对应真实 Tag、安装包资产和目标 Registry 后修改 Release 正文；不移动 Tag、不覆盖二进制，不会因此重新发布 npm 包。
 
-版本、更新记录和发布渠道必须保持产品隔离。不要重用标签或 npm 版本。重试前先检查 [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases) 与 [npm 包](https://www.npmjs.com/package/ligule)。正式发布前须为 `npm-publish` 和 `desktop-publish` GitHub Environments 配置必需审核者。
+版本、更新记录和发布渠道必须保持产品隔离。不要重用标签或 npm 版本。重试前先检查 [GitHub Releases](https://github.com/xswt442-cmd/ligule/releases) 与 [npm 包](https://www.npmjs.com/package/ligule)。发布不再需要 GitHub Environments 审核者；维护者仍需在公开 Desktop 前检查草稿说明与资产。
 
 随包 Node 运行时及其归档校验值以 [`desktop/node-pin.json`](../../desktop/node-pin.json) 为准。修改运行时版本时更新该文件并验证各目标安装包。
 
