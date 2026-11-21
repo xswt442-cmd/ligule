@@ -89,8 +89,10 @@ export function useConfigCommands(deps: ConfigCommandDeps): { handle: (name: str
           push({ kind: 'error', text: t(`无法切换工具模式：${switched.code}`, `Could not change tool mode: ${switched.code}`) });
           return;
         }
-        setStatus(await client.request('status.get', { sessionId: own }).catch(() => null));
+        // 先取回状态，确认会话未切换后再写入，避免迟到响应覆盖新前台。
+        const refreshed = await client.request('status.get', { sessionId: own }).catch(() => null);
         if (activeSession.current !== own) return;
+        setStatus(refreshed);
         push({ kind: 'meta', text: switched.pending === null
           ? t(`工具模式：${switched.mode}（${switched.tools.length} 个工具）`, `Tool mode: ${switched.mode} (${switched.tools.length} tools)`)
           : t(`${switched.pending} 将于下轮生效`, `${switched.pending} will apply next turn`) });
@@ -114,8 +116,9 @@ export function useConfigCommands(deps: ConfigCommandDeps): { handle: (name: str
           push({ kind: 'error', text: t(`无法修改审批方式：${changed.code}`, `Could not change approval mode: ${changed.code}`) });
           return;
         }
-        setStatus(await client.request('status.get', { sessionId: own }).catch(() => null));
+        const refreshed = await client.request('status.get', { sessionId: own }).catch(() => null);
         if (activeSession.current !== own) return;
+        setStatus(refreshed);
         push({ kind: 'meta', text: changed.policySource === 'session'
           ? t(`当前会话审批方式：${changed.policy}（已生效）`, `Session approval mode: ${changed.policy} (active now)`)
           : t(`已恢复默认审批方式：${changed.policy}`, `Default approval mode restored: ${changed.policy}`) });
