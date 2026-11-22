@@ -459,14 +459,10 @@ test('release workflows split CI, tagging, and product publication and keep proc
   assert.match(cliNotesScript, /if existing=\$\(gh release view/);
   assert.match(cliNotesScript, /\[ "\$existing" != false \]/);
   assert.doesNotMatch(cliNotesScript, /npm publish/);
-  assert.match(JSON.stringify(npmPublish.jobs.preflight), /npm-publish must have at least one required reviewer/);
-  assert.match(JSON.stringify(npmPublish.jobs.preflight), /required_reviewers/);
   assert.match(JSON.stringify(npmPublish.jobs.preflight), /merge-base --is-ancestor/,
     'publication accepts only tags that are part of the main history');
-  // Approval is bound to the publishing job itself: the environment gate holds the
-  // job until a required reviewer approves, then the job receives the OIDC token.
-  assert.equal(Object.keys(npmPublish.jobs).includes('approval'), false);
-  assert.equal(npmPublish.jobs.npm.environment, 'npm-publish');
+  assert.equal(npmPublish.jobs.npm.environment, undefined,
+    'the OIDC publish job runs without a GitHub Environment approval gate');
   assert.deepEqual(npmPublish.jobs.npm.needs, ['preflight', 'checks', 'registry-check', 'verify']);
   assert.deepEqual(npmPublish.jobs.verify.needs, ['preflight', 'checks']);
   assert.equal(npmPublish.jobs.npm.permissions['id-token'], 'write');
@@ -565,8 +561,8 @@ test('release workflows split CI, tagging, and product publication and keep proc
   assert.match(draft, /comm -13/);
   assert.match(draft, /draft Release contains assets outside the verified set/);
   assert.doesNotMatch(draft, /--clobber|gh release edit/);
-  assert.equal(desktopPublish.jobs.publish.environment, 'desktop-publish');
-  assert.match(JSON.stringify(desktopPublish.jobs['publish-preflight']), /desktop-publish must have at least one required reviewer/);
+  assert.equal(desktopPublish.jobs.publish.environment, undefined,
+    'Desktop publication runs without a GitHub Environment approval gate');
   const publishDesktop = desktopPublish.jobs.publish.steps.map((step) => step.run ?? '').join('\n');
   assert.match(publishDesktop, /verify-desktop-draft\.js/);
   assert.match(publishDesktop, /releases\/\$\{release_id\}\/assets\?per_page=100/);
@@ -576,7 +572,7 @@ test('release workflows split CI, tagging, and product publication and keep proc
   assert.match(publishDesktop, /--workflow desktop-publish\.yml --event workflow_dispatch --commit/);
   assert.equal(desktopPublish.jobs.build.if, '${{ !inputs.publish }}');
   assert.equal(desktopPublish.jobs.draft.if, '${{ !inputs.publish }}');
-  assert.deepEqual(desktopPublish.jobs.publish.needs, ['preflight', 'publish-preflight']);
+  assert.equal(desktopPublish.jobs.publish.needs, 'preflight');
   assert.equal(desktopPublish.jobs.publish.steps[0].with?.ref, '${{ github.sha }}');
   assert.doesNotMatch(JSON.stringify(desktopPublish.jobs.publish), /actions\/download-artifact/);
   assert.match(publishDesktop, /PATCH .*releases\/\$\{release_id\}.*draft=false/);
