@@ -59,7 +59,6 @@ import { controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissi
 import { admitEntry } from './entry.js';
 import { summarizeUsage } from '../session/usage-summary.js';
 import { readSessionRecord } from '../session/record.js';
-import { inactiveGrantOutcome, isGrantActive, selectReviewEvidence, staleReviewOutcome } from './review-evidence.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { readPolicyOverride } from '../session/format.js';
 import { SPILL_NAME } from '../session/spill.js';
@@ -114,9 +113,7 @@ import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
 import { providerFromConfig, modelSelectionOf, type HostGenerationOptions, type HostProvider } from './provider.js';
-import { createSessionReviewer, narrowReviewerSettings, reviewerRouteFields, reviewerSettings } from './reviewer.js';
-import type { PolicyReviewRecord, PolicyReviewRequest } from '../kernel/policy.js';
-import type { ReviewFacts } from '../kernel/reviewer.js';
+import { createSessionReview, trustedReviewerConfig } from './session-review.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
 import { runAcceptanceScope, runLivenessOf } from './run-records.js';
 import { runResourcesOf } from './run-resources.js';
@@ -143,22 +140,6 @@ type PolicyRememberScope = 'session' | 'project' | 'user';
 
 function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'path' | 'argsHash'>): string {
   return JSON.stringify([rule.tool, rule.match ?? '', rule.target ?? '', rule.path ?? '', rule.argsHash ?? '']);
-}
-
-/**
- * 把一条 Policy 规则投影成复审事实。作用域字段（target/path/argsHash）必须原样带上，
- * 否则 Reviewer 会把“只对这一条命令生效”的拒绝看成泛化的拒绝。
- */
-function reviewRuleOf(rule: PolicyRule, source: 'session' | 'config'): NonNullable<ReviewFacts['rules']>[number] {
-  return {
-    tool: rule.tool,
-    decision: rule.decision,
-    source,
-    ...(rule.match === undefined ? {} : { match: rule.match }),
-    ...(rule.target === undefined ? {} : { target: rule.target }),
-    ...(rule.path === undefined ? {} : { path: rule.path }),
-    ...(rule.argsHash === undefined ? {} : { argsHash: rule.argsHash }),
-  };
 }
 
 type OperationTerminalState = 'exited' | 'failed' | 'cancelled' | 'unknown';
@@ -1437,20 +1418,7 @@ export function createHost({
   ): Promise<HostSessionState> {
     // 从会话所属的项目环境解析项目级资源。
     const { config, provider, policy, modePaths, directory, mcpConfigs, extensions, skillRegistry, templateRegistry } = env;
-    // 可信层里残留的路由字段从不生效，也不能看起来像生效：明确拒绝，让用户删掉它们。
-    // 校验放在创建任何会话资源之前：否则会先写出一条只含权限事件的残缺记录。
-    // 不可信层（项目配置）写进来的同名字段更不可能生效，只记一条诊断，不阻断会话。
-    const trustedLayers = Object.keys(env.layers).length === 0
-      ? undefined
-      : createConfig({ user: env.layers.user ?? {}, flag: env.layers.flag ?? {} });
-    const trustedRouteFields = trustedLayers === undefined
-      ? reviewerRouteFields(config)
-      : reviewerRouteFields(trustedLayers);
-    if (trustedRouteFields.length > 0) {
-      throw new KernelError('reviewer_route_removed', {
-        detail: `the [reviewer] table still sets ${trustedRouteFields.join(', ')}; the reviewer always uses the session model, so remove those fields`,
-      });
-    }
+    const trustedReviewConfig = trustedReviewerConfig(env);
     // 将已持久化的会话事件同时发送给客户端和已加载扩展。
     const listeners: ((event: SessionEvent) => void)[] = [];
     const asks = new Set<PendingRunAsk>();
@@ -1566,10 +1534,6 @@ export function createHost({
     const cleanup = [];
     try {
     const captureGrant = await activeDelegation();
-    // Grant 会在会话存续期间被撤销或过期：复审前重新读一次，本次复审的事实与证据共用这份快照。
-    let liveGrant: typeof captureGrant = captureGrant;
-    // 重读失败说明授权状态未知：按失效处理，别让空白被读成“没有约束”。
-    let grantCheckFailed = false;
     const initialCapture = agentControl === undefined ? screenCaptureConsent : captureGrant?.allowScreenCapture === true;
     if (initialCapture) {
       if (recover && ((await session.header())?.formatVersion ?? 0) < 1) throw new KernelError('session_screen_capture_format_unsupported');
@@ -1676,152 +1640,19 @@ export function createHost({
               confirmedPartialWorkspaceWrite: initial.permission.confirmedPartialWorkspaceWrite,
             });
     }
-    // 复审只在配置显式启用时存在；未启用时 `auto` 与 P9.5 行为一致。
-    const mergedReviewSettings = reviewerSettings(config);
-    // 项目配置不能自己打开付费请求：`enabled` 只认用户配置与命令行；预算只能被收紧，
-    // 不能被合并后的项目层放大。
-    const trustedReviewSettings = trustedLayers === undefined
-      ? mergedReviewSettings
-      : reviewerSettings(trustedLayers);
-    const reviewSettings = mergedReviewSettings === undefined || trustedReviewSettings === undefined
-      ? undefined
-      : narrowReviewerSettings(mergedReviewSettings, trustedReviewSettings);
-    // 复审不选自己的模型：它用的就是这一轮 Run 的 Session generation（同一个 Provider、
-    // 同一个端点、同一份凭据绑定），只额外压一个输出预算。
-    if (reviewSettings !== undefined) {
-      const ignoredRouteFields = reviewerRouteFields(config);
-      if (ignoredRouteFields.length > 0) {
-        try {
-          logger?.log?.('reviewer ignores route fields from an untrusted configuration layer', {
-            sessionId: id, fields: ignoredRouteFields.join(','),
-          });
-        } catch { /* 记录失败不影响会话 */ }
-      }
-    }
-    const reviewer = reviewSettings === undefined ? undefined : (() => {
-      return createSessionReviewer({
-        settings: reviewSettings,
-        provider: () => state.generation.provider.withGeneration({ outputTokensCeiling: reviewSettings.maxOutputTokens }),
-        factsOf: (request: PolicyReviewRequest): ReviewFacts => ({
-          tool: request.tool,
-          args: request.input,
-          ...(request.command === undefined ? {} : { command: request.command }),
-          policyMode: request.policy,
-          permission: { profile: state.permission.profile, network: state.permission.network },
-          boundary: env.projectRoot,
-          workingDirectory: env.projectRoot,
-          workspaceTrusted,
-          ...(request.reason === undefined ? {} : { reason: request.reason }),
-          // 用户原文只作事实，不会进入主 Agent 的模型投影。
-          // 只有人类写的约束算授权事实；外控写入的“用户原文”只是请求。
-          userInstructions: (state.reviewEvidence?.constraints ?? []).filter((item) => item.source === 'user').map((item) => item.text),
-          ...(state.reviewEvidence === undefined ? {} : { evidence: state.reviewEvidence }),
-          rules: [
-            ...state.sessionPolicyRules.map((rule) => reviewRuleOf(rule, 'session')),
-            ...(policy?.rules ?? []).map((rule) => reviewRuleOf(rule, 'config')),
-          ],
-          ...(liveGrant === undefined ? {} : {
-            grant: {
-              id: liveGrant.id,
-              active: !grantCheckFailed && isGrantActive(liveGrant),
-              scope: liveGrant.projectRoot,
-              ...(liveGrant.allowedPolicies === undefined ? {} : { allowedPolicies: liveGrant.allowedPolicies }),
-            },
-          }),
-        }),
-        logger: (message, detail) => {
-          try { logger?.log?.(message, { ...detail, sessionId: id }); } catch { /* 记录失败不影响审批结果 */ }
-        },
-        onUsage: (event) => {
-          // 复审用量单独成账（purpose=reviewer），与主 Agent 的 usage 事件分开统计。
-          if (event === null) return;
-          void session.append(event).catch((error: unknown) => {
-            try { logger?.log?.('failed to record reviewer usage', { sessionId: id, session_error: String(error) }); } catch { /* 忽略 */ }
-          });
-        },
-      });
-    })();
-
-    if (reviewer !== undefined) state.reviewer = reviewer;
-    // 复审结论写入会话审计（不影响模型投影）：只记录结论、原因码和耗时。
-    // 用量由独立的 `purpose: 'reviewer'` usage 事件记账，审计事件不再重复记 token。
-    const recordReview = reviewer === undefined ? undefined : async (request: PolicyReviewRequest): Promise<PolicyReviewRecord> => {
-      const startedAt = Date.now();
-      // 复审前重新读一次 Grant：会话创建时的那份快照无法反映之后的撤销与到期。
-      // 重读失败说明授权状态未知：保留旧记录但按失效处理，让复审转人工而不是沿用旧放行依据。
-      // 复审期间也要再读一次：撤销之后才到达的 allow 不能沿用复审前的结论。
-      const refreshGrant = async (): Promise<void> => {
-        if (agentControl === undefined) return;
-        try {
-          liveGrant = await activeDelegation();
-          grantCheckFailed = false;
-        } catch {
-          grantCheckFailed = true;
-        }
-      };
-      await refreshGrant();
-      // 每次复审前从原始 Session 事件重建可信证据：早期约束、撤销与收紧、相关历史都带 seq。
-      // Grant 是否有效由 Host 单独判定并可能直接转人工，因此不混进证据列表。
-      const evidence = await selectReviewEvidence(session, { tool: request.tool });
-      const appendAudit = async (record: {
-        readonly decision: 'allow' | 'deny' | 'ask-human';
-        readonly reasonCode?: string;
-        readonly reason?: string;
-        readonly includedSeqs?: readonly number[];
-      }): Promise<void> => {
-        try {
-          await session.append({
-            kind: 'policyReview',
-            ignorable: true,
-            at: new Date().toISOString(),
-            tool: request.tool,
-            review: record.decision,
-            ...(record.reasonCode === undefined ? {} : { reasonCode: record.reasonCode }),
-            make: 'session-reviewer',
-            durationMs: Date.now() - startedAt,
-            // 证据来源可回查：只记真正送进提示词的序号，预算丢掉的历史不冒领。
-            ...(record.includedSeqs === undefined || record.includedSeqs.length === 0 ? {} : { evidenceSeqs: [...record.includedSeqs] }),
-            ...(record.reason === undefined ? {} : { reason: record.reason }),
-          });
-        } catch (error) {
-          logger?.log?.('failed to record the review decision', { sessionId: id, session_error: String(error) });
-        }
-      };
-      if (evidence === undefined) {
-        // 读不到原始日志时不能复用上一轮的约束：自动放行的安全性依赖“证据仍然是当前的”。
-        // 复用旧快照会让撤销或收紧失效，所以本次直接转人工，并把结论写进审计。
-        state.reviewEvidence = undefined;
-        const stale = staleReviewOutcome();
-        await appendAudit(stale);
-        return stale;
-      }
-      state.reviewEvidence = evidence;
-      // Grant 的有效性由 Host 判定，不交给模型：撤销、到期或重读失败都必须直接拦下，
-      // 否则失效的授权只能作为提示词里的一条事实，仍然可能被复审放行。
-      if (grantCheckFailed || (liveGrant !== undefined && !isGrantActive(liveGrant))) {
-        const inactive = inactiveGrantOutcome();
-        await appendAudit(inactive);
-        return inactive;
-      }
-      const outcome = await reviewer.review(request);
-      // 复审是一次真实网络请求，期间 Grant 可能被撤销或到期。撤销之后才到达的 allow
-      // 不能沿用复审前的检查：那会把“授权已经收回”变成“模型同意所以放行”。
-      await refreshGrant();
-      if (outcome.decision === 'allow' && (grantCheckFailed || (liveGrant !== undefined && !isGrantActive(liveGrant)))) {
-        const inactive = inactiveGrantOutcome();
-        await appendAudit(inactive);
-        return inactive;
-      }
-      await appendAudit(outcome);
-      return outcome;
-    };
+    const review = createSessionReview({
+      id, projectRoot: env.projectRoot, config, trustedConfig: trustedReviewConfig, configuredRules: policy?.rules,
+      session, state, workspaceTrusted, logger, initialGrant: captureGrant,
+      refreshGrant: agentControl === undefined ? undefined : activeDelegation,
+    });
+    if (review !== undefined) state.reviewer = review.reviewer;
     const chain = createDecisionChain({
       ...policy,
       rules: mergePolicyRules([
         { source: 'session', rules: state.sessionPolicyRules },
         { source: 'config', rules: policy?.rules ?? [] },
       ]).rules as PolicyRule[],
-      ...(recordReview === undefined ? {} : { review: recordReview }),
+      ...(review === undefined ? {} : { review: review.recordReview }),
       ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced, rememberable, scriptBinding, callId, identityDigest }): Promise<PolicyAskResult> => {
         const telemetryContext = telemetryEnabled(telemetry) ? currentTelemetryContext() : undefined;
         const telemetryApprovalRunId = telemetryContext?.runId
