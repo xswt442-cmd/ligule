@@ -43,12 +43,11 @@ import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
 import { createRunAcceptance, findRunReceipt, isRunAcceptance, publishRunResult, readRunResult, runPayloadDigest, type DurableRunReceipt, type RunAcceptance } from '../session/run.js';
 import type { SessionEvent } from '../session/format.js';
-import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDirectory } from '../session/list.js';
+import { chooseResumeMode, sessionDirectories, sessionDirectory } from '../session/list.js';
 import { adoptForSessionDirectory } from '../session/adopt.js';
-import { searchSessionDirectories } from '../session/search.js';
-import { branchSession } from '../session/branch.js';
 import { readConfig, writeConfig } from './handlers/config.js';
 import { handleProjectRequest } from './handlers/project.js';
+import { createSessionHandlers } from './handlers/session.js';
 import { handleSubrunRequest } from './handlers/subrun.js';
 import { createWorkspacePrefsHandlers } from './handlers/workspace-prefs.js';
 import { listProjectDirectory, readProjectFile } from './project-files.js';
@@ -56,8 +55,7 @@ import { projectGitDiffVersion, readProjectGitDiff } from './project-git.js';
 import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
 export { compactionLimitsOf } from './runtime-limits.js';
 import { createCompaction } from '../session/compaction.js';
-import { sessionWriterActive } from '../session/lock.js';
-import { requestAgentControl, TRUSTED_AGENT_CONTROL_ORIGIN, type AgentControlRequest } from './agent-control-runtime.js';
+import { TRUSTED_AGENT_CONTROL_ORIGIN } from './agent-control-runtime.js';
 import { controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissionControl, requireTrustedUi, runChannelOf, runOriginBasis, runScopesOf, type ControlTrust } from './capabilities.js';
 import { admitEntry } from './entry.js';
 import { usageEvent } from '../session/usage.js';
@@ -65,7 +63,7 @@ import { summarizeUsage } from '../session/usage-summary.js';
 import { readSessionRecord } from '../session/record.js';
 import { inactiveGrantOutcome, isGrantActive, selectReviewEvidence, staleReviewOutcome } from './review-evidence.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
-import { foldLabel, readPolicyOverride } from '../session/format.js';
+import { readPolicyOverride } from '../session/format.js';
 import { SPILL_NAME } from '../session/spill.js';
 import { assertNoLegacyTrashConfig, boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from '../capability/limits.js';
 import { isWithin, resolveWithin } from '../capability/paths.js';
@@ -86,8 +84,7 @@ import { createReadDocumentPlugin } from '../tools/read-document.js';
 import { createPresentPlugin, type ViewRequestArguments, type ViewRequestResult } from '../tools/present.js';
 import { listArtifacts, previewArtifact, inspectArtifact, resolveArtifact, type ArtifactScope } from './artifacts.js';
 import { readToolResult } from './tool-result-view.js';
-import { exportSession } from './session-export.js';
-import { readForClient, readRecordPage, type SessionReadDeps } from './session-read.js';
+import { readRecordPage, type SessionReadDeps } from './session-read.js';
 import { applyStorageCleanup, inspectStorage, previewStorageCleanup, type StoragePlanState, type StorageScanState } from './storage-service.js';
 import { createSessionImagePreview } from './image-preview.js';
 import { browserView, createStatusView, sessionPermissionView } from './status-view.js';
@@ -312,7 +309,7 @@ function sessionGenerationEvent(generation: SessionGeneration): Record<string, u
 }
 
 // 会话名称需要为列表中的时间和条目数留出显示空间。
-export const SESSION_NAME_MAX = 120;
+export { SESSION_NAME_MAX } from './handlers/session.js';
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -1258,11 +1255,6 @@ export function createHost({
     if (environment === defaultEnvironment) return;
     for (const other of sessions.values()) if (other.environment === environment) return;
     environments.delete(environment.projectRoot);
-  }
-
-  // 从记录标签推导当前会话名称和归档状态，让 Host 与客户端使用同一事实来源。
-  async function labelOf(state: HostSessionState): Promise<{ sessionId: string; name: string; archived: boolean }> {
-    return { sessionId: state.id, ...foldLabel(await state.session.read()) };
   }
 
   function progressSnapshotOf(state: HostSessionState): HostProgressSnapshot | null {
@@ -3291,6 +3283,15 @@ export function createHost({
       return false;
     },
   });
+  const sessionHandlers = createSessionHandlers({
+    defaultEnvironment,
+    imagePreview: previewSessionImage,
+    record: sessionReadDeps,
+    open,
+    opened: id => sessions.get(id),
+    environmentFor,
+    readOnlyConfig: readOnlySessionConfig,
+  });
 
   const host: Host = {
     async handle(rawMessage: Pick<HostRequest, 'method' | 'params'>, connection: HostClientConnection): Promise<unknown> {
@@ -3590,59 +3591,16 @@ export function createHost({
             return { sessionId, enabled: state.screenCapture.enabled, source: state.screenCapture.source };
           } finally { if (enabled) state.permissionChanging = false; }
         }
-        case 'session.label': {
-          const state = open(sessionId);
-          const { name, archived } = message.params;
-          // 请求没有造成变化时不写入会话事件。
-          if (name === undefined && archived === undefined) throw new KernelError('session_label_empty', { detail: sessionId });
-          const trimmed = name?.trim() ?? '';
-          // 会话名称会显示在列表中，因此拒绝控制字符和纯空白名称。
-          if (name !== undefined && (trimmed === '' || trimmed.length > SESSION_NAME_MAX || /[\u0000-\u001f\u007f]/.test(name))) {
-            throw new KernelError('session_name_invalid', { detail: `wanted 1-${SESSION_NAME_MAX} visible characters` });
-          }
-          await state.session.append({
-            kind: 'label',
-            ignorable: true,
-            ...(name === undefined ? {} : { name: trimmed }),
-            ...(archived === undefined ? {} : { archived }),
-          });
-          return await labelOf(state);
-        }
-        case 'session.branch': {
-          // 分支只复制已经写入的记录；父会话之后产生的事件仍留在父记录中。
-          // 新分支首次打开时，在自己的记录锁内恢复未完成调用。
-          const state = sessions.get(sessionId);
-          assertSessionId(sessionId);
-          const env = state?.environment ?? await environmentFor(message.params.projectRoot);
-          return await branchSession(env.directory, sessionId, { at: message.params.at, projectRoot: env.projectRoot });
-        }
-        case 'sessions.list': {
-          // 当前与旧目录都只读扫描；迁移只在用户明确打开旧会话时发生。
-          const { projectRoot, limit } = message.params;
-          const scope = projectRoot ?? defaultEnvironment.projectRoot;
-          const config = await readOnlySessionConfig(scope);
-          return { sessions: await listWorkspaceSessions(config, { projectRoot: scope, limit }) };
-        }
-        case 'sessions.search': {
-          // 搜索会话列表使用的同一目录，并在扫描记录前拒绝空查询。
-          const { projectRoot, sessionId: scoped, limit } = message.params;
-          const needle = requiredString(message.params.query, 'query').trim();
-          if (needle === '') throw new KernelError('search_query_empty', { detail: 'a search query has to say what to look for' });
-          // 在所选会话的项目目录中搜索完整记录，包括溢出文件。
-          // 解析记录路径前先校验会话编号。
-          if (scoped !== undefined) assertSessionId(scoped);
-          const open = scoped === undefined ? undefined : sessions.get(scoped);
-          const scope = projectRoot ?? defaultEnvironment.projectRoot;
-          const config = open?.environment.config ?? await readOnlySessionConfig(scope);
-          return {
-            hits: await searchSessionDirectories(sessionDirectories(config), {
-              query: needle,
-              sessionId: scoped,
-              projectRoot: open === undefined ? scope : undefined,
-              limit,
-            }),
-          };
-        }
+        case 'session.label':
+        case 'session.branch':
+        case 'sessions.list':
+        case 'sessions.search':
+        case 'session.read':
+        case 'session.observe':
+        case 'session.image.preview':
+        case 'session.control':
+        case 'session.export':
+          return await sessionHandlers[message.method](sessionId, message.params);
         case 'paths.list':
         case 'project.files.list':
         case 'project.files.search':
@@ -3653,11 +3611,6 @@ export function createHost({
           return await handleProjectRequest(message.method, message.params, sessionId, {
             environmentFor, open, requireFileAccess: requireProjectFileAccess, serializeSessionConfiguration, fileWriteQueue,
           });
-        case 'session.read': {
-          // 返回已持久化记录，让客户端重连后可以恢复会话内容。
-          // `limit` 和 `before` 用于分页，`at` 指定一条事件；派生会话也走同一读取流程。
-          return await readRecordPage(sessionId, message.params, sessionReadDeps);
-        }
         case 'tool.result': {
           // 结果读模型在 tool-result-view.ts：入口只校验调用属于哪个 Run，并传入已可见的事件。
           const state = open(sessionId);
@@ -3669,26 +3622,6 @@ export function createHost({
             directory: state.session.directory, activeRunId: state.activeRunId,
             liveness: target => runLivenessOf(state, target),
           });
-        }
-        case 'session.observe': {
-          const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
-          const path = recordPathOf(sessionId, env);
-          try { await access(path); }
-          catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('session_not_found', { detail: sessionId });
-            throw error;
-          }
-          const opened = sessions.get(sessionId);
-          const snapshot = await readForClient(opened?.session ?? createSessionLog({ directory: env.directory, id: sessionId }), sessionId, {
-            fullResults: message.params.fullResults,
-            ...(message.params.limit === undefined ? {} : { limit: message.params.limit as number }),
-            ...(message.params.before === undefined ? {} : { before: message.params.before as number }),
-            ...(message.params.at === undefined ? {} : { at: message.params.at as number }),
-          }, { env, fillSpills });
-          return { ...snapshot, writerActive: opened?.running !== undefined || await sessionWriterActive(path) };
-        }
-        case 'session.image.preview': {
-          return await previewSessionImage(sessionId, message.params);
         }
         case 'browser.stop':
         case 'browser.resume': {
@@ -3706,10 +3639,6 @@ export function createHost({
             return { sessionId, browser: browserView(state, permissionControl) };
           });
         }
-        case 'session.control': {
-          const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
-          return await requestAgentControl(env.projectRoot, sessionId, message.params.request as AgentControlRequest);
-        }
         case 'approval.details': {
           const state = open(sessionId);
           const requestId = requiredString(message.params.requestId, 'requestId');
@@ -3722,17 +3651,6 @@ export function createHost({
             argumentSha256: pending.argumentSha256,
             args: structuredClone(pending.args),
           };
-        }
-        case 'session.export': {
-          // 导出的读取、排版与逐文件写出在 session-export.ts；入口只解析目标路径与运行环境。
-          return await exportSession({
-            sessionId, path: requiredString(message.params.path, 'path'),
-            environmentOf: id => sessions.get(id)?.environment,
-            defaultEnvironment,
-            branchOwner,
-            unfinished: sessions.get(sessionId)?.running !== undefined,
-            readRecord: (id, params) => readRecordPage(id, params, sessionReadDeps),
-          });
         }
         case 'run.start': {
           const started = await serializeSessionConfiguration(sessionId, async () => {
