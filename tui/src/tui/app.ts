@@ -2,12 +2,10 @@
 // 协议帧由 `core/src/host/connection.ts` 处理；此处不直接读写帧。
 // 纯函数和命令表从此模块导出，供自动检查和界面复用。
 import { createElement as h, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Box, Static, Text, useApp, useInput, usePaste } from 'ink';
-import { answerOf, candidatesOf, describeChange, findUiCommand, insertMention, localizedCommand, mentionToken, resolveSessionId, routeInput } from './commands.js';
+import { Box, Static, Text, useApp } from 'ink';
+import { answerOf, candidatesOf, describeChange, findUiCommand, localizedCommand, mentionToken, resolveSessionId, routeInput } from './commands.js';
 import { pushHistory } from '@ligule/core/tui.js';
 import { searchHistory } from './history.js';
-import { editDraft, isTypingRun, moveDraftCaret, type DraftState } from './draft.js';
-import { editInExternalEditor } from './editor.js';
 import { copyToClipboard } from './clipboard.js';
 import { titleEscape, titleText } from './output.js';
 import { providerDiagnosticText, runtimeFailureText } from './errors.js';
@@ -34,6 +32,7 @@ import { isAskQuestion, isRecord } from './guards.js';
 import { capabilityOf, projectRecord, resultParts, transcriptRows, type TranscriptItem } from './transcript.js';
 import { externalModelFrom, useExternalControl } from './use-external-control.js';
 import { useTranscriptSession } from './use-transcript-session.js';
+import { useInputController, type MentionState, type SearchState, type UndoState } from './use-input-controller.js';
 import { VERSION } from '../version.js';
 import { ChoicePanel, HelpPanel, PanelFrame, type PanelChoice } from './panels.js';
 import { SessionPicker } from './session-picker.js';
@@ -45,7 +44,7 @@ import { DraftInput } from './input-view.js';
 import { ApprovalPanel, buildApprovalLayout } from './approval-view.js';
 import { TUI_COLORS } from './ui-style.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
-import { CURRENT, applyOverrides, hit, keyHint } from './keymap.js';
+import { CURRENT, applyOverrides, hit, keyHint, type InkKey } from './keymap.js';
 import { buildStatusLine } from './status-line.js';
 import {
   controlPresets,
@@ -70,7 +69,6 @@ import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type 
 import { createSessionNavigation, type SessionNavigation, type SessionNavigationLease } from './session-navigation.js';
 import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionSummary } from '@ligule/core/tui.js';
 import type { McpTrustScope, TemplateCommand } from './commands.js';
-import type { EditorOutcome } from './editor.js';
 import type { SavedInput } from './input-store.js';
 import type { ModelSelection } from '@ligule/core/tui.js';
 
@@ -107,11 +105,6 @@ interface SessionPickerState {
   readonly items: readonly SessionSummary[];
 }
 
-interface SearchState {
-  readonly query: string;
-  readonly at: number;
-}
-
 type PickerKind = 'model' | 'thinking' | 'mode' | 'policy' | 'policy-confirm-never' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network' | 'permission-confirm-partial'
   | 'control' | 'control-action' | 'control-revoke-confirm';
 export type AgentGrant = HostAgentGrant;
@@ -119,15 +112,6 @@ export type AgentControlSnapshot = HostAgentControlSnapshot;
 
 interface RuntimeChoice extends PanelChoice {
   readonly selection?: ModelSelection;
-}
-
-interface MentionState {
-  readonly paths: readonly string[];
-  readonly chosen: number;
-  readonly start: number;
-  readonly text: string;
-  readonly stopped: 'pending' | 'error' | 'budget' | 'unreadable' | 'done' | '';
-  readonly failed?: string;
 }
 
 interface AskState {
@@ -186,19 +170,8 @@ interface AppProps {
   readonly modes?: { read(): Promise<readonly { readonly name: string; readonly layer: string }[]> };
 }
 
-interface UndoState {
-  stack: DraftState[];
-  future: DraftState[];
-  kind: 'insert' | 'text' | null;
-  before: DraftState;
-}
-
 function freshUndo(draft = ''): UndoState {
   return { stack: [], future: [], kind: null, before: { draft, caret: draft.length } };
-}
-
-function isEditorText(outcome: EditorOutcome): outcome is { readonly text: string } {
-  return 'text' in outcome && typeof outcome.text === 'string';
 }
 
 interface SessionInputState {
@@ -431,18 +404,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const ordinaryUndo = useRef<UndoState>(freshUndo());
   const answerUndo = useMemo(() => ({ current: freshUndo() }), [query?.id, sessionId]);
   const undo = query === null ? ordinaryUndo : answerUndo;
-  useEffect(() => {
-    const cell = undo.current;
-    const current = { draft, caret };
-    const previous = cell.before;
-    cell.before = current;
-    if (current.draft === previous.draft) { cell.kind = null; return; }
-    const run = isTypingRun(previous, current);
-    // 连续输入的字符合并为一个撤销单位。
-    if (run && cell.kind === 'insert') return;
-    cell.stack = [...cell.stack.slice(-99), previous];
-    cell.kind = run ? 'insert' : 'text';
-  }, [draft, caret, undo]);
   // 用于替换整份草稿并清空撤销栈，避免撤销到其他会话的输入。
   const resetOrdinaryDraft = useCallback((text: string) => {
     const normalized = text.replace(/\r\n?/g, '\n');
@@ -1903,16 +1864,16 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       : externalSnapshot?.state === 'running' ? t('外控 Agent 正在运行', 'External agent is running')
         : t('外控会话已连接 · /takeover 接管', 'External session connected · /takeover to take over');
 
-  useInput((input, key) => {
+  const handlePanelInput = (input: string, key: InkKey): boolean => {
     if (hit('quit', input, key)) {
       exitTui();
-      return;
+      return true;
     }
-    if ((panel !== null || sessionPicker !== null) && ask === null && query === null) return;
+    if ((panel !== null || sessionPicker !== null) && ask === null && query === null) return true;
     if (ask === null && query === null) {
-      if (hit('model-picker', input, key)) { openPicker('model'); return; }
-      if (hit('mode-picker', input, key)) { openPicker('mode'); return; }
-      if (hit('policy-picker', input, key)) { openPicker('policy'); return; }
+      if (hit('model-picker', input, key)) { openPicker('model'); return true; }
+      if (hit('mode-picker', input, key)) { openPicker('mode'); return true; }
+      if (hit('policy-picker', input, key)) { openPicker('policy'); return true; }
     }
     if (hit('expand-or-history', input, key)) {
       if (ask !== null) {
@@ -1936,31 +1897,31 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           }, (error) => push({ kind: 'error', text: t(`无法读取完整记录：${error.code ?? error.message}`, `Could not read full conversation: ${error.code ?? error.message}`) }));
         }
       }
-      return;
+      return true;
     }
     if (ask !== null && hit('approval-cancel', input, key)) {
       cancelRound();
-      return;
+      return true;
     }
     if (ask !== null) {
       const target = hit('approval-top', input, key) ? 0 : hit('approval-bottom', input, key) ? approvalLines.length - 1
         : hit('approval-page-up', input, key) ? approvalView.cursor - approvalHeight : hit('approval-page-down', input, key) ? approvalView.cursor + approvalHeight
           : hit('approval-up', input, key) ? approvalView.cursor - 1 : hit('approval-down', input, key) ? approvalView.cursor + 1 : null;
-      if (target !== null) { setApprovalCursor(target); return; }
+      if (target !== null) { setApprovalCursor(target); return true; }
     }
     if (ask !== null && hit('approval-remember', input, key)) {
       if (ask.rememberable) setRememberOpen(!rememberOpen);
-      return;
+      return true;
     }
     if (ask !== null) {
       if (rememberOpen && ask.rememberable && ask.rememberTargetOptions.includes('file') && ask.rememberTargetOptions.includes('workspace') && input.toLowerCase() === 'w') {
         setAsk({ ...ask, rememberTarget: ask.rememberTarget === 'workspace' ? 'file' : 'workspace' });
-        return;
+        return true;
       }
       const option = rememberOpen && /^\d$/u.test(input) ? Number(input) - 2 : -1;
       const rememberScope = ask.rememberable && option >= 0 ? ask.rememberScopes[option] : undefined;
       if (hit('approve', input, key) || ask.rememberable && input === '1' || rememberScope !== undefined) {
-        if (approvalLayout?.canApprove !== true) return;
+        if (approvalLayout?.canApprove !== true) return true;
         const asked = ask;
         setAsk(null);
         const rememberedTarget = asked.rememberTarget ?? asked.rememberTargetOptions[0];
@@ -2010,7 +1971,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         }
         else client.reply(asked.id, { decision: 'deny' });
       }
-      return;
+      return true;
     }
     if (query !== null && detail === null && search === null
       && (hit('question-page-up', input, key) || hit('question-page-down', input, key))) {
@@ -2018,7 +1979,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         questionStart + (hit('question-page-up', input, key) ? -questionHeight : questionHeight),
         Math.max(0, questionLines.length - questionHeight),
       )));
-      return;
+      return true;
     }
     // 草稿为空时，左方向键返回上一题并恢复原答案供修改。
     // 草稿非空时保留普通光标移动行为。
@@ -2026,15 +1987,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       const back = Math.max(0, query.at - 1);
       resetDraft(query.picked[query.questions[back].id]?.raw ?? '');
       setQuery({ ...query, at: back });
-      return;
+      return true;
     }
     if (detail !== null && ask === null) {
-      if (hit('view-close', input, key)) { setDetail(null); setExpanded(false); return; }
+      if (hit('view-close', input, key)) { setDetail(null); setExpanded(false); return true; }
       if (hit('copy-selection', input, key)) {
         void copyToClipboard(selectedText(viewLines, view.cursor, detail.anchor ?? null)).then((done) => {
           if ('code' in done) push({ kind: 'error', text: t(`复制失败：${done.code}`, `Copy failed: ${done.code}`) });
         });
-        return;
+        return true;
       }
       // Shift+左右方向键扩展选择范围，光标按对应方向移动。
       const marked = hit('mark-up', input, key) || hit('mark-down', input, key);
@@ -2046,196 +2007,22 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (target !== null) {
         const moved = viewportPosition(target, viewLines.length, viewHeight, view.offset);
         setDetail({ ...detail, ...moved, anchor: marked ? detail.anchor ?? view.cursor : null });
-        return;
+        return true;
       }
-      return;
+      return true;
     }
-    // Ctrl+G 使用外部编辑器修改草稿，并通过临时文件传递文本。
-    // 由 Ink 暂停 raw mode 并恢复终端，避免编辑器与界面争用输入。
-    if (hit('editor', input, key)) {
-      if (info.editor === undefined || info.editor === '') {
-        push({ kind: 'error', text: t('请先设置 VISUAL 或 EDITOR 环境变量', 'Set the VISUAL or EDITOR environment variable first') });
-        return;
-      }
-      const editor = info.editor;
-      const editorSession = sessionId;
-      const editorQuestion = query?.id;
-      void (async () => {
-        let outcome: EditorOutcome = { code: 'tui_editor_failed', detail: 'external editor failed' };
-        await app.suspendTerminal(async () => {
-          outcome = await editInExternalEditor(editor, draft);
-        });
-        if (!isEditorText(outcome)) {
-          push({ kind: 'error', text: t(`外部编辑失败：${outcome.code}`, `External editor failed: ${outcome.code}`) });
-          return;
-        }
-        if (!alive.current || activeSession.current !== editorSession || editorQuestion !== undefined && activeQuestion.current !== editorQuestion) return;
-        const normalized = outcome.text.replace(/\r\n?/g, '\n');
-        setDraft(normalized);
-        setCaret(normalized.length);
-      })();
-      return;
-    }
-    if (hit('search-open', input, key) && search === null) {
-      // 开始反向搜索，查询文本初始为空，后续输入逐字符追加。
-      setSearch({ query: '', at: 0 });
-      return;
-    }
-    if (search !== null) {
-      const found = searchHistory(entries, search.query);
-      const cycle = (step: number) => setSearch(found.length === 0 ? search : { ...search, at: (search.at + step + found.length) % found.length });
-      if (hit('search-close', input, key)) {
-        setSearch(null);
-        return;
-      }
-      if (hit('search-pick', input, key)) {
-        const picked = found[search.at];
-        if (picked !== undefined) {
-          setDraft(picked);
-          setCaret(picked.length);
-        }
-        setSearch(null);
-        return;
-      }
-      if (hit('search-up', input, key) || hit('search-cycle', input, key)) {
-        cycle(1);
-        return;
-      }
-      if (hit('search-down', input, key)) {
-        cycle(-1);
-        return;
-      }
-      if (hit('search-back', input, key) || hit('search-back-alt', input, key)) {
-        // 查询文本为空时按退格退出搜索，而不是删除内容。
-        setSearch(search.query === '' ? null : { query: search.query.slice(0, -1), at: 0 });
-        return;
-      }
-      if (input !== '' && !key.ctrl && !key.meta) {
-        setSearch({ query: search.query + input, at: 0 });
-      }
-      return;
-    }
-    // 路径候选打开且有结果时，Enter 用于选择，不发送消息。
-    // 没有候选时 Enter 仍发送当前输入。
-    if (mention !== null && ask === null && query === null && detail === null && sessionPicker === null && search === null) {
-      if (hit('path-close', input, key)) {
-        setHiddenMention(mention.text);
-        setMention(null);
-        return;
-      }
-      const picking = hit('pick-path', input, key) || hit('pick-path-alt', input, key);
-      // 候选查询未完成时，Enter 不选择旧结果，也不发送消息。
-      if (mention.stopped === 'pending' && picking) return;
-      if (mention.paths.length > 0 && picking) {
-        const picked = mention.paths[Math.min(mention.chosen, mention.paths.length - 1)];
-        const merged = insertMention(draft, caret, mention.start, picked);
-        setDraft(merged.draft);
-        setCaret(merged.caret);
-        setHiddenMention('');
-        setMention(null);
-        return;
-      }
-      if (mention.paths.length > 0 && (hit('path-up', input, key) || hit('path-down', input, key))) {
-        const step = hit('path-up', input, key) ? -1 : 1;
-        setMention({ ...mention, chosen: (mention.chosen + step + mention.paths.length) % mention.paths.length });
-        return;
-      }
-    }
-    if (picks.length > 0) {
-      if (hit('complete', input, key)) {
-        const picked = picks[chosen];
-        // 命令有参数提示时，补全后追加空格并将光标留在参数位置。
-        const completed = `/${picked.name}${picked.hint === '' ? '' : ' '}`;
-        setDraft(completed);
-        setCaret(completed.length);
-        setPick(0);
-        return;
-      }
-      if (hit('complete-up', input, key) || hit('complete-down', input, key)) {
-        setPick(hit('complete-up', input, key) ? (chosen === 0 ? picks.length - 1 : chosen - 1) : (chosen + 1) % picks.length);
-        return;
-      }
-      if (hit('complete-close', input, key)) {
-        setDismissedAt(draft);
-        return;
-      }
-    }
-    if (hit('interrupt', input, key)) {
-      if (running) cancelRound();
-      return;
-    }
-    const up = hit('history-up', input, key) || hit('history-up-shift', input, key);
-    const down = hit('history-down', input, key) || hit('history-down-shift', input, key);
-    if (up || down) {
-      if (draft.includes('\n')) {
-        setCaret(moveDraftCaret(draft, caret, up ? 'up' : 'down'));
-        return;
-      }
-      if (entries.length === 0) return;
-      if (historyAt === -1 && up) setHistoryDraft(draft);
-      const next = up ? Math.min(historyAt + 1, entries.length - 1) : Math.max(historyAt - 1, -1);
-      setHistoryAt(next);
-      const recalled = next < 0 ? historyDraft : entries[next];
-      setDraft(recalled);
-      setCaret(recalled.length);
-      return;
-    }
-    if (hit('undo-draft', input, key) || hit('redo-draft', input, key)) {
-      // 撤销和重做使用独立历史栈，允许恢复已撤销的草稿内容。
-      const cell = undo.current;
-      const back = hit('undo-draft', input, key);
-      const target = (back ? cell.stack : cell.future).at(-1);
-      if (target === undefined) return;
-      const current = { draft: cell.before.draft, caret: cell.before.caret };
-      if (back) {
-        cell.stack = cell.stack.slice(0, -1);
-        cell.future = [...cell.future.slice(-99), current];
-      } else {
-        cell.future = cell.future.slice(0, -1);
-        cell.stack = [...cell.stack.slice(-99), current];
-      }
-      cell.kind = null;
-      cell.before = target;
-      setDraft(target.draft);
-      setCaret(target.caret);
-      return;
-    }
-    if (query === null && (hit('queue-recall', input, key) || hit('queue-recall-alt', input, key)) && draft === '' && queue.length > 0) {
-      // 草稿为空时按退格，将队列最后一条收回草稿供修改。
-      setQueue((current) => current.slice(0, -1));
-      const last = queue[queue.length - 1];
-      setDraft(last);
-      setCaret(last.length);
-      return;
-    }
-    if (hit('send', input, key) || hit('newline', input, key) || hit('newline-alt', input, key)) {
-      if (hit('newline', input, key) || hit('newline-alt', input, key)) {
-        const inserted = draft.slice(0, caret) + '\n' + draft.slice(caret);
-        setDraft(inserted);
-        setCaret(caret + 1);
-        return;
-      }
-      // 问题面板打开时，空回车表示跳过当前题；普通输入状态下不发送空消息。
-      if (draft.trim() !== '' || query !== null) send(draft);
-      return;
-    }
-    const edited = editDraft(draft, caret, input.replace(/\r\n?/g, '\n'), key);
-    setDraft(edited.draft);
-    setCaret(edited.caret);
-  // 仅在交互式终端中启动 Ink；非交互终端使用命令行模式。
-  }, { isActive: interactive });
-
-  // 通过 Ink 的 bracketed paste 通道一次接收整段粘贴内容，不将换行解释为发送或审批按键。
-  usePaste((text) => {
-    if (panel !== null || sessionPicker !== null || ask !== null || detail !== null) return;
-    if (search !== null) {
-      setSearch({ query: search.query + text.replace(/[\r\n\t]+/gu, ' '), at: 0 });
-      return;
-    }
-    const inserted = editDraft(draft, caret, text.replace(/\r\n?/g, '\n'), {});
-    setDraft(inserted.draft);
-    setCaret(inserted.caret);
-  }, { isActive: interactive });
+    return false;
+  };
+  useInputController({
+    interactive, running, answering: query !== null, mayPaste: panel === null && sessionPicker === null && ask === null && detail === null,
+    sessionId, questionId: query?.id, alive, activeSession, activeQuestion, editor: info.editor,
+    draft: { draft, caret, undo, setText: setDraft, setCaret },
+    history: { entries, at: historyAt, savedDraft: historyDraft, search, setAt: setHistoryAt, saveDraft: setHistoryDraft, setSearch },
+    mention: { current: mention, set: setMention, hide: setHiddenMention },
+    completion: { picks, chosen, pick: setPick, dismiss: setDismissedAt },
+    queued: { items: queue, set: setQueue },
+    handlePanelInput, cancelRound, send, push, t,
+  });
 
   const shownModel = externalControl ? externalModel : status?.model ?? info.model;
   const foldedLive = foldText(live.reasoning, expanded, 1);
