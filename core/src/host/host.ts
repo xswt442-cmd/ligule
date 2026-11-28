@@ -33,10 +33,8 @@ import {
 import { readExtensionState, writeExtensionState } from '../kernel/extension-state.js';
 import { applyModeToPrompt, DEFAULT_MODE, listModes, loadMode, resolveModeSelection } from '../kernel/modes.js';
 import { agentPresetDirectories } from '../kernel/agent-presets.js';
-import { readRegistry, registerWorkspace, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../kernel/workspace.js';
+import { registerWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { isTrusted, setTrusted } from '../kernel/workspace-trust.js';
-import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-history.js';
-import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
 import { modelServices, modelSelection, resolveModel, type ModelSelection } from '../kernel/model-services.js';
 import { POLICY_SEMANTICS, createDecisionChain, isPolicyMode, isPolicyRule, policyArgsHash, readPersistedPolicyMode, readPolicyMode, type DecisionChain, type PolicyAskResult, type PolicyMode, type PolicyState } from '../kernel/policy.js';
@@ -49,9 +47,10 @@ import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDir
 import { adoptForSessionDirectory } from '../session/adopt.js';
 import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
-import { listProjectFiles } from './paths.js';
-import { listProjectDirectory, readProjectFile, saveProjectFile, searchProjectFiles } from './project-files.js';
-import { projectGitDiffVersion, readProjectGitDiff, readProjectGitStatus } from './project-git.js';
+import { handleProjectRequest } from './handlers/project.js';
+import { createWorkspacePrefsHandlers } from './handlers/workspace-prefs.js';
+import { listProjectDirectory, readProjectFile } from './project-files.js';
+import { projectGitDiffVersion, readProjectGitDiff } from './project-git.js';
 import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
 export { compactionLimitsOf } from './runtime-limits.js';
 import { createCompaction } from '../session/compaction.js';
@@ -67,7 +66,7 @@ import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel, readPolicyOverride } from '../session/format.js';
 import { SPILL_NAME } from '../session/spill.js';
 import { assertNoLegacyTrashConfig, boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from '../capability/limits.js';
-import { isWithin, relativePathWithin, resolveWithin } from '../capability/paths.js';
+import { isWithin, resolveWithin } from '../capability/paths.js';
 import { runManagedExec, type ExecControlArguments, type ExecRunContext } from '../capability/exec.js';
 import { createFiniteCommandRegistry, type FiniteCommandOwner } from '../capability/finite-command.js';
 import { createProcessOwnership } from './process-ownership.js';
@@ -126,7 +125,7 @@ import type { ReviewFacts } from '../kernel/reviewer.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
 import { runAcceptanceScope, runLivenessOf, runReceiptView } from './run-records.js';
 import { runResourcesOf } from './run-resources.js';
-import { createFileChangeStore, type FileChangeFact } from '../session/file-changes.js';
+import { createFileChangeStore } from '../session/file-changes.js';
 import { checkedCheckDeclaration, type CheckDeclaration } from '../session/checks.js';
 import { checkedExecutionLogReference } from '../session/execution-log.js';
 import { runEvidenceReferences } from '../session/run-evidence.js';
@@ -3324,6 +3323,16 @@ export function createHost({
     }
   }
 
+  const workspacePrefs = createWorkspacePrefsHandlers({
+    classifyProjectRoot,
+    isWorkspaceRunning(identity) {
+      for (const state of sessions.values()) {
+        if (workspaceIdentity(state.environment.projectRoot) === identity && state.running !== undefined) return true;
+      }
+      return false;
+    },
+  });
+
   const host: Host = {
     async handle(rawMessage: Pick<HostRequest, 'method' | 'params'>, connection: HostClientConnection): Promise<unknown> {
       if (closing !== undefined) throw new KernelError('host_closed');
@@ -3352,14 +3361,6 @@ export function createHost({
         assertGrantSessionScope(activeGrant, state);
         assertDelegationPermission(activeGrant, state.permission.profile, state.permission.network);
         if (writing && !activeGrant.allowOperator) throw new KernelError('agent_control_operator_required');
-      };
-      // 项目文件与 Git inspection 共同判定“这个会话此刻能否使用项目文件”：
-      // 通道能力/委派 Grant、权限变化中的拒绝与读写权限档位只比较这一处。
-      const requireProjectFileUse = async (state: HostSessionState, use: 'read' | 'write'): Promise<void> => {
-        await requireProjectFileAccess(state, use === 'write');
-        if (use === 'write' && state.permissionChanging) throw new KernelError('permission_change_in_progress');
-        const denied = permissionDenial(state.permission, use);
-        if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
       };
       // 目标 Run 的可见性只在这里判定：接受记录里的作用域、调用方可见范围与 Grant 作用域。
       // 处理器只拿得到已经通过判定的会话事件，不再各自复制同一段判定。
@@ -3686,84 +3687,16 @@ export function createHost({
             }),
           };
         }
-        case 'paths.list': {
-          // 由 Host 查找 `@` 文件候选，前端不直接扫描项目文件。
-          // 加载所选项目环境；无法加载时返回 `host_project_root_unsupported`。
-          const { projectRoot, query, limit } = message.params;
-          const env = await environmentFor(projectRoot);
-          return await listProjectFiles(env.projectRoot, typeof query === 'string' ? query : '', limit);
-        }
-        case 'project.files.list': {
-          const state = open(sessionId);
-          await requireProjectFileAccess(state);
-          const denied = permissionDenial(state.permission, 'read');
-          if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
-          return await listProjectDirectory(state.environment.config, message.params.path, message.params.offset, message.params.limit);
-        }
-        case 'project.files.search': {
-          const state = open(sessionId);
-          await requireProjectFileAccess(state);
-          const denied = permissionDenial(state.permission, 'read');
-          if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
-          return await searchProjectFiles(state.environment.config, message.params.query, message.params.path,
-            message.params.offset, message.params.limit);
-        }
-        case 'project.file.read': {
-          const state = open(sessionId);
-          await requireProjectFileUse(state, 'read');
-          return await readProjectFile(state.environment.config, state.id, message.params.path, message.params.offsetBytes,
-            message.params.limitBytes);
-        }
-        case 'project.file.save': {
-          return await serializeSessionConfiguration(sessionId, async () => {
-            const state = open(sessionId);
-            await requireProjectFileUse(state, 'write');
-            const result = await saveProjectFile(state.environment.config, state.id, message.params.path,
-              message.params.expectedVersion, message.params.text, fileWriteQueue, async () => {
-                const current = open(sessionId);
-                if (current !== state) throw new KernelError('project_file_session_changed');
-                await requireProjectFileUse(current, 'write');
-              }, async mutation => {
-                const path = relativePathWithin(boundaryOf(state.environment.config), mutation.path,
-                  { cwd: workingDirectoryOf(state.environment.config) });
-                const fileChanges: FileChangeFact[] = [];
-                await state.fileChanges.forCall(fileChanges).record({
-                  path,
-                  target: mutation.target,
-                  operation: 'write',
-                  outcome: mutation.outcome,
-                  beforeExists: true,
-                  beforeBytes: mutation.beforeBytes,
-                  expectedAfterExists: true,
-                  expectedAfterBytes: mutation.expectedAfterBytes,
-                  allowReadback: true,
-                });
-                if (fileChanges.length !== 1) return false;
-                await state.session.append({ kind: 'workspaceFileChange', ignorable: true, source: 'desktop', fileChanges });
-                return true;
-              });
-            return {
-              saved: result.saved,
-              changed: result.changed,
-              version: result.version,
-              recorded: result.recorded,
-              outcome: result.outcome,
-              ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
-            };
+        case 'paths.list':
+        case 'project.files.list':
+        case 'project.files.search':
+        case 'project.file.read':
+        case 'project.file.save':
+        case 'project.git.status':
+        case 'project.git.diff':
+          return await handleProjectRequest(message.method, message.params, sessionId, {
+            environmentFor, open, requireFileAccess: requireProjectFileAccess, serializeSessionConfiguration, fileWriteQueue,
           });
-        }
-        case 'project.git.status': {
-          const state = open(sessionId);
-          await requireProjectFileUse(state, 'read');
-          return await readProjectGitStatus(state.environment.projectRoot, boundaryOf(state.environment.config));
-        }
-        case 'project.git.diff': {
-          const state = open(sessionId);
-          await requireProjectFileUse(state, 'read');
-          const diff = await readProjectGitDiff(state.environment.projectRoot, boundaryOf(state.environment.config), message.params.path);
-          const version = projectGitDiffVersion(diff);
-          return { ...diff, ...(version === undefined ? {} : { version }) };
-        }
         case 'session.read': {
           // 返回已持久化记录，让客户端重连后可以恢复会话内容。
           // `limit` 和 `before` 用于分页，`at` 指定一条事件；派生会话也走同一读取流程。
@@ -4341,32 +4274,13 @@ export function createHost({
           return await serializeSessionConfiguration(sessionId, () => configureSession(open(sessionId), message.params, bridge));
         }
         case 'workspaces.list':
-          // 返回持久工作区登记表及默认工作区身份，供客户端显示。
-          return await readRegistry();
-        case 'workspace.default.set': {
-          // 空身份用于清除默认工作区。校验指定路径，并分别报告路径不存在、目标不是目录和目录不可读。
-          const directory = String(message.params.directory).trim();
-          if (directory === '') return await setDefaultWorkspace(null);
-          await classifyProjectRoot(resolve(directory));
-          return await setDefaultWorkspace(directory, { name: message.params.name });
-        }
-        case 'workspace.remove': {
-          const directory = message.params.directory;
-          if (typeof directory !== 'string' || directory.trim() === '') throw new KernelError('workspace_directory_required');
-          const identity = workspaceIdentity(directory);
-          // 运行中的会话继续使用原工作区；先等该轮结束，再从登记表移除。
-          const running = [...sessions.values()].find((state) => workspaceIdentity(state.environment.projectRoot) === identity && state.running !== undefined);
-          if (running !== undefined) throw new KernelError('workspace_in_use', { detail: directory });
-          return await unregisterWorkspace(directory);
-        }
+        case 'workspace.default.set':
+        case 'workspace.remove':
         case 'history.read':
-          // 偏好文件路径由 Host 管理，客户端不能指定数据根目录下的任意文件。
-          return { entries: await loadHistory() };
-        case 'history.append': {
-          // 将最新发送的输入放在最前面，删除重复项，并裁剪到配置的条数上限。
-          // 返回在锁内完成读—改—写后的结果。
-          return { entries: await rememberHistory(historyPathOf(), [String(message.params.text)]) };
-        }
+        case 'history.append':
+        case 'prefs.read':
+        case 'prefs.write':
+          return await workspacePrefs[message.method](message.params);
         case 'model.select': {
           const selection = modelSelection({ provider: message.params.provider, model: message.params.model });
           return await serializeSessionConfiguration(sessionId, async () => {
@@ -4401,13 +4315,6 @@ export function createHost({
           return await credentialStatus(requiredString(message.params.reference, 'reference'));
         case 'credentials.delete':
           return { deleted: await deleteCredential(requiredString(message.params.reference, 'reference')) };
-        case 'prefs.read':
-          // 桌面草稿和偏好文件由 Host 管理。
-          return await readPrefs();
-        case 'prefs.write': {
-          const value = parsePrefsJson(String(message.params.json));
-          return await savePrefs(prefsPathOf(), value, { version: requiredString(message.params.version, 'version') });
-        }
         case 'agent-control.list': {
           return await listDelegationGrants(delegationPathOf());
         }
