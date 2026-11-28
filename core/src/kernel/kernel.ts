@@ -457,8 +457,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       if (!tool) {
         // 即使工具未登记也要记录失败结果，确保本轮中的每个模型调用都有对应结果。
         // 否则下一次请求会包含没有结果的工具调用，并被模型服务拒绝。
-        await fail(entry, new KernelError('tool_not_found', { detail: `no tool named "${name}" is registered for this run` }));
-        return undefined;
+        return await fail(entry, new KernelError('tool_not_found', { detail: `no tool named "${name}" is registered for this run` }));
       }
       if (isDenied(name)) {
         await record(entry, refusalOf('tool_denied', 'the tool is restricted for this run'));
@@ -467,12 +466,10 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       // 先校验参数再运行权限判定。格式错误的调用无法成功，不能要求用户审批，也不应增加拒绝计数。
       const violations = validateArgs(tool.parameters, args);
       if (violations.length > 0) {
-        await fail(entry, new KernelError('tool_args_invalid', { detail: violations.join('; ') }));
-        return undefined;
+        return await fail(entry, new KernelError('tool_args_invalid', { detail: violations.join('; ') }));
       }
       if (!isPlainObject(args)) {
-        await fail(entry, new KernelError('tool_args_invalid', { detail: 'arguments must be an object' }));
-        return undefined;
+        return await fail(entry, new KernelError('tool_args_invalid', { detail: 'arguments must be an object' }));
       }
       const activePermission = currentPermission();
       let callPermission = activePermission;
@@ -547,8 +544,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
           const failure = error instanceof KernelError
             ? error
             : new KernelError('tool_preflight_failed', { cause: error, detail: errorMessage(error) });
-          await fail(entry, failure);
-          return undefined;
+          return await fail(entry, failure);
         }
       }
       // 只解析一次网络目标，并将同一结果传给权限判定和执行。
@@ -569,8 +565,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
           shell = resolveShell(config);
         } catch (error) {
           if (!(error instanceof KernelError)) throw error;
-          await fail(entry, error);
-          return undefined;
+          return await fail(entry, error);
         }
         entry.shell = { kind: shell.kind, executable: shell.executable };
         // 空白命令视同未提供：与策略层「不含命令文本」的口径一致，
@@ -662,8 +657,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
               ? await resolveWithin(boundary, '.', { cwd: workspaceRoot })
               : await resolveWithin(boundary, args.cwd as string, { cwd: workspaceRoot });
           } catch (error) {
-            await fail(entry, error instanceof KernelError ? error : new KernelError('tool_failed', { cause: error, detail: errorMessage(error) }));
-            return undefined;
+            return await fail(entry, error instanceof KernelError ? error : new KernelError('tool_failed', { cause: error, detail: errorMessage(error) }));
           }
           try {
             requiresWorkspaceTrust = await requiresTrustedWorkspaceCommand(commandText, shell);
@@ -696,15 +690,13 @@ export function createKernel(options: KernelOptions = {}): Kernel {
               override: sessionOverride === undefined ? snapshot.override : sessionOverride, semantics: POLICY_SEMANTICS,
             }); }
             catch (error) {
-              await fail(entry, error instanceof KernelError ? error : new KernelError('session_write_failed', { cause: error }));
-              return undefined;
+              return await fail(entry, error instanceof KernelError ? error : new KernelError('session_write_failed', { cause: error }));
             }
           }
         }
         approvedScriptBinding = verdict.scriptBinding;
         if (approvedScriptBinding !== undefined && !samePermission(activePermission, currentPermission())) {
-          await fail(entry, new KernelError('exec_script_binding_changed', { detail: 'the effective permission changed while script approval was pending' }));
-          return undefined;
+          return await fail(entry, new KernelError('exec_script_binding_changed', { detail: 'the effective permission changed while script approval was pending' }));
         }
         // 会话记录保存权限判定结果，包括策略档位、匹配规则和审批答复。
         // 该结果仅供客户端查看，不加入模型上下文或检查点摘要。
@@ -733,19 +725,16 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       }
       if (!beforeToolHooksRun) await runBeforeToolHooks();
       if (scriptBindingError !== undefined) {
-        await fail(entry, scriptBindingError);
-        return undefined;
+        return await fail(entry, scriptBindingError);
       }
       if (requiresWorkspaceTrust && scriptWorkspaceRoot !== undefined) {
         try {
           if (!(await isTrusted(scriptWorkspaceRoot))) throw new KernelError('exec_workspace_untrusted', { detail: 'the project trust was revoked before the command started' });
         } catch (error) {
-          await fail(entry, error instanceof KernelError ? error : new KernelError('workspace_trust_unavailable', { cause: error }));
-          return undefined;
+          return await fail(entry, error instanceof KernelError ? error : new KernelError('workspace_trust_unavailable', { cause: error }));
         }
         if (!samePermission(callPermission, currentPermission())) {
-          await fail(entry, new KernelError('exec_workspace_untrusted', { detail: 'workspace trust changed while the command waited for approval' }));
-          return undefined;
+          return await fail(entry, new KernelError('exec_workspace_untrusted', { detail: 'workspace trust changed while the command waited for approval' }));
         }
       }
       let value;
