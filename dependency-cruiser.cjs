@@ -92,6 +92,12 @@ module.exports = {
       to: { path: '^core/src/(host|capability)/' },
     },
     {
+      name: 'core-no-cycles',
+      severity: 'error',
+      from: { path: '^core/src/' },
+      to: { path: '^core/src/', circular: true },
+    },
+    {
       name: 'no-runtime-cycles',
       severity: 'error',
       from: {},

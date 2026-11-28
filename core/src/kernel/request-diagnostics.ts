@@ -1,6 +1,6 @@
 import { tokenCount, type ProviderCacheUsage } from '../session/usage.js';
 import type { CompactionBlock } from '../session/checkpoint.js';
-import type { SessionEvent } from '../session/format.js';
+import type { SessionEvent } from '../session/event-types.js';
 
 export const REQUEST_DIAGNOSTIC_LIMIT = 32;
 export const REQUEST_DIAGNOSTIC_COMPACTION_BLOCK_LIMIT = 16;

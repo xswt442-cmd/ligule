@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { lstat, open, readdir, realpath, rm, type FileHandle } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { KernelRuntimeError } from '../errors.js';
-import type { ExecLogSnapshot } from '../capability/exec.js';
+import type { ExecLogSnapshot } from '../capability/exec-log-types.js';
 
 export const EXECUTION_LOG_NAME = /^execution-[0-9a-f-]{36}\.log\.json$/u;
 export const MAX_EXECUTION_LOG_RAW_BYTES = 256 * 1024;

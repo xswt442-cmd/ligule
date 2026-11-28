@@ -7,6 +7,9 @@ import { checkedImageReferences } from './media.js';
 import { isRunAcceptance, isRunResultRef } from './run.js';
 import { checkedFileChangeFact } from './file-changes.js';
 import { checkedCheckDeclaration, checkedCheckEvent, checkedCheckScopeSamples } from './checks.js';
+import type { SessionEvent } from './event-types.js';
+
+export type { PendingSessionEvent, SessionEvent } from './event-types.js';
 
 export const SESSION_FORMAT_VERSION = 5;
 
@@ -34,15 +37,6 @@ export interface SessionHeader {
   branchOf?: string;
   branchAt?: number;
 }
-
-export interface SessionEvent {
-  seq: number;
-  kind?: string;
-  [key: string]: unknown;
-}
-
-// 追加前的事件不含序号；写入时由 Session 分配。
-export type PendingSessionEvent = Omit<SessionEvent, 'seq'>;
 
 // 从 `label` 事件推导当前名称和归档状态；新事件只覆盖其中实际提供的字段。
 // 会话列表、Host 响应和搜索共用此函数。

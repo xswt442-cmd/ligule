@@ -1,6 +1,6 @@
 // A todo snapshot belongs to one user turn. Events from older turns remain in
 // the session record, but they do not contribute to the active snapshot.
-import type { SessionEvent } from './format.js';
+import type { SessionEvent } from './event-types.js';
 
 export const TODO_MAX_ITEMS = 40;
 export const TODO_MAX_ITEM_CHARACTERS = 400;

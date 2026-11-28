@@ -8,7 +8,7 @@ import { emptyRequestCompactionDiagnostics, type RequestDiagnostic } from './req
 import { failureOf } from './result.js';
 import { rememberRunSummary, type RunSummary } from './run-summary.js';
 import type { TaskBudget } from './task-budget.js';
-import type { RunResultRef } from '../session/run.js';
+import type { RunResultRef } from '../session/run-types.js';
 import { isFileArtifact, type FileArtifact } from '../artifact.js';
 import type { Kernel } from './kernel.js';
 import type { PromptAssembly } from './prompt.js';

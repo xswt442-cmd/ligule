@@ -327,7 +327,16 @@ try {
   ], fixtureRoot);
   assertStatus(typeCycle, 0, 'type_only_cycle_positive_fixture');
 
-  process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev, renderer runtime Core imports via TypeScript AST (value, mixed, side-effect, dynamic, computed, relative core/src and core/dist), client deep core imports, internal host imports, domain imports of an assembly entry, wire imports of product assembly and runtime cycles rejected; Electron host API, Core entry -> host, the @ligule/core entry, renderer type-only imports of @ligule/core, type-only npm-dev imports/references and type-only cycles allowed\n');
+  await writeFixture(fixtureRoot, 'core/src/type-cycle/left.ts', "import type { Right } from './right.js';\nexport interface Left { right: Right }\n");
+  await writeFixture(fixtureRoot, 'core/src/type-cycle/right.ts', "import type { Left } from './left.js';\nexport interface Right { left: Left }\n");
+  const coreTypeCycle = dependencyCruiser([
+    '--config', config,
+    '--output-type', 'err',
+    'core/src/type-cycle',
+  ], fixtureRoot);
+  assertStatus(coreTypeCycle, 1, 'core_type_cycle_negative_fixture', 'core-no-cycles');
+
+  process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev, renderer runtime Core imports via TypeScript AST (value, mixed, side-effect, dynamic, computed, relative core/src and core/dist), client deep core imports, internal host imports, domain imports of an assembly entry, wire imports of product assembly, runtime cycles and Core type cycles rejected; Electron host API, Core entry -> host, the @ligule/core entry, renderer type-only imports of @ligule/core, type-only npm-dev imports/references and non-Core type cycles allowed\n');
 } finally {
   const currentTempRoot = await realpath(tempRoot);
   const currentFixtureRoot = await realpath(fixtureRoot);

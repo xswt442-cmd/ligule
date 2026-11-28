@@ -4,7 +4,10 @@ import { link, lstat, open, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelError } from '../errors.js';
 import type { RunResult } from '../delegation.js';
-import type { SessionEvent } from './format.js';
+import type { SessionEvent } from './event-types.js';
+import type { RunResultRef } from './run-types.js';
+
+export type { RunResultRef } from './run-types.js';
 
 const RUN_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const REQUEST_KEY = /^[A-Za-z0-9._:-]{1,128}$/u;
@@ -41,7 +44,6 @@ export interface RunParentage {
   readonly subrunId: string;
   readonly callId?: string;
 }
-export interface RunResultRef { readonly version: 1; readonly name: string; readonly bytes: number; readonly sha256: string }
 export interface DurableRunReceipt {
   readonly runId: string;
   readonly userSeq: number;

@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { open, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { SessionEvent } from './format.js';
+import type { SessionEvent } from './event-types.js';
 
 // 版本 1 是单个摘要的旧布局，读取时折算为一个块；版本 2 起保存块列表。
 export const CHECKPOINT_FORMAT_VERSION = 2;

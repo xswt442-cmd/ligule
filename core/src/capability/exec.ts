@@ -19,21 +19,11 @@ import { permissionDenial, type PermissionContext } from '../kernel/permission.j
 import type { ShellSelection } from './shell.js';
 import { assertInterpreterIdentity, assertScriptBinding, bindScript, commandUsesNodeRuntime, readBoundScript, resolveNodeRuntime, type ScriptBinding } from './script-binding.js';
 import { CHECK_DECLARATION_SCHEMA, checkedCheckDeclaration, type CheckDeclaration } from '../session/checks.js';
+import type { ExecLogChunk, ExecLogSnapshot } from './exec-log-types.js';
+
+export type { ExecLogChunk, ExecLogSnapshot } from './exec-log-types.js';
 
 type ExecArguments = { command?: unknown; cwd?: string; waitMs?: unknown; check?: CheckDeclaration };
-
-export interface ExecLogChunk {
-  readonly sequence: number;
-  readonly stream: 'stdout' | 'stderr';
-  readonly offset: number;
-  readonly data: Buffer;
-}
-
-export interface ExecLogSnapshot {
-  readonly totalBytes: number;
-  readonly firstAvailableOffset: number;
-  readonly chunks: readonly ExecLogChunk[];
-}
 
 export interface ManagedExecLease {
   readonly completion: Promise<number>;
