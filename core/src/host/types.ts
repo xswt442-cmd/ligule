@@ -133,6 +133,23 @@ export interface SessionGeneration {
   readonly options: HostGenerationOptions;
 }
 
+export interface InitialSessionSettings {
+  readonly mode?: string;
+  readonly policy?: Exclude<PolicyMode, 'default'>;
+  readonly sessionPolicyRules?: readonly PolicyRule[];
+  readonly operation?: { readonly operationId: string; readonly sourceSessionId: string };
+  readonly permission?: {
+    readonly context: PermissionContext;
+    readonly confirmedFullAccess: boolean;
+    readonly confirmedNetwork: boolean;
+    readonly confirmedPartialWorkspaceWrite: boolean;
+  };
+  readonly loopIterations?: number;
+  readonly persistLoopIterations: boolean;
+  readonly generation: SessionGeneration;
+  readonly persistGeneration: boolean;
+}
+
 export interface AdoptionResult {
   readonly applies: { sessionId: string; when: 'now' | 'round' }[];
   readonly failure?: { code: string; detail?: string };

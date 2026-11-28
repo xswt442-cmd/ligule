@@ -41,13 +41,13 @@ import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
 import { publishRunResult, type RunAcceptance } from '../session/run.js';
 import type { SessionEvent } from '../session/format.js';
-import { chooseResumeMode, sessionDirectories, sessionDirectory } from '../session/list.js';
-import { adoptForSessionDirectory } from '../session/adopt.js';
+import { chooseResumeMode, sessionDirectory } from '../session/list.js';
 import { readConfig, writeConfig } from './handlers/config.js';
 import { createMcpExtensionHandlers } from './handlers/mcp-extensions.js';
 import { handleProjectRequest } from './handlers/project.js';
 import { createRunSubmissionHandler, handleRunRequest, runOriginOf } from './handlers/run.js';
 import { createSessionHandlers } from './handlers/session.js';
+import { createSessionLifecycle } from './handlers/session-lifecycle.js';
 import { handleSubrunRequest } from './handlers/subrun.js';
 import { createWorkspacePrefsHandlers } from './handlers/workspace-prefs.js';
 import { listProjectDirectory, readProjectFile } from './project-files.js';
@@ -132,29 +132,12 @@ import { parseInitialGenerationSettings } from './session-initial-settings.js';
 import { settingsToolCatalog as buildSettingsToolCatalog } from './tool-catalog.js';
 import type {
   AdoptionResult, DelegatedRunResult, EnvironmentSeed, Host, HostClientConnection, HostConfigSnapshot, HostOptions,
-  HostProgressSnapshot, HostSessionBase, HostSessionState, PendingRunAsk, ProjectEnvironment, RuntimeConfig,
+  HostProgressSnapshot, HostSessionBase, HostSessionState, InitialSessionSettings, PendingRunAsk, ProjectEnvironment, RuntimeConfig,
   SessionGeneration,
 } from './types.js';
 export { providerFromConfig, hostProviderFromConfig } from './provider.js';
 export { shownConfigOf } from './handlers/config.js';
 export type { EnvironmentSeed, Host, HostOptions, HostProgressSnapshot, HostSessionState } from './types.js';
-
-interface InitialSessionSettings {
-  readonly mode?: string;
-  readonly policy?: Exclude<PolicyMode, 'default'>;
-  readonly sessionPolicyRules?: readonly PolicyRule[];
-  readonly operation?: { readonly operationId: string; readonly sourceSessionId: string };
-  readonly permission?: {
-    readonly context: PermissionContext;
-    readonly confirmedFullAccess: boolean;
-    readonly confirmedNetwork: boolean;
-    readonly confirmedPartialWorkspaceWrite: boolean;
-  };
-  readonly loopIterations?: number;
-  readonly persistLoopIterations: boolean;
-  readonly generation: SessionGeneration;
-  readonly persistGeneration: boolean;
-}
 
 type ModeState = SessionModeState;
 type PolicyRememberScope = 'session' | 'project' | 'user';
@@ -3240,6 +3223,18 @@ export function createHost({
     serialize: serializeSessionConfiguration,
     validate: runContextOf,
   });
+  const sessionLifecycle = createSessionLifecycle<ProjectEnvironment, HostSessionState>({
+    environmentFor,
+    open,
+    opened: id => sessions.get(id),
+    recordPathOf,
+    initialSettings: initialSessionSettings,
+    build: buildSession,
+    noteWorkspace,
+    recordGrantUsed: grant => recordDelegationEvent(agentControl!.storePath, { kind: 'grant.used', grantId: grant.id }),
+    retire,
+    evictEnvironment,
+  });
   const mcpExtensions = createMcpExtensionHandlers({
     environmentFor,
     open,
@@ -3330,27 +3325,10 @@ export function createHost({
           if (!message.params.trusted) await processOwnership.stopAfterTrustChange(identity, affectedSessions);
           return { projectRoot: environment.projectRoot, trusted: message.params.trusted };
         }
-        case 'session.create': {
-          const id = randomUUID();
-          const origin = message.params.workspaceOrigin;
-          // 保留客户端是否明确选择项目这一信息；只看路径无法区分显式选择和默认项目。
-          if (origin !== undefined && origin !== 'explicit' && origin !== 'default') {
-            throw new KernelError('workspace_origin_unknown', { detail: `${origin}; the call takes 'explicit' or 'default', or nothing at all` });
-          }
-          const env = await environmentFor(message.params.projectRoot);
-          const initial = await initialSessionSettings(env, message.params, grant);
-          const created = await buildSession(id, connection, false, undefined, env,
-            origin ?? (message.params.projectRoot === undefined ? 'default' : 'explicit'), initial);
-          if (grant !== undefined) await recordDelegationEvent(agentControl!.storePath, { kind: 'grant.used', grantId: grant.id });
-          await noteWorkspace(env);
-          const hasInitialSettings = message.params.initialMode !== undefined || message.params.initialPolicy !== undefined
-            || message.params.initialPermissionProfile !== undefined || message.params.initialPermissionNetwork !== undefined
-            || message.params.confirmInitialWorkspaceTrust !== undefined
-            || message.params.initialProvider !== undefined || message.params.initialModel !== undefined
-            || message.params.initialThinkingEffort !== undefined || message.params.initialOutputTokens !== undefined
-            || message.params.initialLoopIterations !== undefined;
-          return hasInitialSettings ? { ...created, settingsApplied: true } : created;
-        }
+        case 'session.create':
+        case 'session.open':
+        case 'session.close':
+          return await sessionLifecycle(message.method, sessionId, message.params, connection, grant);
         case 'session.side.create': {
           const source = open(sessionId);
           if (source.operationOnly === true) throw new KernelError('side_session_source_invalid');
@@ -3442,80 +3420,6 @@ export function createHost({
           await source.session.append({ kind, ignorable: true, source: 'desktop', requestId, runId,
             createdAt: new Date().toISOString() });
           return { requestId, action, recorded: true };
-        }
-        case 'session.open': {
-          // 按会话所属项目定位已打开的会话，与 `session.read` 使用相同规则。
-          // 未指定项目根目录时，可能会在错误目录中查找其他项目创建的会话。
-          if (sessions.has(sessionId)) {
-            // 重新打开当前 Host 已拥有的会话只读状态，不得打断正在运行的轮次。
-            // 会话空闲时立即应用新模式；轮次运行期间则等到边界再应用。
-            const state = open(sessionId);
-            if (grant !== undefined) await recordDelegationEvent(agentControl!.storePath, { kind: 'grant.used', grantId: grant.id });
-            if (message.params.mode !== undefined) {
-              if (state.environment.modePaths === undefined) throw new KernelError('host_mode_paths_required');
-              const requested = await loadMode(requiredString(message.params.mode, 'mode'), state.environment.modePaths);
-              if (state.running === undefined) await state.adopt(requested);
-              else state.pending = requested;
-            }
-            return { sessionId };
-          }
-          // 从明确选择的项目环境中解析会话记录目录和工具访问边界。
-          const env = await environmentFor(message.params.projectRoot);
-          // 派生会话记录是只读历史，不能恢复为可写会话；通过 `session.read` 读取。
-          const branch = /^(.+)\.sub-(\d+)$/.exec(sessionId);
-          if (branch !== null) {
-            throw new KernelError('session_is_branch', { detail: `${sessionId} is a derived branch of ${branch[1]}; open the parent, or read that record with session.read` });
-          }
-          // 会话不存在时不要创建空记录，避免把打开失败误报为恢复成功。
-          // 先校验编号，保留格式错误对应的错误码。
-          const path = recordPathOf(sessionId, env);
-          try {
-            await access(path);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-            const filename = `${sessionId}.jsonl`;
-            const legacy = sessionDirectories(env.config).slice(1);
-            let legacyRecord = false;
-            for (const directory of legacy) {
-              try {
-                await access(join(directory, filename));
-                legacyRecord = true;
-                break;
-              } catch (legacyError) {
-                if ((legacyError as NodeJS.ErrnoException).code !== 'ENOENT') throw legacyError;
-              }
-            }
-            if (!legacyRecord) throw new KernelError('session_not_found', { detail: sessionId });
-            const adopted = await adoptForSessionDirectory(env.config, env.directory, env.projectRoot, sessionId);
-            if (adopted?.busy.includes(filename)) throw new KernelError('session_locked', { detail: sessionId });
-            if (adopted?.conflicts.includes(filename)) {
-              throw new KernelError('session_adoption_write_failed', { detail: `${sessionId}: existing legacy records conflict` });
-            }
-            try {
-              await access(path);
-            } catch (adoptionError) {
-              if ((adoptionError as NodeJS.ErrnoException).code !== 'ENOENT') throw adoptionError;
-              throw new KernelError('session_not_found', { detail: sessionId });
-            }
-          }
-          // 新打开的会话也在轮次边界应用模式变更。
-          const opened = await buildSession(sessionId, connection, true,
-            message.params.mode === undefined ? undefined : requiredString(message.params.mode, 'mode'), env);
-          if (grant !== undefined) await recordDelegationEvent(agentControl!.storePath, { kind: 'grant.used', grantId: grant.id });
-          await noteWorkspace(env);
-          return opened;
-        }
-        case 'session.close': {
-          const state = sessions.get(sessionId);
-          if (state === undefined) throw new KernelError('session_not_open', { detail: sessionId });
-          // 关闭前必须等整个轮次（含最终化）结束，确保结果和待应用配置都已记录。
-          if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: sessionId });
-          if (state.running !== undefined || state.operation !== undefined) {
-            throw new KernelError('run_already_running', { detail: sessionId });
-          }
-          await retire(state);
-          evictEnvironment(state.environment);
-          return { sessionId };
         }
         case 'screen-capture.set': {
           const state = open(sessionId);
