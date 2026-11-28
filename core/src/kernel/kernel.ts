@@ -762,7 +762,8 @@ export function createKernel(options: KernelOptions = {}): Kernel {
             ...(options.parentExecutionId === undefined ? {} : { parentExecutionId: options.parentExecutionId }),
             ...(approvedScriptBinding === undefined ? {} : { scriptBinding: approvedScriptBinding }) });
           const checkLatestPermission = () => {
-            const latestPermission = currentPermission();
+            // 运行时工作区信任与 Session 权限快照分开保存；重读权限时保留本次调用已确认的信任结果。
+            const latestPermission = permissionWithWorkspaceTrust(currentPermission(), callPermission.workspaceTrusted);
             const latestDenial = permissionDenial(latestPermission, tool.access);
             if (latestDenial !== undefined) {
               throw new KernelError(latestDenial.code, { detail: latestDenial.reason });
