@@ -4,7 +4,7 @@
 import { readFile, realpath } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../errors.js';
-import { matchesName } from '../kernel/match.js';
+import { matchesName } from '../shared/match.js';
 import { isWithin } from './paths.js';
 
 const FILE_NAME = 'AGENTS.md';

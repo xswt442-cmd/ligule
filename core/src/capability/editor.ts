@@ -2,7 +2,7 @@ import { spawn } from 'cross-spawn';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { splitArguments } from '../kernel/templates.js';
+import { splitArguments } from '../shared/arguments.js';
 
 export type EditorOutcome =
   | { readonly text: string }

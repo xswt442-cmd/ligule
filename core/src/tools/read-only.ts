@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import type { ToolContext, ToolDefinition } from '../kernel/kernel.js';
-import { matchesName } from '../kernel/match.js';
+import { matchesName } from '../shared/match.js';
 import { boundaryOf, limitsOf, skippedDirectories, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
 import { resolveRipgrep, searchWithRipgrep } from '../capability/ripgrep.js';

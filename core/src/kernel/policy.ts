@@ -8,7 +8,7 @@ import { inspectCommand, type CommandInspection, type ParsedCommand } from '../c
 import { classifyDangerousCommand } from '../capability/dangerous-command.js';
 import { resolveWithin } from '../capability/paths.js';
 import { KernelError } from './error.js';
-import { matches } from './match.js';
+import { matches } from '../shared/match.js';
 import { isPortableAbsolutePath, isRecord } from '../shared/guards.js';
 import type { NetworkTarget } from '../capability/network.js';
 import type { ShellSelection } from '../capability/shell.js';
