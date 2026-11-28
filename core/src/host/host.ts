@@ -52,13 +52,11 @@ import { handleSubrunRequest } from './handlers/subrun.js';
 import { createWorkspacePrefsHandlers } from './handlers/workspace-prefs.js';
 import { listProjectDirectory, readProjectFile } from './project-files.js';
 import { projectGitDiffVersion, readProjectGitDiff } from './project-git.js';
-import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
+import { loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
 export { compactionLimitsOf } from './runtime-limits.js';
-import { createCompaction } from '../session/compaction.js';
 import { TRUSTED_AGENT_CONTROL_ORIGIN } from './agent-control-runtime.js';
 import { controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissionControl, requireTrustedUi, runChannelOf, runOriginBasis, runScopesOf, type ControlTrust } from './capabilities.js';
 import { admitEntry } from './entry.js';
-import { usageEvent } from '../session/usage.js';
 import { summarizeUsage } from '../session/usage-summary.js';
 import { readSessionRecord } from '../session/record.js';
 import { inactiveGrantOutcome, isGrantActive, selectReviewEvidence, staleReviewOutcome } from './review-evidence.js';
@@ -74,7 +72,7 @@ import { createManagedProcessRegistry, managedProcessPlugin } from '../capabilit
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
 import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
-import { createLoop, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase } from '../kernel/loop.js';
+import { createLoop, type LoopProgressEvent, type LoopProgressPhase } from '../kernel/loop.js';
 import { appendRequestDiagnostic, configureRequestDiagnostics, createRequestDiagnosticStore, requestDiagnosticSnapshot } from '../kernel/request-diagnostics.js';
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
@@ -129,6 +127,7 @@ import { runEvidenceReferences } from '../session/run-evidence.js';
 import { checkEventOf, sampleCheckScope } from './checks.js';
 import { parseInitialGenerationSettings } from './session-initial-settings.js';
 import { settingsToolCatalog as buildSettingsToolCatalog } from './tool-catalog.js';
+import { createSessionCompaction } from './session-compaction.js';
 import { createSessionMcp } from './session-mcp.js';
 import type {
   AdoptionResult, DelegatedRunResult, EnvironmentSeed, Host, HostClientConnection, HostConfigSnapshot, HostOptions,
@@ -435,31 +434,6 @@ function hasModelCredentialBinding(model: Record<string, unknown>, api: unknown,
     candidateApi === api && candidateReference === reference && typeof candidateURL === 'string' && new URL(apiRoot(candidateURL)).href === address;
   return modelServices(model.services).some((service) => matches(service.api, service.baseURL, service.apiKeyEnv))
     || (typeof model.model === 'string' && matches(model.api, model.baseURL, model.apiKeyEnv ?? 'LIGULE_API_KEY'));
-}
-
-function compactionProgressProvider(provider: HostProvider, onProgress: (event: LoopProgressEvent) => void): HostProvider {
-  return {
-    get name() { return provider.name; },
-    get model() { return provider.model; },
-    get pending() { return provider.pending; },
-    get capabilities() { return provider.capabilities; },
-    get requiresCompletion() { return provider.requiresCompletion; },
-    get outputTokens() { return provider.outputTokens; },
-    get contextTokens() { return provider.contextTokens; },
-    get thinkingCapability() { return provider.thinkingCapability; },
-    get thinkingEffort() { return provider.thinkingEffort; },
-    withModel(model) { return compactionProgressProvider(provider.withModel(model), onProgress); },
-    withGeneration(options) { return compactionProgressProvider(provider.withGeneration(options), onProgress); },
-    async *stream(request, options) {
-      onProgress({ kind: 'phase', phase: 'compaction', modelCalls: 0, toolCalls: 0 });
-      for await (const event of provider.stream(request, options)) {
-        if (event.type === 'text' || event.type === 'reasoning' || event.type === 'tool-call') {
-          onProgress({ kind: 'activity', phase: 'compaction', activity: 'model_output', modelCalls: 0, toolCalls: 0 });
-        }
-        yield event;
-      }
-    },
-  };
 }
 
 // 会话接口将事件写入记录后，再把它转发给客户端。
@@ -2440,42 +2414,14 @@ export function createHost({
     if (initial?.persistLoopIterations === true && initial.loopIterations !== undefined) {
       await session.append({ kind: 'sessionLoopIterations', ignorable: true, iterations: initial.loopIterations });
     }
-    // 压缩属于会话。摘要请求使用底层提供方，不向客户端转发流式内容。
-    // 未配置模型上下文窗口时关闭压缩。
-    const rebuildCompaction = (model: Record<string, unknown>) => {
-      const selectedModel = resolveModel(model);
-      // 会话显式设置的输出预算优先于模型声明；两者都缺省时不预留。
-      const override = state.generation.options.outputTokens;
-      const limits = compactionLimitsOf(config, selectedModel.serviceContextTokens, override ?? selectedModel.outputTokens);
-      return limits === undefined ? null : createCompaction({
-        provider: compactionProgressProvider(live, (event) => {
-          if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
-        }),
-        session,
-        directory,
-        id,
-        limits,
-        logger,
-        requestPrefix: () => ({ system: prompt.render(), tools: kernel.manifest() }),
-      });
-    };
-    const compaction = rebuildCompaction(state.generation.model ?? {});
-    const loopCompaction: LoopCompaction = {
-      prepare: (request, signal, collectDiagnostics) => state.compaction?.prepare(request, signal, collectDiagnostics) ?? Promise.resolve(request.messages),
-      recover: (error, request, signal, collectDiagnostics) => state.compaction?.recover(error, request, signal, collectDiagnostics) ?? Promise.resolve(null),
-      observe: async (request, events) => {
-        const current = state.compaction;
-        if (current !== undefined && current !== null) await current.observe(request, events);
-        else {
-          // 端点没报用量也要留一条：否则会话看起来一次请求都没发生过。
-          const usage = usageEvent(request, events, 'agent', { unknownWhenUnreported: true });
-          if (usage !== null) await session.append(usage);
-        }
+    const { rebuild: rebuildCompaction, loop: loopCompaction } = createSessionCompaction({
+      config, provider: live, state, session, directory, id, logger,
+      requestPrefix: () => ({ system: prompt.render(), tools: kernel.manifest() }),
+      reportProgress(event) {
+        if (state.progressId !== undefined) observeLoopProgress(state as HostSessionState, connection, state.progressId, event);
       },
-      diagnostics: () => state.compaction?.diagnostics(),
-      seedDiagnostics: (diagnostics) => state.compaction?.seedDiagnostics(diagnostics),
-      resetDiagnostics: () => state.compaction?.resetDiagnostics(),
-    };
+    });
+    const compaction = rebuildCompaction(state.generation.model ?? {});
     const loop = createLoop({
       kernel,
       provider: observedProvider(live, (event) => connection.notify({ notify: 'delta', sessionId: id, event })),
