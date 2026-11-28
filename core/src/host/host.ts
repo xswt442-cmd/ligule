@@ -9,7 +9,6 @@ import { KernelError } from '../kernel/error.js';
 import { SETTLE_GRACE_MS, settleWithin } from '../kernel/settle.js';
 import { createTaskBudget, type TaskBudget, type TaskWork } from '../kernel/task-budget.js';
 import { currentKernelExecutionContext, withKernelExecutionContext, withoutKernelExecutionContext } from '../kernel/execution-context.js';
-import { rememberRunSummary } from '../kernel/run-summary.js';
 import {
   assertDelegationCompletion, createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
   registerDelegationResultTool, completedRunResult, failedRunResult, structuredOutputDigest,
@@ -41,12 +40,13 @@ import { POLICY_SEMANTICS, createDecisionChain, isPolicyMode, isPolicyRule, poli
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
-import { createRunAcceptance, findRunReceipt, isRunAcceptance, publishRunResult, readRunResult, runPayloadDigest, type DurableRunReceipt, type RunAcceptance } from '../session/run.js';
+import { publishRunResult, type RunAcceptance } from '../session/run.js';
 import type { SessionEvent } from '../session/format.js';
 import { chooseResumeMode, sessionDirectories, sessionDirectory } from '../session/list.js';
 import { adoptForSessionDirectory } from '../session/adopt.js';
 import { readConfig, writeConfig } from './handlers/config.js';
 import { handleProjectRequest } from './handlers/project.js';
+import { createRunSubmissionHandler, handleRunRequest, runOriginOf } from './handlers/run.js';
 import { createSessionHandlers } from './handlers/session.js';
 import { handleSubrunRequest } from './handlers/subrun.js';
 import { createWorkspacePrefsHandlers } from './handlers/workspace-prefs.js';
@@ -89,7 +89,6 @@ import { applyStorageCleanup, inspectStorage, previewStorageCleanup, type Storag
 import { createSessionImagePreview } from './image-preview.js';
 import { browserView, createStatusView, sessionPermissionView } from './status-view.js';
 import { verifySideSelection } from './side-selection.js';
-import { readRunRecord } from './run-read.js';
 import { createSearchSupport } from './search.js';
 import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
 import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
@@ -122,7 +121,7 @@ import { createSessionReviewer, narrowReviewerSettings, reviewerRouteFields, rev
 import type { PolicyReviewRecord, PolicyReviewRequest } from '../kernel/policy.js';
 import type { ReviewFacts } from '../kernel/reviewer.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
-import { runAcceptanceScope, runLivenessOf, runReceiptView } from './run-records.js';
+import { runAcceptanceScope, runLivenessOf } from './run-records.js';
 import { runResourcesOf } from './run-resources.js';
 import { createFileChangeStore } from '../session/file-changes.js';
 import { checkedCheckDeclaration, type CheckDeclaration } from '../session/checks.js';
@@ -311,13 +310,6 @@ function sessionGenerationEvent(generation: SessionGeneration): Record<string, u
 // 会话名称需要为列表中的时间和条目数留出显示空间。
 export { SESSION_NAME_MAX } from './handlers/session.js';
 
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -330,14 +322,6 @@ function errorCode(error: unknown): string | undefined {
 function errorMessage(error: unknown): string | undefined {
   if (!isRecord(error)) return undefined;
   return typeof error.message === 'string' ? error.message : undefined;
-}
-
-function runOriginOf(value: unknown, defaultOrigin: 'human' | 'controller', canRecordHuman: boolean): 'human' | 'controller' {
-  if (value !== undefined && value !== 'human' && value !== 'controller') throw new KernelError('protocol_args_invalid');
-  // Only a trusted local UI or the authenticated Agent Control bridge can persist a human source.
-  // External MCP callers cannot self-assert it through request parameters.
-  if (!canRecordHuman) return 'controller';
-  return value ?? defaultOrigin;
 }
 
 /** 由可信通道与作用域派生的 Run 来源证据；请求参数不能指定。 */
@@ -3205,43 +3189,6 @@ export function createHost({
     };
   }
 
-  type PendingSubmission = { scope: string; key?: string; digest: string; receipt: Promise<DurableRunReceipt> };
-  type DeferredReceipt = { promise: Promise<DurableRunReceipt>;
-    resolve: (value: DurableRunReceipt | PromiseLike<DurableRunReceipt>) => void; reject: (reason?: unknown) => void };
-  const pendingSubmissions = new Map<string, PendingSubmission>();
-
-  // 一次模型 Run 的提交只在这里登记：同一会话同时挂一个 pending；重复请求按 requestKey 与 payload digest 复用。
-  function beginSubmission(sessionId: string, scope: string, key: string | undefined, digest: string):
-    { readonly kind: 'pending'; readonly pending: PendingSubmission } |
-    { readonly kind: 'started'; readonly accepted: DeferredReceipt; readonly cleanup: () => void } {
-    const pending = pendingSubmissions.get(sessionId);
-    if (pending !== undefined) return { kind: 'pending', pending };
-    const accepted: DeferredReceipt = deferred<DurableRunReceipt>();
-    void accepted.promise.catch(() => undefined);
-    const current: PendingSubmission = { scope, key, digest, receipt: accepted.promise };
-    pendingSubmissions.set(sessionId, current);
-    return {
-      kind: 'started', accepted,
-      cleanup: () => { if (pendingSubmissions.get(sessionId) === current) pendingSubmissions.delete(sessionId); },
-    };
-  }
-
-  function requireMatchingSubmission(pending: PendingSubmission, scope: string, key: string | undefined, digest: string): void {
-    if (key === undefined || pending.key !== key || pending.scope !== scope) throw new KernelError('run_already_running');
-    if (pending.digest !== digest) throw new KernelError('run_request_conflict');
-  }
-
-  // 已落盘的同一 requestKey 提交只有在 payload 完全一致时才复用；不一致视为客户端冲突。
-  function replaySubmission(events: readonly SessionEvent[], sessionId: string, scope: string,
-    key: string | undefined, digest: string): DurableRunReceipt | undefined {
-    if (key === undefined) return undefined;
-    const previous = findRunReceipt(events, sessionId, scope, { requestKey: key });
-    if (previous === undefined) return undefined;
-    const user = events.find(event => event.kind === 'user' && event.seq === previous.userSeq);
-    if (!user || !isRunAcceptance(user.run) || user.run.payloadDigest !== digest) throw new KernelError('run_request_conflict');
-    return previous;
-  }
-
   async function executeRun(state: HostSessionState, input: string, origin: 'human' | 'controller',
     delegation: DelegationSpec | undefined, acceptance: RunAcceptance, connection: HostClientConnection,
     onAccepted?: (userSeq: number) => void): Promise<DelegatedRunResult> {
@@ -3292,6 +3239,11 @@ export function createHost({
     environmentFor,
     readOnlyConfig: readOnlySessionConfig,
   });
+  const submitRun = createRunSubmissionHandler({
+    open,
+    serialize: serializeSessionConfiguration,
+    validate: runContextOf,
+  });
 
   const host: Host = {
     async handle(rawMessage: Pick<HostRequest, 'method' | 'params'>, connection: HostClientConnection): Promise<unknown> {
@@ -3299,7 +3251,7 @@ export function createHost({
       const rawParams = rawMessage.params;
       validateCall(rawMessage.method, rawParams);
       const message: HostRequestWithParams = { ...rawMessage, params: rawParams };
-      const { sessionId = '', input = '' } = message.params;
+      const { sessionId = '' } = message.params;
       const grant = await activeDelegation();
       if (grant !== undefined) {
         await assertDelegationProject(grant, message.params.projectRoot ?? defaultEnvironment.projectRoot);
@@ -3652,57 +3604,17 @@ export function createHost({
             args: structuredClone(pending.args),
           };
         }
-        case 'run.start': {
-          const started = await serializeSessionConfiguration(sessionId, async () => {
-            const state = open(sessionId);
-            const origin = runOriginOf(message.params.origin, 'human', mayRecordHumanRun(controlTrust, bridge));
-            const scope = origin === 'controller' ? controllerScope : 'human';
-            if (grant !== undefined) assertGrantSessionScope(grant, state);
-            const requestKey = message.params.requestKey;
-            const digest = runPayloadDigest(input, message.params.delegation);
-            const waitForOriginal = async (receipt: DurableRunReceipt) => {
-              if (state.activeRunId === receipt.runId && state.operation !== undefined) return await state.operation;
-              if (receipt.state === 'accepted' || receipt.state === 'interrupted') throw new KernelError('run_not_active');
-              return await host.handle({ method: 'run.wait', params: {
-                sessionId, runId: receipt.runId, origin: origin ?? 'human',
-              } }, connection);
-            };
-            const begun = beginSubmission(sessionId, scope, requestKey, digest);
-            if (begun.kind === 'pending') {
-              requireMatchingSubmission(begun.pending, scope, requestKey, digest);
-              return { wait: (async () => await waitForOriginal(await begun.pending.receipt))() };
-            }
-            const { accepted, cleanup: cleanupSubmission } = begun;
-            try {
-              if (requestKey !== undefined) {
-                const existing = replaySubmission(await state.session.read(), sessionId, scope, requestKey, digest);
-                if (existing !== undefined) {
-                  accepted.resolve(existing);
-                  return { wait: waitForOriginal(existing), cleanup: cleanupSubmission };
-                }
-              }
-              runContextOf(state, message.params.delegation);
-              const run = createRunAcceptance(sessionId, input, message.params.delegation, scope, requestKey,
-                runProvenanceOf(controlTrust, bridge, origin ?? 'human', scope));
-              // executeRun synchronously claims the Session before returning its Promise. The
-              // configuration queue is released only after this point, so Mode commits cannot
-              // race a new round into their persistence window.
-              const work = executeRun(state, input, origin ?? 'human', message.params.delegation, run, connection, userSeq => {
-                accepted.resolve({ runId: run.runId, sessionId, userSeq, state: 'accepted', acceptedAt: run.acceptedAt,
-                  ...(requestKey === undefined ? {} : { requestKey }),
-                  ...(run.via === undefined ? {} : { via: run.via, resolvedBy: run.resolvedBy }) });
-              });
-              void work.catch(error => accepted.reject(error));
-              return { wait: work, cleanup: cleanupSubmission };
-            } catch (error) {
-              accepted.reject(error);
-              cleanupSubmission();
-              throw error;
-            }
+        case 'run.start':
+        case 'run.submit':
+          return await submitRun(message.method, sessionId, message.params, {
+            controllerScope,
+            canRecordHuman: mayRecordHumanRun(controlTrust, bridge),
+            authorize(state) { if (grant !== undefined) assertGrantSessionScope(grant, state); },
+            provenance: (origin, scope) => runProvenanceOf(controlTrust, bridge, origin, scope),
+            execute: (state, input, origin, delegation, run, onAccepted) =>
+              executeRun(state, input, origin, delegation, run, connection, onAccepted),
+            waitForPersisted: (runId, origin) => host.handle({ method: 'run.wait', params: { sessionId, runId, origin } }, connection),
           });
-          try { return await started.wait; }
-          finally { started.cleanup?.(); }
-        }
         case 'storage.inspect':
         case 'storage.cleanup.preview':
         case 'storage.cleanup.apply': {
@@ -3737,109 +3649,26 @@ export function createHost({
           if (message.method === 'artifact.resolve') return await resolveArtifact(scope, {}, artifactKey, controlTrust);
           return await inspectArtifact(scope, {}, artifactKey);
         }
-        case 'run.submit': {
-          const submission = await serializeSessionConfiguration(sessionId, async () => {
-            const state = open(sessionId);
-            const origin = runOriginOf(message.params.origin, 'controller', mayRecordHumanRun(controlTrust, bridge));
-            const scope = origin === 'controller' ? controllerScope : 'human';
-            if (grant !== undefined) assertGrantSessionScope(grant, state);
-            const key = message.params.requestKey;
-            const digest = runPayloadDigest(input, message.params.delegation);
-            const begun = beginSubmission(sessionId, scope, key, digest);
-            if (begun.kind === 'pending') {
-              requireMatchingSubmission(begun.pending, scope, key, digest);
-              return {
-                wait: begun.pending.receipt.then((receipt) => ({ ...runReceiptView(receipt, runLivenessOf(state, receipt.runId)), reused: true })),
-              };
-            }
-            const { accepted, cleanup: cleanupSubmission } = begun;
-            try {
-              const previous = replaySubmission(await state.session.read(), sessionId, scope, key, digest);
-              if (previous !== undefined) {
-                accepted.resolve(previous);
-                const live = runLivenessOf(state, previous.runId);
-                return { wait: Promise.resolve({ ...runReceiptView(previous, live), reused: true }), cleanup: cleanupSubmission };
-              }
-              runContextOf(state, message.params.delegation);
-              const run = createRunAcceptance(sessionId, input, message.params.delegation, scope, key,
-                runProvenanceOf(controlTrust, bridge, origin, scope));
-              const work = executeRun(state, input, origin, message.params.delegation, run, connection, userSeq => {
-                accepted.resolve({ runId: run.runId, sessionId, userSeq, state: 'accepted', acceptedAt: run.acceptedAt,
-                  ...(run.requestKey === undefined ? {} : { requestKey: run.requestKey }),
-                  ...(run.via === undefined ? {} : { via: run.via, resolvedBy: run.resolvedBy }) });
-              });
-              void work.catch(error => accepted.reject(error));
-              return {
-                wait: accepted.promise.then((receipt) => ({ ...runReceiptView(receipt, runLivenessOf(state, receipt.runId)), reused: false })),
-                cleanup: cleanupSubmission,
-              };
-            } catch (error) {
-              accepted.reject(error);
-              cleanupSubmission();
-              throw error;
-            }
-          });
-          try { return await submission.wait; }
-          finally { submission.cleanup?.(); }
-        }
-        case 'run.wait': {
-          const state = open(sessionId);
-          const runId = requiredString(message.params.runId, 'runId');
-          // origin 仅作为旧客户端的兼容字段保留，不参与授权；真实来源取自持久 Acceptance。
-          if (message.params.origin !== undefined && message.params.origin !== 'human' && message.params.origin !== 'controller') {
-            throw new KernelError('protocol_args_invalid');
-          }
-          const { events, scope } = await requireRunReference(state, runId);
-          const receipt = findRunReceipt(events, sessionId, scope, { runId });
-          if (receipt === undefined) throw new KernelError('run_not_found');
-          if (state.activeRunId === runId && state.operation !== undefined) return await state.operation;
-          if (receipt.state === 'accepted' || receipt.state === 'interrupted') throw new KernelError('run_not_active');
-          const result = await readRunResult(state.session.directory, workspaceIdentity(state.environment.projectRoot), sessionId, receipt);
-          if (result.state === 'completed') return {
-            runId, text: result.output.text ?? '', iterations: result.usage.iterations, modelCalls: result.usage.modelCalls,
-            ...(result.stopReason === 'tool_completed' ? { completedBy: DELEGATION_RESULT_TOOL } : {}),
-            ...(result.userSeq === undefined ? {} : { userSeq: result.userSeq }),
-            ...(result.task === undefined ? {} : { task: result.task }),
-            ...(result.artifactsTruncated === true ? { artifactsTruncated: true } : {}),
-            artifacts: result.artifacts.filter(item => item.kind === 'file'),
-            ...(Object.hasOwn(result.output, 'structured') ? { structured: result.output.structured } : {}),
-            validation: result.validation,
-          };
-          const error = new KernelError(result.diagnostic?.code ?? 'run_failed', { diagnostics: result.diagnostic?.provider });
-          if (result.usage.iterations !== null && result.usage.modelCalls !== null) {
-            rememberRunSummary(error, {
-              text: result.output.text ?? '', iterations: result.usage.iterations, modelCalls: result.usage.modelCalls,
-              ...(result.userSeq === undefined ? {} : { userSeq: result.userSeq }),
-              ...(result.task === undefined ? {} : { task: result.task }),
-              ...(result.artifactsTruncated === true ? { artifactsTruncated: true as const } : {}),
-              artifacts: result.artifacts.filter(item => item.kind === 'file'),
-            });
-          }
-          throw error;
-        }
+        case 'run.wait':
         case 'run.receipt':
         case 'run.receipts':
-        case 'run.result': {
-          // Run 记录读模型在 run-read.ts；入口只解析环境、打开记录并绑定可见性与存活判定。
-          const env = await environmentFor(requiredString(message.params.projectRoot, 'projectRoot'));
-          assertSessionId(sessionId);
-          const opened = sessions.get(sessionId);
-          return await readRunRecord(message.method, message.params, {
-            sessionId, env, recordPath: recordPathOf(sessionId, env),
-            openedRoot: opened?.environment.projectRoot,
-            log: opened?.session ?? createSessionLog({ directory: env.directory, id: sessionId }),
-            runScopes,
-            live: runId => runLivenessOf(sessions.get(sessionId), runId),
+        case 'run.result':
+        case 'run.cancel':
+        case 'run.steer':
+          return await handleRunRequest(message.method, message.params, sessionId, {
+            open,
+            opened: id => sessions.get(id),
+            environmentFor,
+            recordPathOf,
+            requireRunReference,
+            stopRun: state => processOwnership.stopRun(state, 'run_cancel'),
+            acceptInput(state, runId) {
+              advanceRunInputRevision(state, runId);
+              return settleRunAsks(state, runId);
+            },
+            source: runOriginOf(undefined, 'human', mayRecordHumanRun(controlTrust, bridge)),
+            scopes: runScopes,
           });
-        }
-        case 'run.cancel': {
-          const state = open(sessionId);
-          if (state.running === undefined) throw new KernelError('run_not_running', { detail: sessionId });
-          // 通过当前循环处理取消，让工具和模型请求收到同一个取消信号。
-          state.running.abort();
-          await processOwnership.stopRun(state, 'run_cancel');
-          return { cancelled: true };
-        }
         case 'operation.start': {
           const command = requiredString(message.params.command, 'command');
           const cwd = message.params.cwd === undefined ? undefined : requiredString(message.params.cwd, 'cwd');
@@ -3926,23 +3755,6 @@ export function createHost({
             return finiteCommands.logs(owner, executionId, message.params.cursor, message.params.limitBytes);
           }
           return await finiteCommands.cancel(owner, executionId);
-        }
-        case 'run.steer': {
-          const state = open(sessionId);
-          const runId = requiredString(message.params.runId, 'runId');
-          if (state.activeRunId !== runId) throw new KernelError('run_steer_target_mismatch');
-          await requireRunReference(state, runId);
-          const header = await state.session.header();
-          if (header?.formatVersion === undefined || header.formatVersion < 3) throw new KernelError('run_steer_session_format_unsupported');
-          const steering = state.runSteering;
-          if (steering === undefined) throw new KernelError('run_steer_not_ready');
-          const source = runOriginOf(undefined, 'human', mayRecordHumanRun(controlTrust, bridge));
-          let cancelledInteractionIds: string[] = [];
-          const accepted = await steering.accept(source, requiredString(message.params.input, 'input'), () => {
-            advanceRunInputRevision(state, runId);
-            cancelledInteractionIds = settleRunAsks(state, runId);
-          });
-          return { ...accepted, cancelledInteractions: cancelledInteractionIds.length, cancelledInteractionIds };
         }
         case 'subrun.start':
         case 'subrun.list':
