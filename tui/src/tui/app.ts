@@ -30,9 +30,10 @@ import { useControlCommands } from './handlers/control.js';
 import { agentMcpConfig } from './agent-mcp.js';
 import { queuedLine } from './queue-text.js';
 import { clearCancelledLocalQuestion } from './local-question.js';
-import { isRecord } from './guards.js';
-import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
-import { collectTranscriptPages } from './transcript-pages.js';
+import { isAskQuestion, isRecord } from './guards.js';
+import { capabilityOf, projectRecord, resultParts, transcriptRows, type TranscriptItem } from './transcript.js';
+import { externalModelFrom, useExternalControl } from './use-external-control.js';
+import { useTranscriptSession } from './use-transcript-session.js';
 import { VERSION } from '../version.js';
 import { ChoicePanel, HelpPanel, PanelFrame, type PanelChoice } from './panels.js';
 import { SessionPicker } from './session-picker.js';
@@ -86,23 +87,6 @@ const NO_TOKEN = { start: -1, text: '' } as const;
 function isSessionEvent(value: unknown): value is SessionEvent {
   return isRecord(value) && typeof value.seq === 'number'
     && (value.kind === undefined || typeof value.kind === 'string');
-}
-
-function externalModelFrom(events: readonly SessionEvent[]): string | null {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (event.kind === 'turnContext' && typeof event.model === 'string' && event.model.trim() !== '') return event.model;
-  }
-  return null;
-}
-
-function isAskQuestion(value: unknown): value is AskQuestion {
-  return isRecord(value)
-    && typeof value.id === 'string'
-    && typeof value.question === 'string'
-    && typeof value.multiSelect === 'boolean'
-    && Array.isArray(value.options)
-    && value.options.every((option) => isRecord(option) && typeof option.label === 'string');
 }
 
 export type TuiStatus = HostStatus<TemplateCommand>;
@@ -241,7 +225,7 @@ function requestFailure(error: unknown, fallback: string): { readonly code: stri
   return { code: errorCode(error) ?? fallback };
 }
 
-interface QuestionState {
+export interface QuestionState {
   readonly id: string;
   readonly questions: readonly AskQuestion[];
   readonly at: number;
@@ -361,18 +345,6 @@ const processHistory: TuiInputHistory = {
   },
 };
 
-function maxTranscriptSequence(events: readonly TuiRecord[]): number {
-  return events.reduce((maximum, event) => Math.max(maximum, event.seq), -1);
-}
-
-function transcriptRows(events: readonly TuiRecord[], locale: Locale): TranscriptItem[] {
-  return events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq })));
-}
-
-function appendUnseenTranscript(events: readonly TuiRecord[], after: number, locale: Locale): TranscriptItem[] {
-  return transcriptRows(events.filter((event) => event.seq > after), locale);
-}
-
 export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = processHistory, inputs, keys, trust, modes, locale = 'zh' }: AppProps) {
   const t = useCallback((zh: string, en: string) => chooseText(locale, zh, en), [locale]);
   const app = useApp();
@@ -380,12 +352,11 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const activeSession = useRef(sessionId);
   const knownSubrunReferences = useRef(new Map<string, TuiSubrunReference>());
   const sessionIdentityGeneration = useRef(0);
-  const terminalReceived = useRef(false);
+  const alive = useRef(true);
   activeSession.current = sessionId;
   const [geometry, setGeometry] = useState({ columns: stdout?.columns ?? 80, rows: stdout?.rows ?? 24 });
-  const [rows, setRows] = useState<TranscriptItem[]>([]);
-  const lastTranscriptSequence = useRef(-1);
-  const [live, setLive] = useState({ text: '', reasoning: '' });
+  const { rows, live, setLive, lastTranscriptSequence, terminalReceived, push, clearLive, beginTurn, appendDelta,
+    record: recordEvent, restore: restoreTranscript, appendObserved } = useTranscriptSession(locale, alive);
   const [ask, setAsk] = useState<AskState | null>(null);
   // 一个提问请求包含一至四道题；逐题填写，最后一题提交后统一发送答复。
   const [query, setQuery] = useState<QuestionState | null>(null);
@@ -512,17 +483,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const mentionWanted = useRef<ReturnType<typeof mentionToken> | typeof NO_TOKEN>(NO_TOKEN);
   const mentionAsked = useRef<ReturnType<typeof mentionToken> | typeof NO_TOKEN>(NO_TOKEN);
   // Ink 结束后禁止继续写入，避免迟到的答复或状态更新触发 `write after end`。
-  const alive = useRef(true);
   useEffect(() => () => {
     alive.current = false;
     navigationOf().invalidate();
-  }, []);
-  const push = useCallback((...added: TranscriptItem[]) => {
-    if (!alive.current) return;
-    for (const row of added) {
-      if (Number.isSafeInteger(row.seq)) lastTranscriptSequence.current = Math.max(lastTranscriptSequence.current, row.seq!);
-    }
-    setRows((current) => [...current, ...added]);
   }, []);
   const reportMcpTrustOutcome = useCallback((owner: string, outcome: TranscriptItem) => {
     if (!alive.current) return;
@@ -677,22 +640,17 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (message.notify === 'delta') {
         const delta = isRecord(message.event) ? message.event : undefined;
         const piece = typeof delta?.text === 'string' ? delta.text : '';
-        if (delta?.type === 'text') setLive((current) => ({ ...current, text: current.text + piece }));
-        else if (delta?.type === 'reasoning') setLive((current) => ({ ...current, reasoning: current.reasoning + piece }));
+        if (delta?.type === 'text' || delta?.type === 'reasoning') appendDelta(delta.type, piece);
         return;
       }
       if (message.notify === 'event') {
         if (!isSessionEvent(message.event)) return;
         const event = message.event;
         if (event.kind === 'turn') {
-          terminalReceived.current = true;
           setAsk(null);
           setQuery(null);
         }
-        // 持久化事件到达后，以记录事件替换流式占位内容。
-        if (event.kind === 'assistant') setLive((current) => ({ ...current, text: '' }));
-        if (event.kind === 'reasoning') setLive((current) => ({ ...current, reasoning: '' }));
-        push(...projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq })));
+        recordEvent(event);
         return;
       }
       if (message.notify === 'fault') push({ kind: 'error', text: `${typeof message.code === 'string' ? message.code : 'host_fault'}：${typeof message.detail === 'string' ? message.detail : ''}` });
@@ -741,162 +699,25 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       stopNotifications();
       stopRequests();
     };
-  }, [client, locale, push, refreshStatus, sessionId]);
+  }, [appendDelta, client, locale, push, recordEvent, refreshStatus, sessionId]);
 
-  useEffect(() => {
-    if (!externalControl) return undefined;
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let cursor = 0;
-    let operationId: string | null = null;
-    let gapNotifiedOperationId: string | null = null;
-    let inFlight = false;
-    let lastFailure = '';
-    let lastExternalQuestionId = '';
-    let lastExternalApprovalId = '';
-    const projectRoot = info.boundary ?? '';
-    const schedule = (delayMs: number) => {
-      if (timer !== undefined) clearTimeout(timer);
-      timer = setTimeout(() => { timer = undefined; void poll(); }, delayMs);
-    };
-    // 缺口可能跨越多页：从最新一页开始按 `before` 向更早翻，直到覆盖上次的序号再按时间顺序追加。
-    // 翻到页数上限仍未覆盖时如实提示，不能把没读到的旧记录当作已经补齐。
-    const TRANSCRIPT_PAGE_LIMIT = 50;
-    const refreshTranscript = async () => {
-      const requestedAfter = lastTranscriptSequence.current;
-      const collected = await collectTranscriptPages(async (before) => {
-        const observed = await client.request('session.observe', {
-          projectRoot,
-          sessionId,
-          limit: 400,
-          fullResults: true,
-          ...(before === undefined ? {} : { before }),
-        });
-        return observed.events;
-      }, requestedAfter, TRANSCRIPT_PAGE_LIMIT, () => disposed || activeSession.current !== sessionId);
-      if (disposed || activeSession.current !== sessionId) return;
-      const events = [...collected.pages].reverse().flat();
-      const committedThrough = lastTranscriptSequence.current;
-      const newestObserved = maxTranscriptSequence(events);
-      const responseWasStale = newestObserved < committedThrough;
-      const unseen = appendUnseenTranscript(events, committedThrough, locale);
-      lastTranscriptSequence.current = Math.max(committedThrough, newestObserved);
-      push(...unseen);
-      // 持久记录补齐后，之前流式收到的同一段回答不再是最新状态：留着会让界面显示一份不完整的重复预览。
-      const durableKinds = new Set(unseen.map((item) => item.kind));
-      if (durableKinds.has('assistant') || durableKinds.has('reasoning')) {
-        setLive((current) => ({
-          text: durableKinds.has('assistant') ? '' : current.text,
-          reasoning: durableKinds.has('reasoning') ? '' : current.reasoning,
-        }));
-      }
-      if (!responseWasStale) setExternalModel(externalModelFrom(collected.pages[0] ?? []));
-      if (!responseWasStale && !collected.complete) {
-        push({ kind: 'error', text: t(
-          `外控会话的记录超过 ${TRANSCRIPT_PAGE_LIMIT} 页仍未覆盖上次序号；更早的未读记录可能无法补齐`,
-          `The external transcript gap spans more than ${TRANSCRIPT_PAGE_LIMIT} pages; earlier unseen records may stay incomplete`,
-        ) });
-      }
-    };
-    const poll = async () => {
-      if (disposed || inFlight) return;
-      inFlight = true;
-      let nextDelay = 1_000;
-      try {
-        const snapshot = await client.request('session.control', {
-          projectRoot,
-          sessionId,
-          request: { action: 'status', after: cursor, limit: 50, waitMs: 10_000 },
-        }) as ExternalControlSnapshot;
-        if (disposed || activeSession.current !== sessionId) return;
-        const currentOperationId = snapshot.operationId ?? null;
-        if (currentOperationId !== operationId) {
-          operationId = currentOperationId;
-          cursor = 0;
-          gapNotifiedOperationId = null;
-          setExternalSnapshot(snapshot);
-          nextDelay = 0;
-          return;
-        }
-        setExternalSnapshot(snapshot);
-        setRunning(snapshot.state === 'running');
-        for (const event of snapshot.events) {
-          if (event.kind === 'model.delta' && (event.type === 'text' || event.type === 'reasoning') && typeof event.text === 'string') {
-            setLive((current) => ({ ...current, [event.type as 'text' | 'reasoning']: current[event.type as 'text' | 'reasoning'] + event.text }));
-          }
-          if (event.kind === 'session.event' && typeof event.eventKind === 'string') {
-            if (event.eventKind === 'assistant') setLive((current) => ({ ...current, text: '' }));
-            if (event.eventKind === 'reasoning') setLive((current) => ({ ...current, reasoning: '' }));
-            void refreshTranscript().catch((error: unknown) => push({ kind: 'error', text: t(`外控会话转录读取失败：${errorCode(error) ?? 'session_observe_failed'}`, `Could not refresh external transcript: ${errorCode(error) ?? 'session_observe_failed'}`) }));
-          }
-        }
-        if (snapshot.eventGap) {
-          cursor = Math.max(0, (snapshot.firstAvailableCursor ?? cursor + 1) - 1);
-          if (gapNotifiedOperationId !== operationId) {
-            gapNotifiedOperationId = operationId;
-            push({ kind: 'error', text: t(
-              '外控实时事件出现缺口；正在刷新可用的持久会话记录，未写入记录的流式片段可能缺失。',
-              'External live events have a gap. Persisted Session records are being refreshed; stream chunks not yet written to the Session may be missing.',
-            ) });
-          }
-          void refreshTranscript().catch((error: unknown) => push({ kind: 'error', text: t(`外控会话转录读取失败：${errorCode(error) ?? 'session_observe_failed'}`, `Could not refresh external transcript: ${errorCode(error) ?? 'session_observe_failed'}`) }));
-        }
-        cursor = Math.max(cursor, snapshot.nextCursor);
-        const question = snapshot.pendingInteractions.find((item) => item.type === 'question'
-          && !resolvedExternalInteractions.current.has(item.requestId));
-        if (question !== undefined && Array.isArray(question.details.questions) && question.details.questions.every(isAskQuestion)) {
-          if (lastExternalQuestionId !== question.requestId) {
-            lastExternalQuestionId = question.requestId;
-            setPanel(null);
-            setDetail(null);
-            setSessionPicker(null);
-            setSearch(null);
-            setExpanded(false);
-          }
-          setQuery((current) => current?.external === true && current.id === question.requestId
-            ? current
-            : { id: question.requestId, questions: question.details.questions as AskQuestion[], at: 0, picked: {}, external: true });
-        } else {
-          lastExternalQuestionId = '';
-          setQuery((current) => current?.external === true ? null : current);
-        }
-        const approval = snapshot.pendingInteractions.find((item) => item.type === 'approval'
-          && !resolvedExternalInteractions.current.has(item.requestId));
-        if (approval !== undefined) {
-          if (lastExternalApprovalId !== approval.requestId) {
-            lastExternalApprovalId = approval.requestId;
-            setPanel(null);
-            setDetail(null);
-            setSessionPicker(null);
-            setSearch(null);
-            setExpanded(false);
-            setApprovalExpanded(false);
-            setApprovalCursor(0);
-            setRememberOpen(false);
-          }
-          setAsk((current) => current?.external === true && current.id === approval.requestId
-            ? current
-            : toTuiAsk(approval.requestId, approval.details, locale, true));
-        } else {
-          lastExternalApprovalId = '';
-          setAsk((current) => current?.external === true ? null : current);
-        }
-        lastFailure = '';
-        nextDelay = snapshot.state === 'running' ? 0 : 1_000;
-      } catch (error) {
-        const code = errorCode(error) ?? 'external_control_failed';
-        setRunning(false);
-        if (lastFailure !== code) push({ kind: 'error', text: t(`外控会话不可用：${code}`, `External session unavailable: ${code}`) });
-        lastFailure = code;
-        nextDelay = 1_000;
-      } finally {
-        inFlight = false;
-        if (!disposed && timer === undefined) schedule(nextDelay);
-      }
-    };
-    void poll();
-    return () => { disposed = true; if (timer !== undefined) clearTimeout(timer); };
-  }, [client, externalControl, info.boundary, locale, push, sessionId, t]);
+  const dismissExternalPanels = useCallback((forApproval: boolean) => {
+    setPanel(null);
+    setDetail(null);
+    setSessionPicker(null);
+    setSearch(null);
+    setExpanded(false);
+    if (forApproval) {
+      setApprovalExpanded(false);
+      setApprovalCursor(0);
+      setRememberOpen(false);
+    }
+  }, []);
+  useExternalControl({
+    client, enabled: externalControl, projectRoot: info.boundary ?? '', sessionId, activeSession, lastTranscriptSequence,
+    resolvedInteractions: resolvedExternalInteractions, locale, setSnapshot: setExternalSnapshot, setModel: setExternalModel,
+    setLive, setAsk, setQuery, setRunning, appendObserved, dismissPanels: dismissExternalPanels, makeApproval: toTuiAsk, push, t,
+  });
 
   // 终端标题显示模型、项目根和当前会话，切换会话时同步更新。
   // 非交互终端不写标题控制序列，避免污染管道输出。
@@ -930,8 +751,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
 
   const submit = useCallback(async (text: string) => {
     remember(text);
-    terminalReceived.current = false;
-    setLive({ text: '', reasoning: '' });
+    beginTurn();
     if (externalControl) {
       try {
         const accepted = await client.request('session.control', {
@@ -962,13 +782,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
     } finally {
       setAsk(null);
-      setLive({ text: '', reasoning: '' });
+      clearLive();
       // 轮次取消后 Host 会记录未答问题的结果，界面移除对应问题卡片。
       setQuery(null);
       setRunning(false);
       void refreshStatus();
     }
-  }, [client, externalControl, info.boundary, push, refreshStatus, remember, sessionId, t]);
+  }, [beginTurn, clearLive, client, externalControl, info.boundary, push, refreshStatus, remember, sessionId, t, terminalReceived]);
 
   // 按第一个词解析命令，完整保留其余文本作为参数。
   const closePanel = useCallback(() => {
@@ -1316,8 +1136,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     const outcomes = mcpTrustOutcomeRows.current.get(sessionId);
     if (outcomes === undefined) return;
     mcpTrustOutcomeRows.current.delete(sessionId);
-    setRows((current) => [...current, ...outcomes]);
-  }, [mcpTrustOutcomeRevision, sessionId]);
+    push(...outcomes);
+  }, [mcpTrustOutcomeRevision, push, sessionId]);
 
   const closeUnadoptedSession = useCallback(async (targetId: string, owner: string, force = false): Promise<string | undefined> => {
     if (!force && targetId === owner) return undefined;
@@ -1414,9 +1234,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setStatus(null);
           setDetail(null);
           setSessionPicker(null);
-          lastTranscriptSequence.current = -1;
-          setRows([]);
-          setLive({ text: '', reasoning: '' });
+          restoreTranscript([]);
           push({ kind: 'meta', text: t(`新会话 ${created.sessionId.slice(0, 8)}`, `New session ${created.sessionId.slice(0, 8)}`) });
         } catch (error) {
           if (sessionNavigationIsCurrent(lease)) {
@@ -1520,9 +1338,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setAsk(null);
           setQuery(null);
           setSessionPicker(null);
-          lastTranscriptSequence.current = maxTranscriptSequence(read.events);
-          setRows(transcriptRows(read.events, locale));
-          setLive({ text: '', reasoning: '' });
+          restoreTranscript(read.events);
           setDetail(null);
           const row = listed.sessions.find((item) => item.id === picked.id);
           if (picked.id === owner) void refreshStatus();
@@ -1609,9 +1425,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             return;
           }
           adopted = true;
-          lastTranscriptSequence.current = maxTranscriptSequence(read.events);
-          setRows(transcriptRows(read.events, locale));
-          setLive({ text: '', reasoning: '' });
+          restoreTranscript(read.events);
           push({ kind: 'meta', text: t('已接管外控会话，后续输入由 TUI 直接提交。', 'External session taken over; new input now runs through this TUI.') });
         } catch (error) {
           if (transferred && alive.current && activeSession.current === owner) {
@@ -1681,7 +1495,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (shellCommands.handle(name)) return;
     if (controlCommands.handle(name, argument)) return;
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, capabilityCommands, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, controlCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keybindCommands, keys, locale, presetCommands, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, resourceCommands, runControlCommands, sessionId, sessionListCommands, sessionMaintenanceCommands, sessionNavigationIsCurrent, shellCommands, status, stdout, subrunCommands, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
+  }, [app, beginSessionNavigation, capabilityCommands, changePermission, changeThinking, client, closeUnadoptedSession, configCommands, controlCommands, externalControl, finishSessionNavigation, info, infoCommands, integrationCommands, keyOverrides, keybindCommands, keys, locale, presetCommands, push, queue, queuePaused, query, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, resourceCommands, restoreTranscript, runControlCommands, sessionId, sessionListCommands, sessionMaintenanceCommands, sessionNavigationIsCurrent, shellCommands, status, stdout, subrunCommands, t, trust, openPicker, exitTui, usageCommands, viewCommands]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
@@ -2117,7 +1931,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             : client.request('session.read', { sessionId, fullResults: true });
           void readPromise.then((read) => {
             if (activeSession.current !== sessionId) return;
-            const complete = read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq })));
+            const complete = transcriptRows(read.events, locale);
             setDetail((current) => current?.kind === 'transcript' ? { ...current, rows: complete, loading: false } : current);
           }, (error) => push({ kind: 'error', text: t(`无法读取完整记录：${error.code ?? error.message}`, `Could not read full conversation: ${error.code ?? error.message}`) }));
         }

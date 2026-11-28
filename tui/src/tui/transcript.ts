@@ -5,6 +5,15 @@ import { toolTarget } from './message-format.js';
 // SessionEvent 是记录事实源；投影只生成展示行，不改记录，也不把行号当作事件序号。
 export type TuiRecord = SessionEvent;
 
+export function maxTranscriptSequence(events: readonly TuiRecord[]): number {
+  return events.reduce((maximum, event) => Math.max(maximum, event.seq), -1);
+}
+
+export function transcriptRows(events: readonly TuiRecord[], locale: Locale, after = -1): TranscriptItem[] {
+  return events.filter(event => event.seq > after)
+    .flatMap(event => projectRecord(event, locale).map(row => ({ ...row, seq: event.seq })));
+}
+
 export interface TranscriptItem {
   kind: string;
   text: string;
