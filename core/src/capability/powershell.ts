@@ -2,7 +2,7 @@
 // 仅接受简单命令和 ASCII 字面参数，并将每个命令分段交给权限规则检查。
 // 管道、子表达式、脚本块、重定向、动态表达式、未知节点和解析失败都会返回无法识别的原因，不猜测其含义。
 // grammar 是 ESM 模块，需使用动态 import 加载。
-import type { CommandInspection, ParsedCommand, ParsedCommandArgument, ParsedCommandInvocation } from './command.js';
+import type { CommandInspection, ParsedCommand, ParsedCommandArgument, ParsedCommandInvocation } from './command-types.js';
 
 // 只接受命令名称、参数分隔符、字面参数、引号字符串和语句分隔符等已支持的节点。
 // 新增语法节点前必须确认它不会改变命令执行路径。

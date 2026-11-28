@@ -21,7 +21,10 @@ import { laterScopeChangesTouch, runEvidenceReferences } from '../session/run-ev
 import { checkedCheckDeclaration, checkedCheckEvent } from '../session/checks.js';
 import type { SessionEvent } from '../session/format.js';
 import { beginChildRun, childRunDelegation } from './subagent-run.js';
-import { readPersistedSubrun, referenceOf as subrunReferenceOf, SubrunRegistry, viewOf as viewSubrun, type SubrunRecord } from './subrun-store.js';
+import {
+  readPersistedSubrun, referenceOf as subrunReferenceOf, SubrunRegistry, viewOf as viewSubrun,
+  type SubrunRecord, type SubrunReference, type SubrunStatus,
+} from './subrun-store.js';
 import type { RunSteeringInbox } from '../kernel/run-steering.js';
 import { currentKernelExecutionContext } from '../kernel/execution-context.js';
 import type { RequestDiagnostic } from '../kernel/request-diagnostics.js';
@@ -57,6 +60,8 @@ import {
   listAgentPresets,
   type AgentPresetDirectories, type AgentPresetPage,
 } from '../kernel/agent-presets.js';
+
+export type { SubrunReference, SubrunStatus } from './subrun-store.js';
 
 const DEFAULT_CONCURRENT_SUBAGENTS = 3;
 const MAX_CONCURRENT_SUBAGENTS = 8;
@@ -95,26 +100,6 @@ export interface SubagentDeps {
   onSubrunMessageAccepted?: (runId: string) => void;
   parentSession?: SessionLog;
   extensionHooks?: () => ExtensionHookRegistry | undefined;
-}
-
-export interface SubrunReference {
-  readonly subrunId: string;
-  readonly sessionId: string;
-  readonly runId: string;
-  readonly parentRunId?: string;
-  readonly parentCallId?: string;
-}
-
-export interface SubrunStatus extends SubrunReference {
-  readonly state: 'starting' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown';
-  readonly phase: string | null;
-  readonly task: ReturnType<TaskBudget['snapshot']> | null;
-  readonly pendingInteractions: { readonly approvals: number; readonly questions: number };
-  readonly errorCode?: string;
-  readonly result?: { readonly state: string; readonly textCharacters: number; readonly validation?: unknown };
-  readonly startedAt: number;
-  readonly updatedAt: number;
-  readonly completedAt?: number;
 }
 
 export interface SubagentRuntime {

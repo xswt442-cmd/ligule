@@ -7,11 +7,31 @@ import { join } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import type { SessionLog } from '../session/session.js';
 import type { RunSteeringInbox } from '../kernel/run-steering.js';
+import type { TaskBudget } from '../kernel/task-budget.js';
 import { isRunAcceptance, readRunResult, runReceipts } from '../session/run.js';
 import { readSessionRecord } from '../session/record.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
 import type { RunResult } from '../delegation.js';
-import type { SubrunReference, SubrunStatus } from './subagent.js';
+
+export interface SubrunReference {
+  readonly subrunId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly parentRunId?: string;
+  readonly parentCallId?: string;
+}
+
+export interface SubrunStatus extends SubrunReference {
+  readonly state: 'starting' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown';
+  readonly phase: string | null;
+  readonly task: ReturnType<TaskBudget['snapshot']> | null;
+  readonly pendingInteractions: { readonly approvals: number; readonly questions: number };
+  readonly errorCode?: string;
+  readonly result?: { readonly state: string; readonly textCharacters: number; readonly validation?: unknown };
+  readonly startedAt: number;
+  readonly updatedAt: number;
+  readonly completedAt?: number;
+}
 
 export const MAX_RETAINED_SUBRUNS = 64;
 const SESSION_ID_MAX_LENGTH = 160;

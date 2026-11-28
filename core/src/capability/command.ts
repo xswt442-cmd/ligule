@@ -3,36 +3,11 @@
 // PowerShell 使用 `powershell.js` 中更严格的语法子集，两种解析器返回相同结果结构。
 // 解析器采用延迟加载；加载失败时记录原因，不阻止 Kernel 启动。
 import { createRequire } from 'node:module';
+import type { CommandInspection, ParsedCommand, ParsedCommandArgument, ParsedCommandInvocation } from './command-types.js';
 import { inspectPowerShellCommand } from './powershell.js';
 import type TreeSitterParser from 'tree-sitter';
 
-export type ParsedCommand =
-  | { kind: 'segments'; segments: string[] }
-  | { kind: 'unsupported'; construct: string }
-  | { kind: 'unavailable'; detail: string };
-
-export interface ParsedCommandArgument {
-  readonly source: string;
-  readonly value: string | undefined;
-  readonly dynamic: boolean;
-  readonly tildeExpansion: boolean;
-  readonly nested: readonly ParsedCommandInvocation[];
-}
-
-export interface ParsedCommandInvocation {
-  readonly executable: string;
-  readonly executableSource?: string;
-  readonly executableDynamic?: boolean;
-  readonly executableNested?: readonly ParsedCommandInvocation[];
-  readonly arguments: readonly ParsedCommandArgument[];
-  readonly nested: boolean;
-  readonly pipeline: boolean;
-}
-
-export interface CommandInspection {
-  readonly parsed: ParsedCommand;
-  readonly invocations: readonly ParsedCommandInvocation[];
-}
+export type { CommandInspection, ParsedCommand, ParsedCommandArgument, ParsedCommandInvocation } from './command-types.js';
 
 type LoadedParser = { parser: TreeSitterParser } | { detail: string };
 

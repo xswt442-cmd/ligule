@@ -4,7 +4,7 @@
 import { open, readFile, rename, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { SessionSummary } from './list.js';
+import type { SessionSummary } from './list-types.js';
 
 export const LIST_INDEX_VERSION = 1;
 export const LIST_INDEX_NAME = 'index.json';

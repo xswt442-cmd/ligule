@@ -12,7 +12,6 @@ import { matches } from './match.js';
 import { isPortableAbsolutePath, isRecord } from '../shared/guards.js';
 import type { NetworkTarget } from '../capability/network.js';
 import type { ShellSelection } from '../capability/shell.js';
-import type { PolicyRule } from './config-edit.js';
 import type { PermissionAccess } from './permission.js';
 import type { ScriptBinding } from '../capability/script-binding.js';
 
@@ -49,8 +48,16 @@ export function readPersistedPolicyMode(value: unknown, semantics: unknown): Pol
   return readPolicyMode(value, true);
 }
 
-/** 规则表条目来自配置文件，类型定义在 `config-edit.ts`；这里重新导出，避免调用方多引一个模块。 */
-export type { PolicyRule } from './config-edit.js';
+/** `[[policy.rules]]` 中的一条工具规则。 */
+export type PolicyRule = {
+  tool: string;
+  match?: string;
+  decision: 'allow' | 'ask' | 'deny';
+  reason?: string;
+  target?: 'file' | 'workspace';
+  path?: string;
+  argsHash?: string;
+};
 
 export function isPolicyRule(value: unknown): value is PolicyRule {
   if (!isRecord(value)) return false;

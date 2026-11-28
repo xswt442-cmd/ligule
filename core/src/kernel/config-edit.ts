@@ -7,21 +7,12 @@ import { parse } from 'smol-toml';
 import { getStaticTOMLValue, parseTOML, traverseNodes, VisitorKeys, type AST } from 'toml-eslint-parser';
 import { isDeepStrictEqual } from 'node:util';
 import { KernelError, KernelRuntimeError } from './error.js';
-import { isPolicyRule, POLICY_MODES, POLICY_SEMANTICS } from './policy.js';
+import { isPolicyRule, POLICY_MODES, POLICY_SEMANTICS, type PolicyRule } from './policy.js';
 import { modelSelection, modelServices, selectionLiteral, servicesLiteral } from './model-services.js';
 import { errorCode, isPortableAbsolutePath } from '../shared/guards.js';
 import { withLockedAtomicFile } from '../storage/locked-file.js';
 
-/** `[[policy.rules]]` 中的一条工具规则。 */
-export type PolicyRule = {
-  tool: string;
-  match?: string;
-  decision: 'allow' | 'ask' | 'deny';
-  reason?: string;
-  target?: 'file' | 'workspace';
-  path?: string;
-  argsHash?: string;
-};
+export type { PolicyRule } from './policy.js';
 
 /** 配置写入请求：标量字段使用 `value`，规则表使用 `op` 和 `rule`，MCP 服务器表使用 `op` 和 `server`；更新或删除还需提供 `index`。 */
 export type WriteRequest = {
