@@ -7,7 +7,7 @@ import { DEFAULT_MODE, modeDirectories } from '../kernel/modes.js';
 import { readPersistedPolicyMode } from '../kernel/policy.js';
 import { KernelRuntimeError } from '../kernel/error.js';
 import { hostProviderFromConfig } from './provider.js';
-import type { createHost, EnvironmentSeed } from './host.js';
+import type { EnvironmentSeed, PolicyConfig } from './types.js';
 
 /** 从同一份配置层快照读取项目资源。 */
 export async function loadProjectConfig(projectRoot: string, flags: string[] = []) {
@@ -48,15 +48,15 @@ export async function loadHostEnvironment(projectRoot: string, shippedModes: str
   };
 }
 
-function policyFromConfig(raw: unknown): Parameters<typeof createHost>[0]['policy'] {
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw as Parameters<typeof createHost>[0]['policy'];
+function policyFromConfig(raw: unknown): PolicyConfig | undefined {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw as PolicyConfig | undefined;
   const value = raw as Record<string, unknown>;
-  if (value.mode === undefined) return value as Parameters<typeof createHost>[0]['policy'];
+  if (value.mode === undefined) return value as PolicyConfig;
   const mode = readPersistedPolicyMode(value.mode, value.semantics);
   if (mode === undefined) {
     throw new KernelRuntimeError('policy_mode_unknown', {
       detail: `policy.mode is ${JSON.stringify(value.mode)}; expected one of always, ask, auto, never (legacy none and never are read as ask)`,
     });
   }
-  return { ...value, mode } as Parameters<typeof createHost>[0]['policy'];
+  return { ...value, mode };
 }

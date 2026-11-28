@@ -8,7 +8,7 @@ import { checkedRunSummary, runSummary } from '../kernel/run-summary.js';
 import { runPayloadDigest } from '../session/run.js';
 import { checkedAnswers, type AskQuestion } from '../tools/ask-user.js';
 import { APPROVAL_METHOD, QUESTION_METHOD } from './protocol.js';
-import type { Host } from './host.js';
+import type { Host } from './types.js';
 import type { LoopResult } from '../kernel/loop.js';
 import { createAgentControlRuntime, TRUSTED_AGENT_CONTROL_ORIGIN, type AgentControlRequest } from './agent-control-runtime.js';
 import { containsSensitiveMaterial } from './approval.js';

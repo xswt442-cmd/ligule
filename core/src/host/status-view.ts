@@ -5,7 +5,7 @@ import { resolveModel, type ModelSelection } from '../kernel/model-services.js';
 import { BROWSER_SERVER } from '../capability/browser-policy.js';
 import { taskLimitsOf } from './runtime-limits.js';
 import type { DelegationGrant } from './agent-control.js';
-import type { HostProgressSnapshot, HostSessionState } from './host.js';
+import type { HostProgressSnapshot, HostSessionState } from './types.js';
 
 export function permissionView(permission: PermissionContext, changeAllowed: boolean, changeReason?: string): Record<string, unknown> {
   const execDenial = permissionDenial(permission, 'exec');

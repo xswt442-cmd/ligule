@@ -13,7 +13,7 @@ import { rememberRunSummary } from '../kernel/run-summary.js';
 import {
   assertDelegationCompletion, createOutputSchemaContract, DELEGATION_RESULT_TOOL, MAX_DELEGATION_SCHEMA_BYTES, outputSchemaInstructions,
   registerDelegationResultTool, completedRunResult, failedRunResult, structuredOutputDigest,
-  type DelegationSpec, type RunValidation,
+  type DelegationSpec,
 } from '../delegation.js';
 import {
   assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationMode, assertDelegationModelSelection, assertDelegationPermission,
@@ -25,16 +25,13 @@ import { listMcpTrust, mcpServerTrust, mcpTrustPathOf, setMcpServerTrust, type M
 import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionContextOptions, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { createFileWriteQueue } from '../kernel/file-write-queue.js';
-import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
+import { loadAssembly, type Plugin } from '../kernel/assembly.js';
 import {
   completeExtensionRun, loadExtensions, prepareExtensionRequest,
-  type ExtensionDiagnostic, type ExtensionHookRegistry,
+  type ExtensionHookRegistry,
 } from '../kernel/extensions.js';
 import { readExtensionState, writeExtensionState } from '../kernel/extension-state.js';
-import {
-  applyModeToPrompt, DEFAULT_MODE, listModes, loadMode, resolveModeSelection,
-  type ModeDirectories, type ModeFile,
-} from '../kernel/modes.js';
+import { applyModeToPrompt, DEFAULT_MODE, listModes, loadMode, resolveModeSelection } from '../kernel/modes.js';
 import { agentPresetDirectories } from '../kernel/agent-presets.js';
 import { readRegistry, registerWorkspace, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { isTrusted, setTrusted } from '../kernel/workspace-trust.js';
@@ -42,7 +39,7 @@ import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-his
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
 import { modelServices, modelSelection, resolveModel, type ModelSelection } from '../kernel/model-services.js';
-import { POLICY_SEMANTICS, createDecisionChain, isPolicyMode, isPolicyRule, policyArgsHash, readPersistedPolicyMode, readPolicyMode, type DecisionChain, type PolicyAskResult, type PolicyMode, type PolicyState, type PolicyThresholds } from '../kernel/policy.js';
+import { POLICY_SEMANTICS, createDecisionChain, isPolicyMode, isPolicyRule, policyArgsHash, readPersistedPolicyMode, readPolicyMode, type DecisionChain, type PolicyAskResult, type PolicyMode, type PolicyState } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
@@ -66,7 +63,6 @@ import { usageEvent } from '../session/usage.js';
 import { summarizeUsage } from '../session/usage-summary.js';
 import { readSessionRecord } from '../session/record.js';
 import { inactiveGrantOutcome, isGrantActive, selectReviewEvidence, staleReviewOutcome } from './review-evidence.js';
-import type { ReviewEvidence } from '../kernel/reviewer.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel, readPolicyOverride } from '../session/format.js';
 import { SPILL_NAME } from '../session/spill.js';
@@ -75,12 +71,12 @@ import { isWithin, relativePathWithin, resolveWithin } from '../capability/paths
 import { runManagedExec, type ExecControlArguments, type ExecRunContext } from '../capability/exec.js';
 import { createFiniteCommandRegistry, type FiniteCommandOwner } from '../capability/finite-command.js';
 import { createProcessOwnership } from './process-ownership.js';
-import { createManagedProcessRegistry, managedProcessPlugin, type ManagedProcessRegistry } from '../capability/managed-process.js';
+import { createManagedProcessRegistry, managedProcessPlugin } from '../capability/managed-process.js';
 import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
 import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
 import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
-import { createLoop, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase, type LoopResult, type LoopSteeringInbox } from '../kernel/loop.js';
-import { appendRequestDiagnostic, configureRequestDiagnostics, createRequestDiagnosticStore, requestDiagnosticSnapshot, type RequestDiagnosticStore } from '../kernel/request-diagnostics.js';
+import { createLoop, type LoopCompaction, type LoopProgressEvent, type LoopProgressPhase } from '../kernel/loop.js';
+import { appendRequestDiagnostic, configureRequestDiagnostics, createRequestDiagnosticStore, requestDiagnosticSnapshot } from '../kernel/request-diagnostics.js';
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
 import { createTodoWritePlugin } from '../tools/todo-write.js';
@@ -96,7 +92,7 @@ import { createSessionImagePreview } from './image-preview.js';
 import { browserView, createStatusView, sessionPermissionView } from './status-view.js';
 import { verifySideSelection } from './side-selection.js';
 import { readRunRecord } from './run-read.js';
-import { createSearchSupport, type SearchStatus } from './search.js';
+import { createSearchSupport } from './search.js';
 import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
 import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
 import { createScreenshotPlugin } from '../tools/screenshot.js';
@@ -106,139 +102,44 @@ import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
 import { createSubagentPlugin, type SubagentRuntime } from '../tools/subagent.js';
 import { createCompactPlugin } from '../tools/compact.js';
-import { createCustomToolsPlugin, discoverCustomTools, type CustomToolDiagnostic } from '../tools/custom.js';
+import { createCustomToolsPlugin, discoverCustomTools } from '../tools/custom.js';
 import { createAskUserPlugin } from '../tools/ask-user.js';
-import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
-import { createRunSteeringInbox, type RunSteeringInbox } from '../kernel/run-steering.js';
+import { createMcpRegistry, mcpServerConfigs } from '../capability/mcp.js';
+import { createRunSteeringInbox } from '../kernel/run-steering.js';
 import { discoverModels } from '../model/discovery.js';
 import { apiRoot } from '../model/http.js';
 import { thinkingCapabilityOf } from '../model/thinking.js';
 import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
-import { createConnection, type Connection, type HostRequest } from './connection.js';
+import { createConnection, type HostRequest } from './connection.js';
 import { APPROVAL_METHOD, QUESTION_METHOD, SIDE_SELECTION_MAX_BYTES, VIEW_REQUEST_METHOD, validateCall, type HostMethodParams } from './protocol.js';
 import { createConfig, mergePolicyRules, type ConfigSnapshot } from '../kernel/config.js';
 import { dataRoot, loadConfigLayers } from '../kernel/config-file.js';
-import type { LoggerBackend } from '../kernel/log.js';
 import { createTelemetry, currentTelemetryContext, emitTelemetry, telemetryEnabled, type TelemetryOptions } from '../kernel/telemetry.js';
-import type { LoadedLayers, createConfigStore } from '../kernel/config-store.js';
 import type { SkillRegistry } from '../kernel/skills.js';
-import type { TemplateRegistry } from '../kernel/templates.js';
 import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
 import { providerFromConfig, hostProviderFromConfig, type HostGenerationOptions, type HostProvider } from './provider.js';
-import { createSessionReviewer, narrowReviewerSettings, reviewerRouteFields, reviewerSettings, type SessionReviewer } from './reviewer.js';
+import { createSessionReviewer, narrowReviewerSettings, reviewerRouteFields, reviewerSettings } from './reviewer.js';
 import type { PolicyReviewRecord, PolicyReviewRequest } from '../kernel/policy.js';
 import type { ReviewFacts } from '../kernel/reviewer.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
 import { runAcceptanceScope, runLivenessOf, runReceiptView } from './run-records.js';
 import { runResourcesOf } from './run-resources.js';
-import { createFileChangeStore, type FileChangeFact, type FileChangeStore } from '../session/file-changes.js';
+import { createFileChangeStore, type FileChangeFact } from '../session/file-changes.js';
 import { checkedCheckDeclaration, type CheckDeclaration } from '../session/checks.js';
 import { checkedExecutionLogReference } from '../session/execution-log.js';
 import { runEvidenceReferences } from '../session/run-evidence.js';
 import { checkEventOf, sampleCheckScope } from './checks.js';
 import { parseInitialGenerationSettings } from './session-initial-settings.js';
 import { settingsToolCatalog as buildSettingsToolCatalog } from './tool-catalog.js';
+import type {
+  DelegatedRunResult, EnvironmentSeed, Host, HostClientConnection, HostConfigSnapshot, HostOptions,
+  HostProgressSnapshot, HostSessionBase, HostSessionState, PendingRunAsk, ProjectEnvironment, RuntimeConfig,
+  SessionGeneration,
+} from './types.js';
 export { providerFromConfig, hostProviderFromConfig } from './provider.js';
-
-interface HostConfigSnapshot extends ConfigSnapshot {
-  readonly boundary?: string;
-  readonly workspaceRoot?: string;
-  readonly exec?: { readonly shell?: unknown };
-  readonly model?: Record<string, unknown>;
-  readonly loop?: Record<string, unknown>;
-  readonly limits?: Record<string, unknown>;
-  readonly policy?: Record<string, unknown>;
-  readonly telemetry?: Record<string, unknown>;
-  readonly prompt?: { readonly static?: string };
-  readonly instructions?: Record<string, unknown> & { readonly maxBytes?: number; readonly current?: string };
-}
-
-interface PolicyConfig {
-  readonly mode?: PolicyMode;
-  readonly rules?: PolicyRule[];
-  readonly thresholds?: PolicyThresholds;
-}
-
-interface HostExtensions {
-  readonly paths: string[];
-  readonly ignored: ExtensionDiagnostic[];
-  readonly installedDirectory?: string;
-  // 安装路径（归一后）到安装名的映射；目录包用目录名，单文件用文件主名。
-  readonly installNames?: Record<string, string>;
-  // 安装目录中已被启停登记停用的扩展；配置层显式声明的路径不在此列。
-  readonly disabled?: { name: string; path: string }[];
-}
-
-export interface EnvironmentSeed {
-  readonly config: HostConfigSnapshot;
-  readonly provider: HostProvider;
-  readonly policy?: PolicyConfig;
-  readonly modeName?: string;
-  readonly modePaths?: ModeDirectories;
-  readonly skillRegistry?: SkillRegistry;
-  readonly templateRegistry?: TemplateRegistry;
-  readonly extensions?: HostExtensions;
-  readonly layers?: LoadedLayers;
-  readonly store?: ReturnType<typeof createConfigStore>;
-}
-
-interface ProjectEnvironment extends Omit<EnvironmentSeed, 'layers' | 'store' | 'extensions' | 'config' | 'provider' | 'policy'> {
-  readonly projectRoot: string;
-  readonly config: RuntimeConfig;
-  readonly directory: string;
-  readonly layers: LoadedLayers;
-  readonly store?: ReturnType<typeof createConfigStore>;
-  readonly extensions: HostExtensions;
-  readonly mcpConfigs: ReturnType<typeof mcpServerConfigs>;
-  provider: HostProvider;
-  policy?: PolicyConfig;
-  generation?: SessionGeneration;
-  pendingModel?: Record<string, unknown>;
-  browserSupport?: Promise<BrowserSupport>;
-}
-
-export interface HostOptions {
-  readonly config: HostConfigSnapshot;
-  readonly provider: HostProvider;
-  readonly plugins?: readonly Plugin<Kernel>[];
-  readonly policy?: PolicyConfig;
-  readonly logger?: LoggerBackend;
-  readonly telemetry?: TelemetryOptions;
-  readonly modeName?: string;
-  readonly modePaths?: ModeDirectories;
-  readonly skillRegistry?: SkillRegistry;
-  readonly templateRegistry?: TemplateRegistry;
-  readonly extensions?: HostExtensions;
-  readonly loadEnvironment?: (projectRoot: string) => Promise<EnvironmentSeed>;
-  readonly configStore?: ReturnType<typeof createConfigStore>;
-  readonly configLayers?: LoadedLayers;
-  readonly configStoreFor?: (projectRoot: string, layers: LoadedLayers) => ReturnType<typeof createConfigStore>;
-  readonly deriveProvider?: (config: ConfigSnapshot, generation?: HostGenerationOptions) => HostProvider;
-  readonly interactive?: boolean;
-  readonly permission?: PermissionContext;
-  readonly permissionControl?: boolean;
-  readonly screenCaptureConsent?: boolean;
-  readonly agentControl?: {
-    readonly grantId: string;
-    readonly storePath: string;
-    readonly operator: boolean;
-    validate(): Promise<DelegationGrant>;
-  };
-}
-
-interface RuntimeConfig extends HostConfigSnapshot {
-  readonly boundary: string;
-  readonly workspaceRoot: string;
-}
-
-interface SessionGeneration {
-  readonly provider: HostProvider;
-  readonly model: Record<string, unknown>;
-  readonly explicit?: boolean;
-  readonly options: HostGenerationOptions;
-}
+export type { EnvironmentSeed, Host, HostOptions, HostProgressSnapshot, HostSessionState } from './types.js';
 
 interface InitialSessionSettings {
   readonly mode?: string;
@@ -289,96 +190,7 @@ function reviewRuleOf(rule: PolicyRule, source: 'session' | 'config'): NonNullab
   };
 }
 
-interface HostSessionBase {
-  taskBudget?: TaskBudget;
-  lastTask?: ReturnType<TaskBudget['snapshot']>;
-  /** 复审装配用的可信证据快照（带事件 seq），不参与主 Agent 投影；读取失败时清空并转人工。 */
-  reviewEvidence?: ReviewEvidence;
-  /** 配置启用时才存在；未启用时 `auto` 行为与 P9.5 完全一致。 */
-  reviewer?: SessionReviewer;
-  activeRunId?: string;
-  runSteering?: RunSteeringInbox;
-  runInputRevisions?: Map<string, number>;
-  subagents?: SubagentRuntime;
-  readonly id: string;
-  readonly search: SearchStatus;
-  readonly browser: BrowserSupport;
-  browserPaused: boolean;
-  readonly childMcp: Map<McpRegistry, string>;
-  readonly session: SessionLog;
-  readonly listeners: ((event: SessionEvent) => void)[];
-  readonly asks: Set<PendingRunAsk>;
-  readonly asksByRun: Map<string, Set<PendingRunAsk>>;
-  readonly requestDiagnostics: RequestDiagnosticStore;
-  readonly mcpTrust: Map<string, { readonly source: 'trusted-ui'; readonly trusted: boolean; readonly updatedAt: string }>;
-  sessionPolicyRules: PolicyRule[];
-  operationOnly?: boolean;
-  operationId?: string;
-  operationSourceSessionId?: string;
-  operationRevoked?: boolean;
-  operationFinished?: boolean;
-  readonly environment: ProjectEnvironment;
-  readonly managedProcesses: ManagedProcessRegistry;
-  readonly fileChanges: FileChangeStore;
-  readonly managedGrantId?: string;
-  permission: PermissionContext;
-  readonly screenCapture: { enabled: boolean; source: 'none' | 'startup' | 'trusted-ui' | 'grant'; controller: AbortController };
-  policyOverride: PolicyMode | null;
-  readonly mode: ModeState;
-  loopIterations: number;
-  readonly loopModelCalls: number;
-  readonly loopMaxParallelTools: number;
-  pendingLoopIterations?: number;
-  generation: SessionGeneration;
-  modelCredentialBindings?: Record<string, unknown>;
-  pendingGeneration?: SessionGeneration;
-  pending?: ModeFile;
-  running?: AbortController;
-  permissionChanging?: boolean;
-  compaction?: ReturnType<typeof createCompaction> | null;
-  progress?: HostRunProgress;
-  progressId?: string;
-  waitingForApproval?: number;
-  waitingForInput?: number;
-  progressNotificationAt?: number;
-  operation?: Promise<unknown>;
-  adopt(file: ModeFile): Promise<void>;
-}
-
-interface PendingRunAsk {
-  readonly requestId: string;
-  readonly settle: () => void;
-}
-
-interface HostRunProgress {
-  readonly phase: LoopProgressPhase;
-  readonly startedAt: number;
-  readonly phaseStartedAt: number;
-  readonly lastProgressAt: number;
-  readonly modelCalls: number;
-  readonly toolCalls: number;
-  readonly outputTokens: number | null;
-}
-
 type OperationTerminalState = 'exited' | 'failed' | 'cancelled' | 'unknown';
-
-export type HostProgressSnapshot = HostRunProgress & { readonly task?: ReturnType<TaskBudget['snapshot']> };
-
-export interface HostSessionState extends HostSessionBase {
-  readonly chain: DecisionChain;
-  readonly kernel: Kernel;
-  readonly assembly: Assembly;
-  readonly mcp: McpRegistry;
-  readonly extensions: Awaited<ReturnType<typeof loadExtensions>>;
-  readonly customToolDiagnostics: CustomToolDiagnostic[];
-  readonly customToolNames: string[];
-  readonly templates: TemplateRegistry;
-  readonly loop: ReturnType<typeof createLoop>;
-  readonly subagents: SubagentRuntime;
-  readonly runDelegated: (input: string, options: DelegatedRunOptions) => Promise<DelegatedRunResult>;
-  compaction: ReturnType<typeof createCompaction> | null;
-  readonly rebuildCompaction: (model: Record<string, unknown>) => ReturnType<typeof createCompaction> | null;
-}
 
 interface HostSessionRetirement {
   managedProcessesClosed: boolean;
@@ -388,32 +200,6 @@ interface HostSessionRetirement {
   assemblyDisposed: boolean;
   sessionClosed: boolean;
 }
-
-interface DelegatedRunOptions {
-  readonly signal?: AbortSignal;
-  readonly source?: 'human' | 'controller';
-  readonly user?: Record<string, unknown>;
-  readonly onProgress?: (event: LoopProgressEvent) => void;
-  readonly delegation?: DelegationSpec;
-  readonly acceptance?: RunAcceptance;
-  readonly onAccepted?: (userSeq: number) => void;
-  readonly steering?: LoopSteeringInbox;
-}
-
-interface DelegatedRunResult extends LoopResult {
-  readonly runId?: string;
-  readonly structured?: unknown;
-  readonly validation?: RunValidation;
-}
-
-export interface Host {
-  handle(message: Pick<HostRequest, 'method' | 'params'>, connection: HostClientConnection): Promise<unknown>;
-  release(): Promise<void>;
-}
-
-type HostClientConnection = Pick<Connection, 'notify' | 'request'> & {
-  readonly [TRUSTED_AGENT_CONTROL_ORIGIN]?: true;
-};
 
 interface HostRequestWithParams {
   readonly method: string;
