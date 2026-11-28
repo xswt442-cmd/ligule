@@ -5,7 +5,6 @@ import { Ajv } from 'ajv';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, McpError, ErrorCode, type Tool } from '@modelcontextprotocol/sdk/types.js';
-import { createConfig } from '../kernel/config.js';
 import { KernelError } from '../kernel/error.js';
 import { DELEGATION_SPEC_SCHEMA, MODE_SELECTION_SCHEMA, type DelegationSpec } from '../delegation.js';
 import { createPermissionContext } from '../kernel/permission.js';
@@ -656,7 +655,6 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
     validate: () => requireDelegationGrant(grantStorePath, grant.id, authorizedRoot),
   };
   const host = createHost({ ...environment,
-    config: createConfig({ user: { ...environment.config, workspaceRoot: authorizedRoot } }),
     configLayers: layers,
     loadEnvironment: async (project) => {
       const { layers: freshLayers, ...fresh } = await loadHostEnvironment(project, shippedModes, flags);
