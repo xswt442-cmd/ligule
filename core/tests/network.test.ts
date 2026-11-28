@@ -417,3 +417,42 @@ test('the session record shows which host and which addresses were fetched', asy
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('fetchTarget destroys the response stream once maxBytes is reached and resolves cleanly', async (t) => {
+  let serverSawClose = false;
+  let extraSent = false;
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.write('1234567890');
+    const timer = setTimeout(() => {
+      extraSent = true;
+      if (!response.destroyed) response.end('more-data-that-should-not-be-read');
+    }, 500);
+    response.on('close', () => {
+      serverSawClose = true;
+      clearTimeout(timer);
+    });
+  });
+  const { origin } = await listening(server);
+  t.after(() => server.close());
+
+  const page = await fetchTarget(await resolveTarget(`${origin}/stream`), { ...limits, maxBytes: 4, timeoutMs: 2_000 });
+  assert.equal(page.shownBytes, 4);
+  assert.equal(page.bytes, 10);
+  assert.equal(page.text, '1234\n[truncated: 4 of 10 bytes shown]');
+  assert.equal(extraSent, false);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(serverSawClose, true);
+});
+
+test('fetchTarget turns a malformed redirect Location into fetch_redirect_denied', async (t) => {
+  const server = createServer((_request, response) => {
+    response.writeHead(302, { location: 'http://[invalid' });
+    response.end();
+  });
+  const { origin } = await listening(server);
+  t.after(() => server.close());
+
+  const error = await fetchTarget(await resolveTarget(`${origin}/bad-redirect`), limits).catch((failure) => failure) as { code: string };
+  assert.equal(error.code, 'fetch_redirect_denied');
+});

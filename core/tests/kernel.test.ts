@@ -697,3 +697,40 @@ test('provider diagnostics share one category table and one summary', async () =
   const withoutStatus = parseProviderDiagnostic({ category: 'transport', attempts: 1, responseReceived: false, streamReceived: false, recoverable: false });
   assert.equal(providerDiagnosticText(withoutStatus as ProviderDiagnostic).zh, 'HTTP 状态未知 · 传输故障 · 尝试 1 次 · 未收到响应 · 未收到响应流 · 不可安全重试');
 });
+
+test('kernel rechecks currentPermission after policy evaluation for non-file-write tools', async () => {
+  let activePermission = createPermissionContext('workspace-write', 'policy', {
+    filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
+  });
+  let ran = false;
+  const policy = createDecisionChain({
+    mode: 'ask',
+    ask: async () => {
+      activePermission = createPermissionContext('workspace-write', 'disabled', {
+        filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
+      });
+      return { decision: 'allow' };
+    },
+  });
+  const kernel = createKernel({
+    config: createConfig({ user: { boundary: process.cwd() } }),
+    permission: activePermission,
+    permissionForCall: () => activePermission,
+    policy,
+  });
+  kernel.register({
+    name: 'net_probe',
+    description: 'probe network',
+    access: 'network',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    async run() {
+      ran = true;
+      return { ok: true };
+    },
+  });
+  await assert.rejects(
+    () => kernel.call('net_probe', {}),
+    (error) => error instanceof KernelError && error.code === 'permission_network_denied',
+  );
+  assert.equal(ran, false, 'tool must not run after permission was downgraded during approval');
+});

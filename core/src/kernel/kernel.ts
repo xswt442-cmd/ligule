@@ -23,6 +23,8 @@ import { createFileChangeStore, type FileChangeFact, type FileChangeStore, type 
 import type { TaskBudget } from './task-budget.js';
 import type { ExecController } from '../capability/exec.js';
 
+const FILE_WRITE_TOOLS = new Set(['create', 'write', 'edit', 'delete']);
+
 export interface ToolContext {
   readonly config: ConfigSnapshot;
   readonly permission: PermissionContext;
@@ -678,7 +680,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
           ...(commandText === undefined ? {} : { command: commandText }),
           ...(options.callId === undefined ? {} : { callId: options.callId }),
           ...(identityDigest === undefined ? {} : { identityDigest }),
-          ...(['create', 'write', 'edit', 'delete'].includes(name)
+          ...(FILE_WRITE_TOOLS.has(name)
             ? { fileBoundary: boundaryOf(config), workingDirectory: workingDirectoryOf(config) }
             : {}),
           ...(requiresManualApproval ? { requiresManualApproval: true } : {}),
@@ -770,14 +772,19 @@ export function createKernel(options: KernelOptions = {}): Kernel {
             ...(options.parentRunId === undefined ? {} : { parentRunId: options.parentRunId }),
             ...(options.parentExecutionId === undefined ? {} : { parentExecutionId: options.parentExecutionId }),
             ...(approvedScriptBinding === undefined ? {} : { scriptBinding: approvedScriptBinding }) });
-          if (['create', 'write', 'edit', 'delete'].includes(name) && typeof args.path === 'string') {
+          const checkLatestPermission = () => {
+            const latestPermission = currentPermission();
+            const latestDenial = permissionDenial(latestPermission, tool.access);
+            if (latestDenial !== undefined) {
+              throw new KernelError(latestDenial.code, { detail: latestDenial.reason });
+            }
+            return latestPermission;
+          };
+          const latestPermission = checkLatestPermission();
+          if (FILE_WRITE_TOOLS.has(name) && typeof args.path === 'string') {
             const target = await resolveWithin(boundaryOf(config), args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
             value = await fileWriteQueue.run(target, async () => {
-              const latestPermission = currentPermission();
-              const latestDenial = permissionDenial(latestPermission, tool.access);
-              if (latestDenial !== undefined) {
-                throw new KernelError(latestDenial.code, { detail: latestDenial.reason });
-              }
+              const queuedPermission = checkLatestPermission();
               // A queued operation may outlive a path or permission change. Recheck the
               // effective write target after acquiring the Host-scoped path slot.
               const currentTarget = await resolveWithin(boundaryOf(config), args.path as string,
@@ -791,10 +798,10 @@ export function createKernel(options: KernelOptions = {}): Kernel {
               }
               // 工具会再次解析路径，但上面的比较已经确保它落在同一个文件上；
               // 参数保持原样，审批记住的是调用者看到的那条路径。
-              return await runTool(latestPermission);
+              return await runTool(queuedPermission);
             }, options.signal);
           } else {
-            value = await runTool(callPermission);
+            value = await runTool(latestPermission);
           }
           success = resultOf(value);
       } catch (error) {

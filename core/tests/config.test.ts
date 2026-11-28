@@ -101,6 +101,20 @@ test('a __proto__ key in a layer is refused instead of polluting every object', 
   assert.equal(({} as { polluted?: unknown }).polluted, undefined, 'nothing reached Object.prototype');
 });
 
+test('nested __proto__, constructor, prototype, and array-element __proto__ keys are refused', () => {
+  const nestedProto = JSON.parse('{"a": {"__proto__": {"polluted": true}}}');
+  const arrayProto = JSON.parse('{"items": [{"__proto__": {"polluted": true}}]}');
+  const nestedCtor = JSON.parse('{"a": {"constructor": {"polluted": true}}}');
+  const nestedPrototype = JSON.parse('{"a": {"prototype": {"polluted": true}}}');
+  for (const hostile of [nestedProto, arrayProto, nestedCtor, nestedPrototype]) {
+    assert.throws(
+      () => createConfig({ user: hostile }),
+      (error: unknown) => error instanceof KernelError && error.code === 'config_key_unsafe',
+    );
+  }
+  assert.equal(({} as { polluted?: unknown }).polluted, undefined, 'nothing reached Object.prototype');
+});
+
 // TOML 日期时间会解析为对象而不是普通表；合并配置时必须保留该值，不能递归展开并丢失它。
 test('a datetime in a higher layer replaces the lower one instead of merging away', () => {
   const snapshot = createConfig({

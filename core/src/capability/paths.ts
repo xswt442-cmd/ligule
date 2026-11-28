@@ -55,7 +55,6 @@ async function resolveReal(absolute: string): Promise<string> {
     while (true) {
       missing.unshift(basename(ancestor));
       ancestor = dirname(ancestor);
-      if (ancestor === dirname(ancestor)) throw new KernelError('path_parent_missing', { detail: `cannot find an existing parent directory for ${absolute}` });
       try {
         const realAncestor = await realpath(ancestor);
         // Windows 上对一个普通文件取 realpath 会成功，POSIX 报 ENOTDIR；父段是文件时目标既不存在也建不出来。
@@ -72,6 +71,7 @@ async function resolveReal(absolute: string): Promise<string> {
         if (causeCode !== 'ENOENT') {
           throw new KernelError('path_resolve_failed', { cause, detail: `resolving ${absolute} failed: ${causeCode ?? errorMessage(cause)}` });
         }
+        if (ancestor === dirname(ancestor)) throw new KernelError('path_parent_missing', { detail: `cannot find an existing parent directory for ${absolute}` });
       }
     }
   }

@@ -236,6 +236,18 @@ function pinnedLookup(address: string): LookupOption {
   return (_host, _options, callback) => callback(null, address, familyOf(address));
 }
 
+function isDefaultPort(scheme: string, port: number): boolean {
+  return port === (scheme === 'https:' ? 443 : 80);
+}
+
+function hostHeaderFor(scheme: string, host: string, port: number): string {
+  return isDefaultPort(scheme, port) ? host : `${host}:${port}`;
+}
+
+function tlsServername(host: string): string {
+  return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+}
+
 function connect(target: NetworkTarget, approved: NetworkTarget, { maxBytes, timeoutMs, signal }: {
   maxBytes: number;
   timeoutMs: number;
@@ -249,8 +261,10 @@ function connect(target: NetworkTarget, approved: NetworkTarget, { maxBytes, tim
       reject(new KernelError('fetch_url_invalid', { detail: `${target.url} has no approved connection address` }));
       return;
     }
-    const hostHeader = port === 80 || port === 443 ? approved.host : `${approved.host}:${port}`;
-    const from = `${target.scheme}//${approved.host}${port === 80 || port === 443 ? '' : `:${port}`}${target.path}`;
+    const hostHeader = hostHeaderFor(target.scheme, approved.host, port);
+    const from = `${target.scheme}//${hostHeader}${target.path}`;
+    let destroyedOnLimit = false;
+    let settled = false;
     const send = (target.scheme === 'https:' ? httpsRequest : httpRequest)(
       {
         protocol: target.scheme,
@@ -259,7 +273,7 @@ function connect(target: NetworkTarget, approved: NetworkTarget, { maxBytes, tim
         port,
         path: target.path,
         method: 'GET',
-        ...(target.scheme === 'https:' ? { servername: approved.host } : {}),
+        ...(target.scheme === 'https:' ? { servername: tlsServername(approved.host) } : {}),
         headers: { host: hostHeader, accept: '*/*' },
         lookup: pinnedLookup(address),
         agent: false,
@@ -270,32 +284,57 @@ function connect(target: NetworkTarget, approved: NetworkTarget, { maxBytes, tim
         let shown = 0;
         let truncated = false;
         const chunks: Buffer[] = [];
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve({
+            status: response.statusCode ?? 0,
+            location: typeof response.headers.location === 'string' ? response.headers.location : '',
+            contentType: typeof response.headers['content-type'] === 'string' ? response.headers['content-type'] : '',
+            bytes,
+            shownBytes: shown,
+            head: Buffer.concat(chunks).toString('utf8'),
+            truncated,
+            from,
+            address,
+          });
+        };
         response.on('data', (chunk: Buffer) => {
+          if (destroyedOnLimit) return;
           bytes += chunk.length;
           if (shown >= maxBytes) {
             truncated = true;
+            destroyedOnLimit = true;
+            response.destroy();
             return;
           }
           const keep = chunk.subarray(0, maxBytes - shown);
           chunks.push(keep);
           shown += keep.length;
-          truncated = truncated || keep.length < chunk.length;
+          if (keep.length < chunk.length) {
+            truncated = true;
+            destroyedOnLimit = true;
+            response.destroy();
+          }
         });
-        response.once('end', () => resolve({
-          status: response.statusCode ?? 0,
-          location: typeof response.headers.location === 'string' ? response.headers.location : '',
-          contentType: typeof response.headers['content-type'] === 'string' ? response.headers['content-type'] : '',
-          bytes,
-          shownBytes: shown,
-          head: Buffer.concat(chunks).toString('utf8'),
-          truncated,
-          from,
-          address,
-        }));
-        response.once('error', reject);
+        response.once('end', finish);
+        response.once('close', () => {
+          if (destroyedOnLimit) finish();
+        });
+        response.once('error', (error) => {
+          if (destroyedOnLimit) {
+            finish();
+            return;
+          }
+          if (settled) return;
+          settled = true;
+          reject(error);
+        });
       },
     );
     send.once('error', (error) => {
+      if (destroyedOnLimit || settled) return;
+      settled = true;
       if (signal?.aborted) {
         reject(new KernelError('fetch_cancelled', { cause: error, detail: 'the request was cancelled' }));
         return;
@@ -331,7 +370,15 @@ export async function fetchTarget(approved: NetworkTarget, { maxBytes, timeoutMs
     if (!connectedAddresses.includes(answer.address)) connectedAddresses.push(answer.address);
     if (answer.status >= 300 && answer.status < 400 && answer.location !== '') {
       if (hop === redirectLimit) throw new KernelError('fetch_redirect_limit', { detail: `${approved.url} redirected more than ${redirectLimit} times` });
-      const next = new URL(answer.location, answer.from);
+      let next: URL;
+      try {
+        next = new URL(answer.location, answer.from);
+      } catch (error) {
+        throw new KernelError('fetch_redirect_denied', {
+          cause: error,
+          detail: `${answer.from} returned an invalid redirect location: ${answer.location}`,
+        });
+      }
       if (next.origin !== new URL(approved.url).origin) {
         throw new KernelError('fetch_redirect_denied', {
           detail: `${answer.from} redirects to ${next.origin}, another origin; the approval covered ${approved.url}`,
@@ -412,8 +459,7 @@ export async function postJsonTarget(approved: NetworkTarget, { body, bearer, ma
   let url: URL;
   try { url = new URL(approved.url); }
   catch { throw new KernelError('post_target_invalid'); }
-  const host = approved.host.startsWith('[') && approved.host.endsWith(']')
-    ? approved.host.slice(1, -1) : approved.host;
+  const host = tlsServername(approved.host);
   const port = Number(approved.port);
   const expectedPort = url.port !== '' ? url.port : url.protocol === 'https:' ? '443' : '80';
   if (url.protocol !== approved.scheme || url.hostname !== approved.host || expectedPort !== approved.port
@@ -425,8 +471,7 @@ export async function postJsonTarget(approved: NetworkTarget, { body, bearer, ma
   const responseLimit = Math.min(maxBytes, POST_RESPONSE_LIMIT);
   const requestTimeout = Math.min(timeoutMs, POST_TIMEOUT_LIMIT);
   const cancel = AbortSignal.any([AbortSignal.timeout(requestTimeout), ...(signal === undefined ? [] : [signal])]);
-  const hostHeader = String(port) === (approved.scheme === 'https:' ? '443' : '80')
-    ? approved.host : `${approved.host}:${port}`;
+  const hostHeader = hostHeaderFor(approved.scheme, approved.host, port);
 
   return new Promise((resolve, reject) => {
     let request: ReturnType<typeof httpRequest> | undefined;

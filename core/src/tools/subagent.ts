@@ -167,6 +167,7 @@ interface ChildRunLifecycle {
   readonly sessionId: string;
   readonly source: 'human' | 'controller';
   readonly prepared?: PreparedSubagentRun;
+  readonly onSlotAcquired?: () => void;
   readonly onStarted: (child: ChildRunStarted) => void;
   readonly onContextPersisted?: () => void;
   readonly onProgress: (event: LoopProgressEvent) => void;
@@ -235,6 +236,7 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
   const maxConcurrentSubagents = concurrency as number;
   let closed = false;
   let active = 0;
+  let starting = 0;
   const registry = new SubrunRegistry(deps.directory, deps.sessionId);
   const configRoot = typeof deps.config.workspaceRoot === 'string' ? deps.config.workspaceRoot
     : typeof deps.config.boundary === 'string' ? deps.config.boundary : process.cwd();
@@ -291,91 +293,109 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
     if (context.runId !== undefined && closedParents.has(context.runId)) throw new KernelError('subagent_parent_not_active');
     const execute = executeSubagent;
     if (execute === undefined) throw new KernelError('subagent_runtime_unavailable');
-    if (active >= maxConcurrentSubagents) throw new KernelError('subagent_concurrency_limit');
-    const prepared = await prepareRun(args, context, true);
-    if (closed || (context.runId !== undefined && closedParents.has(context.runId))) {
-      throw new KernelError(closed ? 'subagent_host_closed' : 'subagent_parent_not_active');
-    }
-    const sessionId = await registry.nextSessionId();
-    if (closed) throw new KernelError('subagent_host_closed');
-    if (context.runId !== undefined && closedParents.has(context.runId)) throw new KernelError('subagent_parent_not_active');
-    registry.prune();
-    const controller = new AbortController();
-    const parentSignal = context.signal;
-    const abortParent = () => controller.abort(parentSignal?.reason);
-    if (parentSignal?.aborted) abortParent();
-    else parentSignal?.addEventListener('abort', abortParent, { once: true });
-    const ready = deferred<SubrunReference>();
-    // The stable control ID is also the durable child Session ID, so a new Host can
-    // resolve it without an in-memory index or a second Session store.
-    const subrunId = sessionId;
-    const record: SubrunRecord = {
-      subrunId,
-      ...(context.runId === undefined ? {} : { parentRunId: context.runId }),
-      ...(context.callId === undefined ? {} : { parentCallId: context.callId }),
-      controller,
-      state: 'starting',
-      phase: 'preparing',
-      pendingApprovals: 0,
-      pendingQuestions: 0,
-      startedAt: Date.now(),
-      updatedAt: Date.now(),
+    if (starting + active >= maxConcurrentSubagents) throw new KernelError('subagent_concurrency_limit');
+    starting += 1;
+    let reservationHeld = true;
+    const releaseReservation = () => {
+      if (!reservationHeld) return;
+      reservationHeld = false;
+      starting -= 1;
     };
-    registry.add(record);
-    let started = false;
-    let referenceReady = false;
-    const work = Promise.resolve().then(() => execute(prepared.args, { ...context, permission: prepared.permission, signal: controller.signal }, {
-      subrunId,
-      sessionId,
-      source,
-      prepared,
-      onStarted: (child) => {
-        record.sessionId = child.sessionId;
-        record.runId = child.runId;
-        record.path = child.path;
-        record.inbox = child.inbox;
-        record.state = 'running';
-        record.phase = 'preparing';
-        record.updatedAt = Date.now();
-        started = true;
-        if (prepared.preset === undefined) {
-          referenceReady = true;
-          ready.resolve(subrunReferenceOf(record));
-        }
-      },
-      ...(prepared.preset === undefined ? {} : {
-        onContextPersisted: () => {
-          referenceReady = true;
-          ready.resolve(subrunReferenceOf(record));
+    let subrunId: string;
+    let ready: ReturnType<typeof deferred<SubrunReference>>;
+    try {
+      const prepared = await prepareRun(args, context, true);
+      if (closed || (context.runId !== undefined && closedParents.has(context.runId))) {
+        throw new KernelError(closed ? 'subagent_host_closed' : 'subagent_parent_not_active');
+      }
+      const sessionId = await registry.nextSessionId();
+      if (closed) throw new KernelError('subagent_host_closed');
+      if (context.runId !== undefined && closedParents.has(context.runId)) throw new KernelError('subagent_parent_not_active');
+      registry.prune();
+      const controller = new AbortController();
+      const parentSignal = context.signal;
+      const abortParent = () => controller.abort(parentSignal?.reason);
+      if (parentSignal?.aborted) abortParent();
+      else parentSignal?.addEventListener('abort', abortParent, { once: true });
+      ready = deferred<SubrunReference>();
+      // The stable control ID is also the durable child Session ID, so a new Host can
+      // resolve it without an in-memory index or a second Session store.
+      subrunId = sessionId;
+      const record: SubrunRecord = {
+        subrunId,
+        ...(context.runId === undefined ? {} : { parentRunId: context.runId }),
+        ...(context.callId === undefined ? {} : { parentCallId: context.callId }),
+        controller,
+        state: 'starting',
+        phase: 'preparing',
+        pendingApprovals: 0,
+        pendingQuestions: 0,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      registry.add(record);
+      let started = false;
+      let referenceReady = false;
+      const work = Promise.resolve().then(() => execute(prepared.args, { ...context, permission: prepared.permission, signal: controller.signal }, {
+        subrunId,
+        sessionId,
+        source,
+        prepared,
+        onSlotAcquired: releaseReservation,
+        onStarted: (child) => {
+          record.sessionId = child.sessionId;
+          record.runId = child.runId;
+          record.path = child.path;
+          record.inbox = child.inbox;
+          record.state = 'running';
+          record.phase = 'preparing';
+          record.updatedAt = Date.now();
+          started = true;
+          if (prepared.preset === undefined) {
+            referenceReady = true;
+            ready.resolve(subrunReferenceOf(record));
+          }
         },
-      }),
-      onProgress: (event) => {
-        record.phase = event.kind === 'phase' ? event.phase : event.phase;
+        ...(prepared.preset === undefined ? {} : {
+          onContextPersisted: () => {
+            referenceReady = true;
+            ready.resolve(subrunReferenceOf(record));
+          },
+        }),
+        onProgress: (event) => {
+          record.phase = event.kind === 'phase' ? event.phase : event.phase;
+          record.updatedAt = Date.now();
+        },
+      }));
+      record.work = work.then((result) => {
+        record.result = result;
+        const nested = typeof result.result === 'object' && result.result !== null ? result.result as Record<string, unknown> : undefined;
+        const resultState = nested?.state;
+        record.state = resultState === 'completed' ? 'completed' : resultState === 'cancelled' ? 'cancelled' : 'failed';
+        const diagnostic = typeof nested?.diagnostic === 'object' && nested.diagnostic !== null
+          ? nested.diagnostic as Record<string, unknown> : undefined;
+        if (typeof diagnostic?.code === 'string') record.errorCode = diagnostic.code;
+        else if (record.state === 'failed' && typeof nested?.code === 'string') record.errorCode = nested.code;
         record.updatedAt = Date.now();
-      },
-    }));
-    record.work = work.then((result) => {
-      record.result = result;
-      const nested = typeof result.result === 'object' && result.result !== null ? result.result as Record<string, unknown> : undefined;
-      const resultState = nested?.state;
-      record.state = resultState === 'completed' ? 'completed' : resultState === 'cancelled' ? 'cancelled' : 'failed';
-      const diagnostic = typeof nested?.diagnostic === 'object' && nested.diagnostic !== null
-        ? nested.diagnostic as Record<string, unknown> : undefined;
-      if (typeof diagnostic?.code === 'string') record.errorCode = diagnostic.code;
-      else if (record.state === 'failed' && typeof nested?.code === 'string') record.errorCode = nested.code;
-      record.updatedAt = Date.now();
-      record.completedAt = record.updatedAt;
-      if (!referenceReady) ready.reject(new KernelError(record.errorCode ?? (started ? 'agent_preset_snapshot_unavailable' : 'subagent_failed')));
-      return result;
-    }, (error: unknown) => {
-      record.state = controller.signal.aborted ? 'cancelled' : 'failed';
-      record.errorCode = stableErrorCode(error);
-      record.updatedAt = Date.now();
-      record.completedAt = record.updatedAt;
-      if (!referenceReady) ready.reject(error);
+        record.completedAt = record.updatedAt;
+        if (!referenceReady) ready.reject(new KernelError(record.errorCode ?? (started ? 'agent_preset_snapshot_unavailable' : 'subagent_failed')));
+        return result;
+      }, (error: unknown) => {
+        record.state = controller.signal.aborted ? 'cancelled' : 'failed';
+        record.errorCode = stableErrorCode(error);
+        record.updatedAt = Date.now();
+        record.completedAt = record.updatedAt;
+        if (!referenceReady) ready.reject(error);
+        throw error;
+      }).finally(() => {
+        releaseReservation();
+        parentSignal?.removeEventListener('abort', abortParent);
+      });
+      void record.work.catch(() => undefined);
+    } catch (error) {
+      releaseReservation();
       throw error;
-    }).finally(() => parentSignal?.removeEventListener('abort', abortParent));
-    void record.work.catch(() => undefined);
+    }
     try { return await ready.promise; }
     catch (error) {
       registry.delete(subrunId);
@@ -603,18 +623,37 @@ export function createSubagentPlugin(deps: SubagentDeps): SubagentRuntime {
           if (typeof args.task !== 'string' || args.task.trim() === '') {
             throw new KernelError('subagent_task_required', { detail: 'the derived agent needs a task to work on' });
           }
-          const prepared = lifecycle?.prepared ?? await prepareRun(args, { signal, permission, runId, executionId, callId }, true);
-          args = prepared.args;
-          const childTask = args.task;
-          if (typeof childTask !== 'string' || childTask.trim() === '') throw new KernelError('subagent_task_required');
+          let localReserved = false;
+          const releaseLocal = () => {
+            if (!localReserved) return;
+            localReserved = false;
+            starting -= 1;
+          };
+          if (lifecycle === undefined) {
+            if (starting + active >= maxConcurrentSubagents) {
+              throw new KernelError('subagent_concurrency_limit', { detail: `at most ${maxConcurrentSubagents} derived runs can be active for this parent` });
+            }
+            starting += 1;
+            localReserved = true;
+          }
+          let prepared: PreparedSubagentRun;
+          let childTask: string;
+          try {
+            prepared = lifecycle?.prepared ?? await prepareRun(args, { signal, permission, runId, executionId, callId }, true);
+            args = prepared.args;
+            if (typeof args.task !== 'string' || args.task.trim() === '') throw new KernelError('subagent_task_required');
+            childTask = args.task;
+          } catch (error) {
+            releaseLocal();
+            throw error;
+          }
           const outputContract = prepared.outputContract;
           const limits = prepared.limits;
           const provider = prepared.provider;
           const childPermission = prepared.permission;
-          if (active >= maxConcurrentSubagents) {
-            throw new KernelError('subagent_concurrency_limit', { detail: `at most ${maxConcurrentSubagents} derived runs can be active for this parent` });
-          }
           const parentTools = new Set(kernel.manifest().map(({ name }) => name));
+          if (lifecycle === undefined) releaseLocal();
+          else lifecycle.onSlotAcquired?.();
           active += 1;
           try {
             const id = lifecycle?.sessionId ?? await registry.nextSessionId();

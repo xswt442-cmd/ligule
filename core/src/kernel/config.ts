@@ -14,15 +14,36 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+const UNSAFE_CONFIG_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function assertSafeConfigValue(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) assertSafeConfigValue(item);
+    return;
+  }
+  if (isPlainObject(value)) {
+    for (const key of Object.getOwnPropertyNames(value)) {
+      if (UNSAFE_CONFIG_KEYS.has(key)) {
+        throw new KernelError('config_key_unsafe', { detail: key });
+      }
+      assertSafeConfigValue(value[key]);
+    }
+  }
+}
+
+function mergeValidatedInto(target: Record<string, unknown>, source: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(source)) {
+    if (isPlainObject(value) && isPlainObject(target[key])) mergeValidatedInto(target[key], value);
+    else target[key] = structuredClone(value);
+  }
+}
+
 // 嵌套对象按键合并，数组和标量整体替换，避免拼接出任何配置层都未声明的数组。
 // 同一函数也用于合并单层中的多条命令行覆盖。
 export function mergeInto(target: Record<string, unknown>, source: Record<string, unknown>): void {
-  for (const [key, value] of Object.entries(source)) {
-    // 拒绝 `__proto__` 键，防止不可信的项目配置修改对象原型并影响后续权限判定。
-    if (key === '__proto__') throw new KernelError('config_key_unsafe', { detail: key });
-    if (isPlainObject(value) && isPlainObject(target[key])) mergeInto(target[key], value);
-    else target[key] = structuredClone(value);
-  }
+  // 拒绝 `__proto__`、`constructor`、`prototype` 键，防止不可信的项目配置修改对象原型并影响后续权限判定。
+  assertSafeConfigValue(source);
+  mergeValidatedInto(target, source);
 }
 
 function deepFreeze(value: unknown): unknown {

@@ -98,3 +98,37 @@ test('settings.catalog shows active-session extension load failures without loca
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('settings.catalog classifies extensions outside installedDirectory as user-configured', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-extension-classify-'));
+  const installedDirectory = resolve(join(root, 'installed'));
+  const installedPath = resolve(join(installedDirectory, 'local.js'));
+  const configuredPath = resolve(join(root, 'configured', 'external.js'));
+  await Promise.all([
+    mkdir(installedDirectory, { recursive: true }),
+    mkdir(join(root, 'configured'), { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(installedPath, 'export default () => () => {};\n', 'utf8'),
+    writeFile(configuredPath, 'export default () => () => {};\n', 'utf8'),
+  ]);
+  try {
+    await withTuiHost(async ({ client, projectDirectory }) => {
+      const catalog = await client.request('settings.catalog', { projectRoot: projectDirectory }) as Catalog;
+      const localEntry = catalog.extensions.find((item) => item.name === 'local');
+      const externalEntry = catalog.extensions.find((item) => item.name === 'external');
+      assert.equal(localEntry?.source, 'user-installed');
+      assert.equal(externalEntry?.source, 'user-configured');
+    }, {
+      permissionControl: true,
+      extensions: {
+        installedDirectory,
+        paths: [installedPath, configuredPath],
+        ignored: [],
+        installNames: { [installedPath]: 'local', [configuredPath]: 'external' },
+      },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

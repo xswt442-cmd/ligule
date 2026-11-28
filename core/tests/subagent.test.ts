@@ -595,6 +595,47 @@ test('configured child concurrency limits live work and releases capacity after 
   }
 });
 
+test('concurrent subagent.start calls at the limit fail fast before allocating extra session IDs', async () => {
+  const boundary = await workspace();
+  const config = createConfig({ user: { boundary, loop: { maxConcurrentSubagents: 1 } } });
+  const chain = createDecisionChain({ mode: 'auto' });
+  const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-reserve-'), id: 'parent' });
+  let release: (value?: unknown) => void = () => {};
+  const gate = new Promise((resolve) => { release = resolve; });
+  const provider = { name: 'slow', model: 'slow', capabilities: {}, async *stream(): AsyncGenerator<ProviderEvent> {
+    await gate;
+    yield { type: 'text', text: 'done' };
+  } };
+  const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
+  const plugin = createSubagentPlugin({
+    config,
+    provider,
+    chain,
+    prompt: { staticPrefix: '' },
+    directory: session.directory,
+    sessionId: 'parent',
+    plugins: [minimalPlugin],
+  });
+  plugin.setup(kernel);
+
+  const parentRunId = '123e4567-e89b-42d3-a456-426614174000';
+  const first = plugin.start({ task: 'first' }, { permission: fullAccess, runId: parentRunId });
+  const second = plugin.start({ task: 'second' }, { permission: fullAccess, runId: parentRunId });
+  let ref: Awaited<typeof first>;
+  try {
+    await assert.rejects(second, { code: 'subagent_concurrency_limit' });
+    ref = await first;
+    assert.equal(ref.sessionId, 'parent.sub-1');
+  } finally {
+    release();
+  }
+  const afterWait = await plugin.wait([ref.subrunId], parentRunId, 5_000);
+  assert.equal(afterWait.subruns[0]?.state, 'completed');
+  const third = await plugin.start({ task: 'third' }, { permission: fullAccess, runId: parentRunId });
+  assert.equal(third.sessionId, 'parent.sub-2');
+  await plugin.wait([third.subrunId], parentRunId, 5_000);
+});
+
 test('rebuilding the parent continues child session numbering without reusing old records', async () => {
   const boundary = await workspace();
   const config = createConfig({ user: { boundary } });

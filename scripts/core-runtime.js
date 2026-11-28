@@ -2,7 +2,7 @@ import { lstat, readFile, readdir, stat } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import { assertSymlinksInside } from './runtime-tree.js';
 
-const CORE_RUNTIME_PATHS = ['dist', 'modes', 'README.md', 'LICENSE'];
+const CORE_RUNTIME_PATHS = ['dist', 'modes', 'agents', 'README.md', 'LICENSE'];
 const REBUILD_GUIDANCE = 'Run `pnpm run build:core`, then `pnpm run prepare-runtime`.';
 
 export async function assertCoreRuntimeMatches(sourceCore, deployedCore) {
@@ -34,7 +34,7 @@ export async function assertCoreRuntimeMatches(sourceCore, deployedCore) {
 }
 
 async function assertCorePayloadSymlinks(coreRoot) {
-  for (const path of ['dist', 'modes']) {
+  for (const path of ['dist', 'modes', 'agents']) {
     const absolutePath = join(coreRoot, path);
     const info = await lstatOrMissing(absolutePath);
     if (info?.isDirectory()) await assertSymlinksInside(absolutePath);

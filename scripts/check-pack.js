@@ -54,7 +54,10 @@ try {
   const tarballPath = join(packDir, tarball);
   if (!existsSync(tarballPath)) throw new Error(`npm pack did not produce ${tarballPath}`);
 
-  execFileSync('tar', ['-xzf', tarballPath, '-C', work], { cwd: repo, stdio: 'inherit' });
+  const tarExecutable = process.platform === 'win32'
+    ? join(process.env.SystemRoot ?? 'C:\\WINDOWS', 'System32', 'tar.exe')
+    : 'tar';
+  execFileSync(tarExecutable, ['-xzf', tarballPath, '-C', work], { cwd: repo, stdio: 'inherit' });
   const shipped = join(work, 'package');
   const manifest = JSON.parse(readFileSync(join(shipped, 'package.json'), 'utf8'));
   if (manifest.bin?.ligule !== './dist/cli.js') throw new Error(`${tarball} is missing the ligule CLI entry required by the MCP server command`);

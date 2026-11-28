@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
-const testplaceTemp = join(repository, '..', 'testplace', 'tmp');
+const testplaceTemp = join(repository, 'testplace', 'tmp');
 const harborVersion = '0.25.0';
 
 function run(command: string, args: readonly string[], { label, env }: { label: string; env: NodeJS.ProcessEnv }): void {

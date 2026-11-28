@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { mkdirSync } from 'node:fs';
 import { access, readFile, realpath, stat } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
 import { SETTLE_GRACE_MS, settleWithin } from '../kernel/settle.js';
 import { createTaskBudget, type TaskBudget, type TaskWork } from '../kernel/task-budget.js';
@@ -71,7 +71,7 @@ import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel, readPolicyOverride } from '../session/format.js';
 import { SPILL_NAME } from '../session/spill.js';
 import { assertNoLegacyTrashConfig, boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from '../capability/limits.js';
-import { relativePathWithin, resolveWithin } from '../capability/paths.js';
+import { isWithin, relativePathWithin, resolveWithin } from '../capability/paths.js';
 import { runManagedExec, type ExecControlArguments, type ExecRunContext } from '../capability/exec.js';
 import { createFiniteCommandRegistry, type FiniteCommandOwner } from '../capability/finite-command.js';
 import { createProcessOwnership } from './process-ownership.js';
@@ -4744,17 +4744,17 @@ export function createHost({
           const skills = env.skillRegistry ?? await discoverSkills(directories);
           const sourceLabels = ['project (.ligule/skills)', 'project (.agents/skills)', 'user (.ligule/skills)', 'user (~/.agents/skills)'];
           const skillSource = (root: string) => sourceLabels[directories.findIndex((directory) => {
-            const child = relative(resolve(directory), resolve(root));
-            return child !== '' && child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child);
+            const resolvedDirectory = resolve(directory);
+            const resolvedRoot = resolve(root);
+            return resolvedRoot !== resolvedDirectory && isWithin(resolvedDirectory, resolvedRoot);
           })] ?? 'unknown';
           const environmentSessions = [...sessions.values()].filter((state) => state.environment === env);
           const extensionStates = environmentSessions.flatMap((state) => state.extensions.loaded);
           const installName = (path: string) => env.extensions.installNames?.[resolve(path)] ?? basename(path, '.js');
           const extensions = env.extensions.paths.map((path) => {
             const installedDirectory = env.extensions.installedDirectory;
-            const installedPath = installedDirectory === undefined ? '..' : relative(resolve(installedDirectory), resolve(path));
-            const installed = installedPath !== '..' && !installedPath.startsWith(`..${process.platform === 'win32' ? '\\\\' : '/'}`)
-              && !isAbsolute(installedPath);
+            const installed = installedDirectory !== undefined
+              && isWithin(resolve(installedDirectory), resolve(path));
             return {
               name: installName(path),
               source: installed ? 'user-installed' : 'user-configured',

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { link, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, parse } from 'node:path';
 import { isWithin, resolveWithin, KernelError } from '../dist/index.js';
 import { relativePathWithin } from '../dist/capability/paths.js';
 import { hasCode } from './helpers/assertions.ts';
@@ -134,4 +134,10 @@ test('a boundary that does not exist reports its own code', async () => {
       (error) => error instanceof KernelError && error.code === 'boundary_missing',
     );
   });
+});
+
+test('a new file directly under the filesystem root resolves cleanly', async () => {
+  const rootDir = parse(process.cwd()).root;
+  const resolved = await resolveWithin(rootDir, 'ligule-nonexistent-root-file.txt', { forWrite: true });
+  assert.equal(resolved, join(await realpath(rootDir), 'ligule-nonexistent-root-file.txt'));
 });

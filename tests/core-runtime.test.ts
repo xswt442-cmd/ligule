@@ -29,6 +29,7 @@ async function withCoreTrees(action: (trees: CoreTrees) => Promise<void>) {
     'dist/index.js': 'export const version = 1;\n',
     'dist/host/desktop-entry.js': 'export {};\n',
     'modes/minimal.toml': 'name = "minimal"\n',
+    'agents/research.toml': 'name = "research"\n',
     'README.md': '# Core\n',
     'LICENSE': 'license text\n',
   };
@@ -63,6 +64,11 @@ test('rejects modified, missing, and extra Core runtime files with rebuild guida
       await writeFile(join(deployed, 'dist/stale.js'), 'export {};\n', 'utf8');
       await assert.rejects(assertCoreRuntimeMatches(source, deployed), /Core runtime .*build:core.*prepare-runtime/u);
     });
+    await rm(join(deployed, 'dist/stale.js'));
+    await t.test('missing agent preset', async () => {
+      await rm(join(deployed, 'agents/research.toml'));
+      await assert.rejects(assertCoreRuntimeMatches(source, deployed), /Core runtime .*build:core.*prepare-runtime/u);
+    });
   });
 });
 
@@ -93,6 +99,7 @@ test('accepts a deployed Core workspace link inside its package tree and compare
       'dist/index.js': await readFile(join(deployed, 'dist/index.js'), 'utf8'),
       'dist/host/desktop-entry.js': await readFile(join(deployed, 'dist/host/desktop-entry.js'), 'utf8'),
       'modes/minimal.toml': await readFile(join(deployed, 'modes/minimal.toml'), 'utf8'),
+      'agents/research.toml': await readFile(join(deployed, 'agents/research.toml'), 'utf8'),
       'README.md': await readFile(join(deployed, 'README.md'), 'utf8'),
       'LICENSE': await readFile(join(deployed, 'LICENSE'), 'utf8'),
     });
