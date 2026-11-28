@@ -15,12 +15,12 @@ import {
   type DelegationSpec,
 } from '../delegation.js';
 import {
-  assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationMode, assertDelegationModelSelection, assertDelegationPermission,
+  assertDelegationMode, assertDelegationModelSelection, assertDelegationPermission,
   assertDelegationPolicy, boundedOutputTokens, createDelegationGrant, delegationPathOf,
   listDelegationGrants, recordDelegationEvent, revokeDelegationGrant,
   type CreateDelegationGrantInput, type DelegationGrant, type DelegationPolicy,
 } from './agent-control.js';
-import { mcpServerTrust, mcpTrustKey, mcpTrustPathOf } from './mcp-trust.js';
+import { mcpTrustKey } from './mcp-trust.js';
 import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionContextOptions, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { createFileWriteQueue } from '../kernel/file-write-queue.js';
@@ -91,17 +91,16 @@ import { browserView, createStatusView, sessionPermissionView } from './status-v
 import { verifySideSelection } from './side-selection.js';
 import { createSearchSupport } from './search.js';
 import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
-import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../capability/browser-policy.js';
+import { BROWSER_SERVER } from '../capability/browser-policy.js';
 import { createScreenshotPlugin } from '../tools/screenshot.js';
 import { createMediaStore } from '../capability/media.js';
 import { checkedImageReferences } from '../media.js';
 import { createSkillPlugin } from '../tools/skill.js';
-import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
 import { createCompactPlugin } from '../tools/compact.js';
 import { createCustomToolsPlugin, discoverCustomTools } from '../tools/custom.js';
 import { createAskUserPlugin } from '../tools/ask-user.js';
-import { createMcpRegistry, mcpServerConfigs } from '../capability/mcp.js';
+import { mcpServerConfigs } from '../capability/mcp.js';
 import { createRunSteeringInbox } from '../kernel/run-steering.js';
 import { discoverModels } from '../model/discovery.js';
 import { apiRoot } from '../model/http.js';
@@ -130,6 +129,7 @@ import { runEvidenceReferences } from '../session/run-evidence.js';
 import { checkEventOf, sampleCheckScope } from './checks.js';
 import { parseInitialGenerationSettings } from './session-initial-settings.js';
 import { settingsToolCatalog as buildSettingsToolCatalog } from './tool-catalog.js';
+import { createSessionMcp } from './session-mcp.js';
 import type {
   AdoptionResult, DelegatedRunResult, EnvironmentSeed, Host, HostClientConnection, HostConfigSnapshot, HostOptions,
   HostProgressSnapshot, HostSessionBase, HostSessionState, InitialSessionSettings, PendingRunAsk, ProjectEnvironment, RuntimeConfig,
@@ -2088,59 +2088,26 @@ export function createHost({
       // 在加载诊断和提示词摘要中报告格式错误或被同名技能覆盖的技能。
       logger?.log?.('skill is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
-    // 只有配置了 MCP Server 时才注册 MCP 工具。
-    const assertMcpAccess = (server: string): void => {
-      if (server !== BROWSER_SERVER) return;
-      if (state.permissionChanging) throw new KernelError('permission_change_in_progress');
-      const denied = permissionDenial(state.permission, 'external');
-      if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
-      if (state.browserPaused) throw new KernelError('browser_stopped');
-    };
-    const sessionMcpConfigs = await Promise.all(mcpConfigs.map(server => server.name === BROWSER_SERVER ? browser.session(id) : server));
-    const mcp = createMcpRegistry(sessionMcpConfigs, { toolPolicy: browserToolPolicy, assertServerAccess: assertMcpAccess,
-      afterCall: name => name === BROWSER_SERVER ? browser.clearSession(id) : Promise.resolve() });
+    const sessionMcp = createSessionMcp({
+      projectRoot: env.projectRoot,
+      configuredServers: mcpConfigs,
+      browser,
+      state,
+      async currentServers() {
+        const current = await currentMcpConfigs(env);
+        await stopMcpServersWithChangedConfig(env, current);
+        return current;
+      },
+      async activeProjectGrant() {
+        const grant = await activeDelegation();
+        if (grant !== undefined) await assertDelegationProject(grant, env.projectRoot);
+        return grant;
+      },
+      supportsImages: () => live.imageInput === true,
+    });
+    const mcp = await sessionMcp.registryFor(id);
     cleanup.push(() => browser.closeSession(id));
     cleanup.push(() => mcp.close());
-    const authorizeMcpServer = async (server: string): Promise<void> => {
-      if (server === BROWSER_SERVER) {
-        assertMcpAccess(server);
-        await browser.verify();
-      }
-      const configured = mcpConfigs.find((entry) => entry.name === server);
-      if (configured === undefined) throw new KernelError('mcp_server_unknown', { detail: server });
-      const currentServers = await currentMcpConfigs(env);
-      await stopMcpServersWithChangedConfig(env, currentServers);
-      const current = currentServers.find((entry) => entry.name === server);
-      if (current === undefined || current.identityDigest !== configured.identityDigest) {
-        throw new KernelError('mcp_server_config_changed', { detail: server });
-      }
-      const sessionTrust = state.mcpTrust.get(mcpTrustKey(server, configured.identityDigest));
-      const trust = sessionTrust ?? await mcpServerTrust(mcpTrustPathOf(), env.projectRoot, server, configured.identityDigest);
-      if (trust?.trusted !== true) throw new KernelError('mcp_server_untrusted', { detail: server });
-      const grant = await activeDelegation();
-      if (grant !== undefined) {
-        await assertDelegationProject(grant, env.projectRoot);
-        assertDelegationMcpServer(grant, server);
-      }
-    };
-    const authorizeMcpTool = async (server: string, tool: string): Promise<void> => {
-      await authorizeMcpServer(server);
-      if (server === BROWSER_SERVER) {
-        if (browserToolPolicy(server, tool, { type: 'object', properties: {} }) === undefined) throw new KernelError('browser_tool_denied');
-        if (tool === 'browser_take_screenshot' && live.imageInput !== true) throw new KernelError('model_image_input_unsupported');
-      }
-      const grant = await activeDelegation();
-      if (grant !== undefined) {
-        await assertDelegationProject(grant, env.projectRoot);
-        assertDelegationMcpTool(grant, `mcp:${server}/${tool}`);
-      }
-    };
-    const mcpAuthorization: McpAuthorization = {
-      authorizeArguments: (server, tool, args) => { if (server === BROWSER_SERVER) assertBrowserArguments(tool, args); },
-      authorizeServer: authorizeMcpServer,
-      authorizeTool: authorizeMcpTool,
-      identityDigest: (server) => mcpConfigs.find((entry) => entry.name === server)?.identityDigest,
-    };
     // 用户在数据根 tools/ 声明的命令工具与技能同源：发现于用户目录，加载不授予额外权限，
     // 执行仍按 exec 能力走 Permission 与 Policy 判定链。
     const customTools = await discoverCustomTools(join(dataRoot(), 'tools'));
@@ -2230,15 +2197,7 @@ export function createHost({
       requestDiagnosticsEnabled: () => state.requestDiagnostics.enabled,
       onRequestDiagnostic: (diagnostic) => appendRequestDiagnostic(state.requestDiagnostics, diagnostic),
       onSubrunMessageAccepted: (runId) => settleRunAsks(state, runId),
-      createMcp: async (childId, childMedia) => {
-        const servers = await Promise.all(mcpConfigs.map(server => server.name === BROWSER_SERVER ? browser.session(childId) : server));
-        const childRegistry = createMcpRegistry(servers, { toolPolicy: browserToolPolicy, assertServerAccess: assertMcpAccess,
-          afterCall: name => name === BROWSER_SERVER ? browser.clearSession(childId) : Promise.resolve() });
-        state.childMcp.set(childRegistry, childId);
-        return { plugin: createMcpPlugin(childRegistry, mcpAuthorization, { media: childMedia,
-          sourceFor: server => server === BROWSER_SERVER ? 'browser' : undefined }),
-          close: async () => { try { await childRegistry.close(); await browser.closeSession(childId); } finally { state.childMcp.delete(childRegistry); } } };
-      },
+      createMcp: sessionMcp.child,
       modePaths,
       ...(modePaths === undefined ? {} : {
         presetDirectories: agentPresetDirectories(env.projectRoot, join(dirname(modePaths.shipped), 'agents'), dirname(modePaths.user)),
@@ -2338,8 +2297,7 @@ export function createHost({
       connection.notify({ notify: 'view.ready', sessionId: id, requestId });
       return { status: 'sent', opened: false, read: false };
     } : undefined;
-    const assembly = loadAssembly(kernel, [...basePlugins, createMcpPlugin(mcp, mcpAuthorization, { media,
-      sourceFor: server => server === BROWSER_SERVER ? 'browser' : undefined }), createTodoWritePlugin({ session }),
+    const assembly = loadAssembly(kernel, [...basePlugins, sessionMcp.pluginFor(mcp, media), createTodoWritePlugin({ session }),
       createReadImagePlugin({ media, supportsImages: () => live.imageInput === true }),
       createReadDocumentPlugin({ media, supportsImages: () => live.imageInput === true }),
       createPresentPlugin({ sessionId: id, workspaceRoot: env.projectRoot, session,
