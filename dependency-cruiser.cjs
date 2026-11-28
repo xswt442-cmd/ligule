@@ -92,6 +92,12 @@ module.exports = {
       to: { path: '^core/src/(host|capability)/' },
     },
     {
+      name: 'capability-no-kernel-runtime-imports',
+      severity: 'error',
+      from: { path: '^core/src/capability/' },
+      to: { path: '^core/src/kernel/', dependencyTypesNot: ['type-only'] },
+    },
+    {
       name: 'core-no-cycles',
       severity: 'error',
       from: { path: '^core/src/' },

@@ -1,0 +1,201 @@
+import { KernelError } from './errors.js';
+
+// Permission describes resource access for a Session. Policy separately decides
+// whether a permitted operation needs approval or must be refused.
+
+export type PermissionProfile = 'read-only' | 'workspace-write' | 'full-access';
+export type PermissionNetwork = 'policy' | 'unrestricted' | 'disabled';
+export type PermissionEnforcement = 'full' | 'partial' | 'unavailable';
+export type PermissionAccess = 'read' | 'write' | 'exec' | 'network' | 'interaction' | 'external' | 'inherit' | 'unknown';
+
+export interface PermissionCapabilities {
+  readonly filesystemRead: PermissionEnforcement;
+  readonly filesystemWrite: PermissionEnforcement;
+  readonly network: PermissionEnforcement;
+  readonly process: PermissionEnforcement;
+}
+
+export interface PermissionProfileCapabilities {
+  readonly readOnly: PermissionEnforcement;
+  readonly workspaceWrite: PermissionEnforcement;
+}
+
+export interface PermissionContext {
+  readonly profile: PermissionProfile;
+  readonly network: PermissionNetwork;
+  readonly capabilities: PermissionCapabilities;
+  readonly profiles: PermissionProfileCapabilities;
+  readonly limitations: readonly string[];
+  readonly partialWorkspaceWriteConfirmationRequired: boolean;
+  readonly partialWorkspaceWriteConfirmed: boolean;
+  readonly workspaceTrusted: boolean;
+}
+
+export interface PermissionContextOptions {
+  readonly profiles?: PermissionProfileCapabilities;
+  readonly limitations?: readonly string[];
+  readonly partialWorkspaceWriteConfirmationRequired?: boolean;
+  readonly partialWorkspaceWriteConfirmed?: boolean;
+  readonly workspaceTrusted?: boolean;
+}
+
+export interface PermissionDenial {
+  readonly code: string;
+  readonly reason: string;
+}
+
+const PROFILE_VALUES: readonly PermissionProfile[] = ['read-only', 'workspace-write', 'full-access'];
+const NETWORK_VALUES: readonly PermissionNetwork[] = ['policy', 'unrestricted', 'disabled'];
+const ENFORCEMENT_VALUES: readonly PermissionEnforcement[] = ['full', 'partial', 'unavailable'];
+const ACCESS_VALUES: readonly PermissionAccess[] = ['read', 'write', 'exec', 'network', 'interaction', 'external', 'inherit', 'unknown'];
+
+export function isPermissionAccess(value: unknown): value is PermissionAccess {
+  return ACCESS_VALUES.includes(value as PermissionAccess);
+}
+
+export function createPermissionContext(
+  profile: unknown,
+  network: unknown,
+  capabilities: unknown,
+  options: PermissionContextOptions = {},
+): PermissionContext {
+  if (!PROFILE_VALUES.includes(profile as PermissionProfile)) throw new KernelError('permission_profile_invalid');
+  if (!NETWORK_VALUES.includes(network as PermissionNetwork)) throw new KernelError('permission_network_mode_invalid');
+  if (typeof capabilities !== 'object' || capabilities === null || Array.isArray(capabilities)) {
+    throw new KernelError('permission_capabilities_invalid');
+  }
+  const record = capabilities as Record<string, unknown>;
+  const keys = ['filesystemRead', 'filesystemWrite', 'network', 'process'];
+  if (Object.keys(record).length !== keys.length
+    || keys.some((key) => !ENFORCEMENT_VALUES.includes(record[key] as PermissionEnforcement))) {
+    throw new KernelError('permission_capabilities_invalid');
+  }
+  const filesystemReady = record.filesystemRead !== 'unavailable' && record.filesystemWrite !== 'unavailable';
+  const defaultProfiles: PermissionProfileCapabilities = {
+    readOnly: filesystemReady && record.network === 'full' ? 'full' : 'unavailable',
+    workspaceWrite: filesystemReady ? 'partial' : 'unavailable',
+  };
+  const profiles = options.profiles ?? defaultProfiles;
+  if (typeof profiles !== 'object' || profiles === null
+    || Object.keys(profiles).length !== 2
+    || !ENFORCEMENT_VALUES.includes(profiles.readOnly)
+    || !ENFORCEMENT_VALUES.includes(profiles.workspaceWrite)) {
+    throw new KernelError('permission_capabilities_invalid');
+  }
+  const limitations = options.limitations ?? [];
+  if (!Array.isArray(limitations) || limitations.some((limitation) => typeof limitation !== 'string')) {
+    throw new KernelError('permission_capabilities_invalid');
+  }
+  const partialWorkspaceWriteConfirmationRequired = options.partialWorkspaceWriteConfirmationRequired ?? false;
+  const partialWorkspaceWriteConfirmed = options.partialWorkspaceWriteConfirmed ?? false;
+  const workspaceTrusted = options.workspaceTrusted ?? false;
+  if (typeof partialWorkspaceWriteConfirmationRequired !== 'boolean' || typeof partialWorkspaceWriteConfirmed !== 'boolean'
+    || typeof workspaceTrusted !== 'boolean') {
+    throw new KernelError('permission_capabilities_invalid');
+  }
+  return Object.freeze({
+    profile: profile as PermissionProfile,
+    network: network as PermissionNetwork,
+    capabilities: Object.freeze({
+      filesystemRead: record.filesystemRead as PermissionEnforcement,
+      filesystemWrite: record.filesystemWrite as PermissionEnforcement,
+      network: record.network as PermissionEnforcement,
+      process: record.process as PermissionEnforcement,
+    }),
+    profiles: Object.freeze({ readOnly: profiles.readOnly, workspaceWrite: profiles.workspaceWrite }),
+    limitations: Object.freeze([...limitations]),
+    partialWorkspaceWriteConfirmationRequired,
+    partialWorkspaceWriteConfirmed,
+    workspaceTrusted,
+  });
+}
+
+export const DEFAULT_PERMISSION_CONTEXT = createPermissionContext('read-only', 'policy', {
+  filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'unavailable',
+});
+
+export function permissionDenial(permission: PermissionContext, access: PermissionAccess): PermissionDenial | undefined {
+  if (access === 'external' || access === 'unknown') {
+    if (permission.profile !== 'full-access') {
+      return {
+        code: 'permission_external_access_requires_full_access',
+        reason: 'this operation runs outside the session sandbox and requires full-access permission',
+      };
+    }
+    if (permission.network !== 'unrestricted') {
+      return {
+        code: 'permission_external_network_unrestricted_required',
+        reason: 'this external process can use the operating system network without the session network controls',
+      };
+    }
+    if (access === 'external' && permission.capabilities.process !== 'full') {
+      return { code: 'permission_process_isolation_unavailable', reason: 'this platform cannot isolate and manage the external process tree' };
+    }
+  }
+  if (permission.profile === 'full-access') {
+    if (access === 'exec' && permission.network !== 'unrestricted') {
+      return {
+        code: 'permission_network_isolation_unavailable',
+        reason: 'shell network access is limited by session policy, but this platform cannot enforce that restriction',
+      };
+    }
+    if (access === 'exec' && permission.capabilities.process !== 'full') {
+      return { code: 'permission_process_isolation_unavailable', reason: 'this platform cannot isolate and manage the command process tree' };
+    }
+    if (access === 'network' && permission.network === 'disabled') {
+      return { code: 'permission_network_denied', reason: 'network access is disabled for this session' };
+    }
+    return undefined;
+  }
+
+  if ((access === 'write' || access === 'exec')
+    && permission.profile === 'workspace-write'
+    && permission.partialWorkspaceWriteConfirmationRequired
+    && !permission.partialWorkspaceWriteConfirmed) {
+    return {
+      code: 'permission_partial_sandbox_confirmation_required',
+      reason: 'the Windows workspace-write sandbox is partial; the user must trust this project and confirm its limits before writes or commands run',
+    };
+  }
+
+  if (access === 'write' && permission.profile === 'read-only') {
+    return { code: 'permission_read_only', reason: 'this session only permits reads' };
+  }
+  if (access === 'network' && permission.network === 'disabled') {
+    return { code: 'permission_network_denied', reason: 'network access is disabled for this session' };
+  }
+  if (access !== 'exec') return undefined;
+
+  const profileCapability = permission.profile === 'read-only'
+    ? permission.profiles.readOnly
+    : permission.profiles.workspaceWrite;
+  if (profileCapability === 'unavailable') {
+    return {
+      code: 'permission_sandbox_unavailable',
+      reason: permission.profile === 'read-only'
+        ? 'this platform cannot enforce the required read-only filesystem access'
+        : 'this platform cannot provide a workspace-write command sandbox',
+    };
+  }
+
+  const filesystemReady = permission.capabilities.filesystemRead !== 'unavailable'
+    && permission.capabilities.filesystemWrite !== 'unavailable';
+  if (!filesystemReady) {
+    return {
+      code: 'permission_sandbox_unavailable',
+      reason: permission.profile === 'read-only'
+        ? 'this platform cannot enforce the required read-only filesystem access'
+        : 'this platform cannot confine writes to the session workspace',
+    };
+  }
+  if (permission.capabilities.process !== 'full') {
+    return { code: 'permission_process_isolation_unavailable', reason: 'this platform cannot isolate and manage the command process tree' };
+  }
+  if (permission.profile === 'workspace-write' && permission.network !== 'unrestricted' && permission.capabilities.network !== 'full') {
+    return { code: 'permission_network_isolation_unavailable', reason: 'this platform cannot enforce the session network restriction' };
+  }
+  if (permission.profile === 'read-only' && permission.network === 'unrestricted' && permission.capabilities.network !== 'full') {
+    return { code: 'permission_network_isolation_unavailable', reason: 'this platform cannot provide unrestricted networking inside the read-only sandbox' };
+  }
+  return undefined;
+}

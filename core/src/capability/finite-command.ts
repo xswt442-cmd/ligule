@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { KernelError } from '../errors.js';
+import type { ToolContext } from '../kernel/kernel.js';
 import type { TaskWork } from '../kernel/task-budget.js';
 import { decode, type ExecControlArguments, type ExecLogSnapshot, type ManagedExecLease } from './exec.js';
 import {
@@ -957,7 +958,7 @@ export const execControlTool = {
     if (args.action !== 'wait' && args.waitMs !== undefined) throw new KernelError('exec_control_args_invalid');
     if (args.action !== 'logs' && (args.cursor !== undefined || args.limitBytes !== undefined)) throw new KernelError('exec_control_args_invalid');
   },
-  async run(value: unknown, context: import('../kernel/kernel.js').ToolContext) {
+  async run(value: unknown, context: ToolContext) {
     if (context.execController === undefined) throw new KernelError('exec_control_unavailable');
     return await context.execController.control(value as ExecControlArguments, context);
   },

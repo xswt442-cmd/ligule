@@ -15,7 +15,7 @@ import { boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from 
 import { spawnWindowsCommand, type OwnedWindowsCommand } from './windows-command.js';
 import { buildLinuxSandbox, type PermissionCapabilities } from './sandbox-linux.js';
 import type { WindowsCommandLaunch } from './windows-command.js';
-import { permissionDenial, type PermissionContext } from '../kernel/permission.js';
+import { permissionDenial, type PermissionContext } from '../permission.js';
 import type { ShellSelection } from './shell.js';
 import { assertInterpreterIdentity, assertScriptBinding, bindScript, commandUsesNodeRuntime, readBoundScript, resolveNodeRuntime, type ScriptBinding } from './script-binding.js';
 import { CHECK_DECLARATION_SCHEMA, checkedCheckDeclaration, type CheckDeclaration } from '../session/checks.js';

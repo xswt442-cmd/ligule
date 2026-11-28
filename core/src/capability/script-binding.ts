@@ -5,7 +5,7 @@ import { delimiter, extname, join, resolve } from 'node:path';
 import { KernelError } from '../errors.js';
 import { inspectCommand } from './command.js';
 import { isWithin } from './paths.js';
-import type { PermissionContext } from '../kernel/permission.js';
+import type { PermissionContext } from '../permission.js';
 import type { ShellSelection } from './shell.js';
 
 export interface ScriptBinding {

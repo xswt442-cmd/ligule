@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { createConfig, type ConfigLayer, type ConfigSnapshot } from '../kernel/config.js';
+import { createConfig, type ConfigLayer, type ConfigSnapshot } from '../config.js';
 import type { LoadedLayers } from '../kernel/config-store.js';
 import { dataRoot } from '../data-root.js';
 import { workspaceIdentity } from '../workspace-identity.js';
