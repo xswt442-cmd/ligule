@@ -36,7 +36,7 @@ import { thinkingRequest } from './thinking-request';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { appendProjectedRecords, metaRow, projectRecord, shownIn, type Record_, type Row } from './rows';
 import { taskSummaryLabelOf, taskSummaryOf, type Status } from './status';
-import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, updateSettings, type Settings } from './settings';
+import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, type Settings } from './settings';
 import { addWorkbenchCommand, closeWorkbenchCommand, closeWorkbenchTab, openWorkbenchResource, registerWorkbenchCommand, registerWorkbenchResource, selectWorkbenchCommand,
   selectWorkbenchTab,
   type WorkbenchCommandReference, type WorkbenchResource } from './workbench';
@@ -49,7 +49,7 @@ import { SessionStreamBuffer } from './session-stream';
 import { SessionWindow, olderRecoveryPage } from './session-window';
 import { observeExternalSession } from './external-session-observation';
 import { clearExternalSessionDraftIfCurrent, externalSessionDraftFor, externalSessionDraftRevisionFor, updateExternalSessionDrafts, type ExternalSessionDrafts } from './external-session-drafts';
-import { clearSessionDraftIfCurrent, sessionDraftRevisionFor, updateSessionDraftRevision, type SessionDraftRevisions } from './session-draft-revisions';
+import { useSessionQueuesAndDrafts } from './use-session-queues-and-drafts';
 import { Composer } from './components/Composer';
 import { CommandWorkspace } from './components/CommandWorkspace';
 import { SideChatDialog } from './components/SideChatDialog';
@@ -348,7 +348,6 @@ export function App({ transport }: { transport: Transport }) {
   const [newSessionPolicy, setNewSessionPolicy] = useState<PolicySelection | null>(null);
   const [newSessionPermission, setNewSessionPermission] = useState<PermissionTarget>(DEFAULT_NEW_SESSION_PERMISSION);
   const [newSessionPermissionConfirmations, setNewSessionPermissionConfirmations] = useState<PermissionConfirmations>(NO_PERMISSION_CONFIRMATIONS);
-  const [draft, setDraftState] = useState('');
   const [caret, setCaret] = useState(0);
   // `@` 路径候选由 Host 提供，前端不扫描项目目录。
   const [mention, setMention] = useState<MentionState | null>(null);
@@ -358,14 +357,11 @@ export function App({ transport }: { transport: Transport }) {
   const mentionAsked = useRef(NO_TOKEN);
   // 从会话记录首行读取草稿和队列所属的项目身份；保存失败时只提示一次。
   const [projectRoot, setProjectRoot] = useState('');
-  // 当前草稿所属的会话。打开会话时，需等恢复请求完成后再保存草稿，避免把旧草稿写入新会话。
-  const [inputOwner, setInputOwner] = useState<string | null>(null);
   const [readOnlySessionId, setReadOnlySessionId] = useState<string | null>(null);
   const [writerLockNoticeSessionId, setWriterLockNoticeSessionId] = useState<string | null>(null);
   const [sessionWriterActive, setSessionWriterActive] = useState(false);
   const [externalControlSessionId, setExternalControlSessionId] = useState<string | null>(null);
   const [externalSessionDrafts, setExternalSessionDrafts] = useState<ExternalSessionDrafts>(() => new Map());
-  const saveWarned = useRef(false);
   // Host 重连期间暂停发送队列，也不触发轮次结束后的自动发送。
   const reconnecting = useRef(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -436,6 +432,14 @@ export function App({ transport }: { transport: Transport }) {
     problem: notificationProblem, setProblem: setNotificationProblem,
     destination: notificationDestination, setDestination: setNotificationDestination, sessions: notificationSessions, notify,
   } = useNotifications(transport.notifications, settings.notifications, language, asks.length + queries.length, runningIds.length, reportTrayFailure);
+  const [settingsReady, setSettingsReady] = useState(false);
+  const {
+    draft, setDraft, inputOwner, setInputOwner, queue, queues, patchQueue, saveWarned, saveBackgroundDraft,
+    restoreInputs, pendingDraft, forgetPending, localDraft, captureSubmission, finishSubmission, persistInputs,
+  } = useSessionQueuesAndDrafts({
+    client, projectRoot, sessionId, readOnlySessionId, settings, settingsReady, setSettings,
+    sessions: notificationSessions, active,
+  });
   // 当前会话的模式和策略面板由顶栏对应按钮打开。
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [reading, setReading] = useState(false);
@@ -452,13 +456,6 @@ export function App({ transport }: { transport: Transport }) {
   // 输入历史由 Host 在共享文件中维护；界面使用 `-1` 表示当前未发送草稿。
   const [history, setHistory] = useState<string[]>([]);
   const [walk, setWalk] = useState(-1);
-  // 运行期间的新输入按会话保存在前端队列中；取消后暂停，等待用户明确继续。
-  const [queues, setQueues] = useState<Record<string, { items: string[]; paused: boolean }>>({});
-  const queue = readOnlySessionId === sessionId ? { items: [] as string[], paused: false }
-    : queues[sessionId ?? ''] ?? { items: [] as string[], paused: false };
-  const patchQueue = useCallback((own: string, next: (current: { items: string[]; paused: boolean }) => { items: string[]; paused: boolean }) => {
-    setQueues((current) => ({ ...current, [own]: next(current[own] ?? { items: [], paused: false }) }));
-  }, []);
   const updateExternalControlAvailability = useCallback((owner: string, available: boolean) => {
     if (active.current !== owner) return;
     setExternalControlSessionId(available ? owner : null);
@@ -504,45 +501,6 @@ export function App({ transport }: { transport: Transport }) {
     );
   }, [client]);
 
-  // 桌面偏好以应用数据根中的文档为准，打开窗口时从 Host 读取。
-  // 只有该文档不存在且 WebView 缓存仍有内容时，才将缓存迁入数据根。
-  // 读取完成前不保存默认值，避免覆盖已有草稿或队列。
-  const [settingsReady, setSettingsReady] = useState(false);
-  const unsavedInputs = useRef(new Map<string, { root: string; id: string; draft?: string; items?: string[] }>());
-  const draftRevisions = useRef<SessionDraftRevisions>(new Map());
-  const draftState = useRef(draft);
-  draftState.current = draft;
-  const draftOwnerState = useRef({ root: projectRoot, id: inputOwner ?? sessionId ?? '$new' });
-  draftOwnerState.current = {
-    root: projectRoot || notificationSessions.current.get(inputOwner ?? sessionId ?? '$new')?.root || '',
-    id: inputOwner ?? sessionId ?? '$new',
-  };
-  const inputOwnerState = useRef(inputOwner);
-  inputOwnerState.current = inputOwner;
-  const setDraft = useCallback((
-    update: string | ((current: string) => string),
-    owner: { root: string; id: string } | null = draftOwnerState.current,
-  ) => {
-    const previous = draftState.current;
-    const next = typeof update === 'function' ? update(previous) : update;
-    if (next !== previous && owner !== null) {
-      const key = JSON.stringify([owner.root, owner.id]);
-      draftRevisions.current = updateSessionDraftRevision(draftRevisions.current, key, next);
-      unsavedInputs.current.set(key, {
-        ...unsavedInputs.current.get(key), root: owner.root, id: owner.id, draft: next,
-      });
-    }
-    draftState.current = next;
-    setDraftState(next);
-  }, []);
-  // 只为后台会话保存草稿，不替换当前输入框。
-  const saveBackgroundDraft = useCallback((text: string, owner: { root: string; id: string }) => {
-    const key = JSON.stringify([owner.root, owner.id]);
-    draftRevisions.current = updateSessionDraftRevision(draftRevisions.current, key, text);
-    unsavedInputs.current.set(key, {
-      ...unsavedInputs.current.get(key), root: owner.root, id: owner.id, draft: text,
-    });
-  }, []);
   const [prefsRevision, setPrefsRevision] = useState(0);
   const openPanel = useCallback((item: Panel<PanelProps>) => {
     const panelIds = ['panel.delivery', 'panel.diagnostics', 'panel.branch', 'panel.export', 'panel.help'] as const;
@@ -924,47 +882,6 @@ export function App({ transport }: { transport: Transport }) {
     }
   }, [client, olderLoading, page, projectRoot, readOnlySessionId, sessionId]);
 
-  // 草稿和队列按项目与会话保存到 Host 管理的偏好文档；WebView 存储只用于首屏缓存。
-  // 切换会话、打开设置、查看历史或断连时保留输入。保存失败时明确提示用户。
-  const persistInputs = useCallback(async () => {
-    if (!settingsReady) throw Object.assign(new Error('prefs_reload_required'), { code: 'prefs_reload_required' });
-    const draftId = sessionId ?? '$new';
-    const remember = (root: string, id: string, value: { draft?: string; items?: string[] }) => {
-      const key = JSON.stringify([root, id]);
-      if (value.draft !== undefined && draftRevisions.current.get(key)?.text !== value.draft) return;
-      unsavedInputs.current.set(key, { ...unsavedInputs.current.get(key), root, id, ...value });
-    };
-    if (inputOwner === sessionId) remember(projectRoot, draftId, { draft });
-    for (const [id, queue] of Object.entries(queues)) {
-      const root = notificationSessions.current.get(id)?.root;
-      if (root !== undefined) remember(root, id, { items: queue.items });
-    }
-    // 重新读取会替换缓存；读取失败时保留内存中其他会话尚未保存的输入。
-    const pending = new Map(unsavedInputs.current);
-    // 草稿为空且队列已发完时删除该会话的偏好条目。
-    const put = <T extends { length: number }>(table: Record<string, Record<string, T>>, root: string, id: string, value: T): Record<string, Record<string, T>> => {
-      const row = { ...(table[root] ?? {}) };
-      if (value.length === 0) delete row[id];
-      else row[id] = value;
-      const next = { ...table };
-      if (Object.keys(row).length === 0) delete next[root];
-      else next[root] = row;
-      return next;
-    };
-    await updateSettings(client, stored => {
-      let drafts = stored.drafts;
-      let queued = stored.queued;
-      for (const input of pending.values()) {
-        if (input.draft !== undefined) drafts = put(drafts, input.root, input.id, input.draft);
-        if (input.items !== undefined) queued = put(queued, input.root, input.id, input.items);
-      }
-      return { ...stored, ...settings, drafts, queued };
-    });
-    for (const [key, input] of pending) {
-      if (unsavedInputs.current.get(key) === input) unsavedInputs.current.delete(key);
-    }
-  }, [client, draft, inputOwner, projectRoot, queues, sessionId, settings, settingsReady]);
-
   useEffect(() => {
     if (!settingsReady || inputOwner !== sessionId || quitting.current) return;
     void persistInputs().catch((error) => {
@@ -1228,22 +1145,9 @@ export function App({ transport }: { transport: Transport }) {
       await prefsSettled.current;
       if (openRequest.current !== request) return;
       const stored = readSettings();
-      const unsaved = unsavedInputs.current.get(JSON.stringify([root, id]));
-      const storedDraft = unsaved?.draft ?? stored.drafts[root]?.[id] ?? '';
-      const restored = unsaved?.items ?? stored.queued[root]?.[id] ?? [];
-      if (observing) {
-        setDraft('', null);
-      } else if (reclaimQueue && restored.length > 0) {
-        // 重连后将队列按顺序移回草稿并清空队列，不自动发送任何内容。
-        setDraft(mergeQueueIntoDraft(storedDraft, restored), { root, id });
-        patchQueue(id, () => ({ items: [], paused: false }));
-      } else {
-        setDraft(storedDraft, { root, id });
-        patchQueue(id, () => ({ items: restored, paused: restored.length > 0 }));
-      }
+      restoreInputs(stored, { root, id }, observing, reclaimQueue);
       setReadOnlySessionId(observing ? id : null);
       setSessionWriterActive(observing && newest.writerActive === true);
-      setInputOwner(observing ? null : id);
       setSettings((current) => ({ ...current, lastSession: { id, projectRoot: root } }));
       let events = newest.events;
       let hasMore = newest.hasMore;
@@ -1334,7 +1238,7 @@ export function App({ transport }: { transport: Transport }) {
     if (openRequest.current !== request) return;
     if (!observing) void refreshStatus(id);
     return true;
-  }, [client, projectRoot, refreshStatus, takeEchoes]);
+  }, [client, projectRoot, refreshStatus, restoreInputs, takeEchoes]);
 
   // Side chat 的选区捕获、确认框与创建流程由 use-side-chat 持有；App 只传入当前会话与打开方式。
   const sideChat = useSideChat({
@@ -1368,17 +1272,14 @@ export function App({ transport }: { transport: Transport }) {
     const storedDrafts = (preferences.settings as Partial<Settings> | undefined)?.drafts ?? readSettings().drafts;
     const storedRoot = Object.keys(storedDrafts).find(candidate => sameProjectRoot(candidate, root));
     const canonicalRoot = storedRoot ?? root;
-    const key = JSON.stringify([canonicalRoot, sourceSessionId]);
-    const unsavedEntry = [...unsavedInputs.current.entries()].find(([, value]) => value.id === sourceSessionId
-      && sameProjectRoot(value.root, root));
-    const localDraft = draftRevisions.current.get(unsavedEntry?.[0] ?? key)?.text ?? unsavedEntry?.[1].draft;
+    const pending = localDraft({ root: canonicalRoot, id: sourceSessionId }, sameProjectRoot);
     const storedDraft = storedRoot === undefined ? '' : storedDrafts[storedRoot]?.[sourceSessionId] ?? '';
-    const sourceDraft = localDraft !== undefined && localDraft !== '' ? localDraft : storedDraft || localDraft || '';
+    const sourceDraft = pending !== undefined && pending !== '' ? pending : storedDraft || pending || '';
     if (root === '' || await openSession(sourceSessionId, undefined, false, root) !== true) {
       throw Object.assign(new Error('side_chat_origin_session_unavailable'), { code: 'side_chat_origin_session_unavailable' });
     }
     setDraft(sourceDraft === '' ? text : `${sourceDraft}\n\n${text}`, { root: canonicalRoot, id: sourceSessionId });
-  }, [client, openSession, setDraft]);
+  }, [client, localDraft, openSession, setDraft]);
 
   useEffect(() => {
     if (sessionId === null || readOnlySessionId !== sessionId) return;
@@ -1458,7 +1359,7 @@ export function App({ transport }: { transport: Transport }) {
       setPage(null);
       setWanted(null);
       const draftOwner = { root: params.projectRoot ?? '', id: '$new' };
-      setDraft(unsavedInputs.current.get(JSON.stringify([draftOwner.root, draftOwner.id]))?.draft
+      setDraft(pendingDraft(draftOwner)
         ?? readSettings().drafts[draftOwner.root]?.[draftOwner.id] ?? '', draftOwner);
       setWalk(-1);
       setSettings((current) => ({ ...current, lastSession: null }));
@@ -1470,7 +1371,7 @@ export function App({ transport }: { transport: Transport }) {
     } finally {
       if (openRequest.current === request) setReading(false);
     }
-  }, [client, transport]);
+  }, [client, pendingDraft, setDraft, setInputOwner, transport]);
 
   useEffect(() => {
     if (!settingsReady || booted.current) return;
@@ -1701,7 +1602,7 @@ export function App({ transport }: { transport: Transport }) {
       drafts[projectRoot] = atRoot;
       const next = { ...cached, workbench: workbenchRef.current, drafts, lastSession: { id: created.sessionId, projectRoot } };
       await saveSettings(client, next);
-      unsavedInputs.current.delete(JSON.stringify([projectRoot, '$new']));
+      forgetPending({ root: projectRoot, id: '$new' });
       workbenchRef.current = next.workbench;
       setSettings(next);
       setSessionsRevision((current) => current + 1);
@@ -1713,21 +1614,15 @@ export function App({ transport }: { transport: Transport }) {
       creating.current = false;
       setStarting(false);
     }
-  }, [client, draft, inputOwner, newSessionMode, newSessionPermission, newSessionPermissionConfirmations, newSessionPolicy, openSession, projectRoot, reading, sessionId, settings.newSelections, settingsReady, setDraft, submit, t]);
+  }, [client, draft, forgetPending, inputOwner, newSessionMode, newSessionPermission, newSessionPermissionConfirmations, newSessionPolicy, openSession, projectRoot, reading, sessionId, settings.newSelections, settingsReady, setDraft, submit, t]);
 
   const steer = useCallback(async () => {
     const own = sessionId;
     const text = draft;
     if (quitting.current || reading || own === null || readOnlySessionId === own || inputOwner !== own
       || !runningIds.includes(own) || text.trim() === '') return;
-    const draftKey = JSON.stringify([projectRoot, own]);
-    if (draftRevisions.current.get(draftKey)?.text !== text) {
-      draftRevisions.current = updateSessionDraftRevision(draftRevisions.current, draftKey, text);
-      unsavedInputs.current.set(draftKey, {
-        ...unsavedInputs.current.get(draftKey), root: projectRoot, id: own, draft: text,
-      });
-    }
-    const submittedRevision = sessionDraftRevisionFor(draftRevisions.current, draftKey);
+    const owner = { root: projectRoot, id: own };
+    const submittedRevision = captureSubmission(owner, text);
     const inView = () => active.current === own;
     try {
       const current = await client.call('status.get', { sessionId: own }, 10_000) as Status;
@@ -1741,25 +1636,7 @@ export function App({ transport }: { transport: Transport }) {
         (written) => setHistory((written as { entries: string[] }).entries),
         () => setHistory((entries) => [text, ...entries.filter((item) => item !== text)]),
       );
-      const currentRevisions = draftRevisions.current;
-      const clearedRevisions = clearSessionDraftIfCurrent(currentRevisions, draftKey, submittedRevision);
-      if (clearedRevisions !== currentRevisions) {
-        draftRevisions.current = clearedRevisions;
-        const cached = unsavedInputs.current.get(draftKey);
-        unsavedInputs.current.set(draftKey, { ...cached, root: projectRoot, id: own, draft: '' });
-        setSettings((current) => {
-          const drafts = { ...current.drafts };
-          const projectDrafts = { ...(drafts[projectRoot] ?? {}) };
-          delete projectDrafts[own];
-          if (Object.keys(projectDrafts).length === 0) delete drafts[projectRoot];
-          else drafts[projectRoot] = projectDrafts;
-          return { ...current, drafts };
-        });
-        if (active.current === own && inputOwnerState.current === own && draftState.current === text) {
-          setDraft('');
-          setWalk(-1);
-        }
-      }
+      if (finishSubmission(owner, submittedRevision, text)) setWalk(-1);
       if (inView()) {
         setRows((currentRows) => [...currentRows, metaRow('meta',
           `输入已加入当前运行，待应用 ${accepted.pendingCount} 条${accepted.cancelledInteractions > 0 ? `；已取消 ${accepted.cancelledInteractions} 个等待答复` : ''}`,
@@ -1769,7 +1646,7 @@ export function App({ transport }: { transport: Transport }) {
       if (inView()) setRows((currentRows) => [...currentRows,
         metaRow('error', `当前运行未收到输入：${code(error)}`, `The active run did not receive the input: ${code(error)}`)]);
     }
-  }, [client, draft, inputOwner, projectRoot, readOnlySessionId, reading, runningIds, sessionId, setDraft]);
+  }, [captureSubmission, client, draft, finishSubmission, inputOwner, projectRoot, readOnlySessionId, reading, runningIds, sessionId]);
 
   // `own` 指定取消目标会话；默认取消当前前台会话。
   const cancel = useCallback(async (own = sessionId) => {
