@@ -24,9 +24,9 @@ import { mcpTrustKey } from './mcp-trust.js';
 import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionContextOptions, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { createFileWriteQueue } from '../kernel/file-write-queue.js';
-import { loadAssembly, type Plugin } from '../kernel/assembly.js';
+import type { Plugin } from '../kernel/assembly.js';
 import {
-  completeExtensionRun, loadExtensions, prepareExtensionRequest,
+  completeExtensionRun, prepareExtensionRequest,
   type ExtensionHookRegistry,
 } from '../kernel/extensions.js';
 import { applyModeToPrompt, DEFAULT_MODE, listModes, loadMode, resolveModeSelection } from '../kernel/modes.js';
@@ -67,18 +67,14 @@ import { isWithin, resolveWithin } from '../capability/paths.js';
 import { runManagedExec, type ExecControlArguments, type ExecRunContext } from '../capability/exec.js';
 import { createFiniteCommandRegistry, type FiniteCommandOwner } from '../capability/finite-command.js';
 import { createProcessOwnership } from './process-ownership.js';
-import { createManagedProcessRegistry, managedProcessPlugin } from '../capability/managed-process.js';
-import { loadInstructions, DEFAULT_INSTRUCTION_BYTES } from '../capability/instructions.js';
-import { SKILL_METADATA_BUDGET_BYTES, discoverSkills, formatSkillCatalog, skillDirectories } from '../kernel/skills.js';
+import { createManagedProcessRegistry } from '../capability/managed-process.js';
+import { discoverSkills, skillDirectories } from '../kernel/skills.js';
 import { discoverTemplates, expandTemplate, findTemplate, parseInvocation, templateDirectories } from '../kernel/templates.js';
 import { createLoop, type LoopProgressEvent, type LoopProgressPhase } from '../kernel/loop.js';
 import { appendRequestDiagnostic, configureRequestDiagnostics, createRequestDiagnosticStore, requestDiagnosticSnapshot } from '../kernel/request-diagnostics.js';
 import { minimalPlugin } from '../tools/minimal.js';
 import { networkPlugin } from '../tools/network.js';
-import { createTodoWritePlugin } from '../tools/todo-write.js';
-import { createReadImagePlugin } from '../tools/read-image.js';
-import { createReadDocumentPlugin } from '../tools/read-document.js';
-import { createPresentPlugin, type ViewRequestArguments, type ViewRequestResult } from '../tools/present.js';
+import type { ViewRequestArguments, ViewRequestResult } from '../tools/present.js';
 import { listArtifacts, previewArtifact, inspectArtifact, resolveArtifact, type ArtifactScope } from './artifacts.js';
 import { readToolResult } from './tool-result-view.js';
 import { readRecordPage, type SessionReadDeps } from './session-read.js';
@@ -89,14 +85,11 @@ import { verifySideSelection } from './side-selection.js';
 import { createSearchSupport } from './search.js';
 import { createBrowserSupport, type BrowserSupport } from '../capability/browser.js';
 import { BROWSER_SERVER } from '../capability/browser-policy.js';
-import { createScreenshotPlugin } from '../tools/screenshot.js';
 import { createMediaStore } from '../capability/media.js';
 import { checkedImageReferences } from '../media.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
-import { createCompactPlugin } from '../tools/compact.js';
 import { createCustomToolsPlugin, discoverCustomTools } from '../tools/custom.js';
-import { createAskUserPlugin } from '../tools/ask-user.js';
 import { mcpServerConfigs } from '../capability/mcp.js';
 import { createRunSteeringInbox } from '../kernel/run-steering.js';
 import { discoverModels } from '../model/discovery.js';
@@ -110,7 +103,6 @@ import { dataRoot, loadConfigLayers } from '../kernel/config-file.js';
 import { createTelemetry, type TelemetryOptions } from '../kernel/telemetry.js';
 import type { SkillRegistry } from '../kernel/skills.js';
 import type { PolicyRule } from '../kernel/config-edit.js';
-import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
 import { providerFromConfig, modelSelectionOf, type HostGenerationOptions, type HostProvider } from './provider.js';
 import { createSessionReview, trustedReviewerConfig } from './session-review.js';
@@ -126,6 +118,7 @@ import { parseInitialGenerationSettings } from './session-initial-settings.js';
 import { settingsToolCatalog as buildSettingsToolCatalog } from './tool-catalog.js';
 import { createSessionCompaction } from './session-compaction.js';
 import { advanceRunInputRevision, createSessionInteractions, settleRunAsks, type PendingApprovalDetails, type PolicyRememberScope } from './session-interactions.js';
+import { assembleSessionPlugins, installSessionExtensions, installSessionPrompt, type ExtensionPromptFragment } from './session-plugins.js';
 import { createSessionMcp } from './session-mcp.js';
 import type {
   AdoptionResult, DelegatedRunResult, EnvironmentSeed, Host, HostClientConnection, HostConfigSnapshot, HostOptions,
@@ -156,12 +149,6 @@ interface HostSessionRetirement {
 interface HostRequestWithParams {
   readonly method: string;
   readonly params: HostMethodParams;
-}
-
-interface ExtensionPromptFragment {
-  readonly name: string;
-  readonly text: string;
-  readonly source: string;
 }
 
 function modelConfigOf(config: HostConfigSnapshot): Record<string, unknown> {
@@ -297,24 +284,6 @@ function telemetryOptionsOfUserLayer(layer: Record<string, unknown> | undefined)
   try { mkdirSync(directory, { recursive: true, mode: 0o700 }); }
   catch (cause) { throw new KernelError('telemetry_storage_unavailable', { cause }); }
   return { enabled: true, directory, ...(typeof raw.otlpEndpoint === 'string' ? { otlpEndpoint: raw.otlpEndpoint } : {}) };
-}
-
-function isToolDefinition(value: unknown): value is ToolDefinition {
-  return isRecord(value)
-    && typeof value.name === 'string'
-    && typeof value.description === 'string'
-    && isRecord(value.parameters)
-    && typeof value.run === 'function';
-}
-
-function checkedToolDefinition(value: unknown): ToolDefinition {
-  if (!isRecord(value) || typeof value.name !== 'string' || value.name === '') throw new KernelError('tool_name_required');
-  if (typeof value.description !== 'string' || value.description === '') throw new KernelError('tool_description_required');
-  if (typeof value.run !== 'function') throw new KernelError('tool_run_required');
-  if (!isRecord(value.parameters)) throw new KernelError('tool_parameters_must_be_object');
-  if (value.parameters.type !== 'object') throw new KernelError('tool_parameters_type_not_object');
-  if (!isToolDefinition(value)) throw new KernelError('tool_name_required');
-  return value;
 }
 
 // 将流式事件转发给客户端，同时把原事件交回循环。
@@ -1783,7 +1752,6 @@ export function createHost({
     const basePlugins = [...loaded, ...(search.plugin === undefined ? [] : [search.plugin])];
     // 提问属于父会话，因为派生执行没有客户端可以回答。
     // 提问和审批走不同流程；只有支持交互回答的客户端才注册提问工具。
-    const asked = interactive === false ? [] : [createAskUserPlugin({ ask: interactions.askQuestion })];
     const subagents = createSubagentPlugin({
       config,
       fileWriteQueue,
@@ -1904,103 +1872,16 @@ export function createHost({
       connection.notify({ notify: 'view.ready', sessionId: id, requestId });
       return { status: 'sent', opened: false, read: false };
     } : undefined;
-    const assembly = loadAssembly(kernel, [...basePlugins, sessionMcp.pluginFor(mcp, media), createTodoWritePlugin({ session }),
-      createReadImagePlugin({ media, supportsImages: () => live.imageInput === true }),
-      createReadDocumentPlugin({ media, supportsImages: () => live.imageInput === true }),
-      createPresentPlugin({ sessionId: id, workspaceRoot: env.projectRoot, session,
-        ...(requestView === undefined ? {} : { requestView }) }),
-      createScreenshotPlugin({ media, supportsImages: () => live.imageInput === true, authorize: authorizeScreenCapture }),
-      managedProcessPlugin(managedProcesses), ...asked, createCompactPlugin({
-      // 压缩实例随所选模型重建；工具经取值函数读取当前实例。派生子会话不注册此工具，
-      // 子会话仍由自身构建的自动压缩管理预算。
+    const assembly = assembleSessionPlugins({
+      kernel, base: basePlugins, mcp: sessionMcp.pluginFor(mcp, media), customTool: customToolPlugin, subagents,
+      session, id, directory, projectRoot: env.projectRoot, media, managedProcesses, requestView, authorizeScreenCapture,
+      ask: interactive === false ? undefined : interactions.askQuestion,
+      supportsImages: () => live.imageInput === true,
       compaction: () => state.compaction ?? null,
-      session,
-      directory,
-      id,
-    }),
-      ...(customToolPlugin === undefined ? [] : [customToolPlugin]),
-      subagents]);
+    });
     cleanup.push(() => assembly.dispose());
-    // 加载器已按字节预算处理项目指令片段，这里直接登记，避免重复截断。
-    const maxBytes = config.instructions?.maxBytes ?? DEFAULT_INSTRUCTION_BYTES;
-    const instructions = await loadInstructions({
-      ...config.instructions,
-      boundary: env.projectRoot,
-      current: resolve(env.projectRoot, config.instructions?.current ?? '.'),
-    });
-    prompt.fragment({ name: 'instructions', anchor: 0, text: instructions.text, maxBytes });
-    // 根据预算完整加入技能元数据，或改用简短的技能发现说明。
-    // 所有模式都保留技能披露工具。
-    if (skills.skills.length > 0) {
-      prompt.fragment({ name: 'skills', anchor: 1, text: formatSkillCatalog(skills), maxBytes: SKILL_METADATA_BUDGET_BYTES });
-    }
-    // 按加载器解析的来源顺序加载扩展，只提供声明过的注册、事件和能力接口。
-    // 每个已注册工具仍须经过 Kernel 参数校验和权限判定。
-    const extensionsEnabled = state.permission.profile === 'full-access' && state.permission.network === 'unrestricted';
-    const extensionDiagnostics = extensionsEnabled ? extensions.ignored : [
-      ...extensions.ignored,
-      ...extensions.paths.map((path) => ({
-        code: 'extension_requires_full_access', path,
-        detail: 'extensions run inside the Host process and require full-access with unrestricted network permission',
-      })),
-    ];
-    for (const diagnostic of extensionDiagnostics) {
-      logger?.log?.('extension source is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
-    }
-    const installedExtensions = await loadExtensions(extensionsEnabled ? extensions.paths : [], {
-      registerTool: (tool) => {
-        return kernel.register(checkedToolDefinition(tool));
-      },
-      registerFragment: (fragment) => {
-        // 拒绝重复的提示片段名称，确保模式选择只会命中一个扩展。
-        if (fragments.some((entry) => entry.name === fragment.name)) throw new KernelError('extension_fragment_duplicate', { detail: fragment.name });
-        fragments.push(fragment);
-        return () => {
-          const index = fragments.indexOf(fragment);
-          if (index >= 0) fragments.splice(index, 1);
-        };
-      },
-      addEventListener: (handler) => {
-        state.listeners.push(handler);
-        return () => {
-          const index = state.listeners.indexOf(handler);
-          if (index >= 0) state.listeners.splice(index, 1);
-        };
-      },
-      // 能力请求通过 Kernel 执行，以应用参数校验、权限判定和会话记录。
-      request: async (tool, args) => {
-        const parent = currentKernelExecutionContext();
-        if (parent === undefined || !parent.scope.active) throw new KernelError('extension_request_context_unavailable');
-        if (parent.signal.aborted) {
-          const reason = parent.signal.reason;
-          throw reason instanceof KernelError ? reason : new KernelError('loop_cancelled', { cause: reason });
-        }
-        if (parent.extensionHookPhase === 'beforeTool' || parent.extensionHookPhase === 'afterTool') {
-          throw new KernelError('extension_hook_request_unavailable');
-        }
-        if (parent.extensionHookPhase === 'prepareRequest' || parent.extensionHookPhase === 'completeRun') {
-          if (parent.extensionRequest === undefined) throw new KernelError('extension_request_context_unavailable');
-          return await parent.extensionRequest(tool, args);
-        }
-        const callId = randomUUID();
-        const child = { ...parent, callId, parentCallId: parent.callId, scope: { active: true } };
-        try {
-          return await withKernelExecutionContext(child, () => kernel.call(tool, args, {
-            signal: parent.signal,
-            callId,
-            parentCallId: parent.callId,
-            ...(parent.sessionId === undefined ? {} : { sessionId: parent.sessionId }),
-            ...(parent.runId === undefined ? {} : { runId: parent.runId }),
-            ...(parent.executionId === undefined ? {} : { executionId: parent.executionId }),
-            ...(parent.userSeq === undefined ? {} : { userSeq: parent.userSeq }),
-            ...(parent.parentRunId === undefined ? {} : { parentRunId: parent.parentRunId }),
-            ...(parent.parentExecutionId === undefined ? {} : { parentExecutionId: parent.parentExecutionId }),
-          }));
-        } finally {
-          child.scope.active = false;
-        }
-      },
-    });
+    await installSessionPrompt(prompt, env.projectRoot, config.instructions, skills);
+    const installedExtensions = await installSessionExtensions(kernel, extensions, state.permission, fragments, state.listeners, logger);
     extensionHookRegistry = installedExtensions.hooks;
     cleanup.push(() => installedExtensions.dispose());
     for (const diagnostic of installedExtensions.diagnostics) {
