@@ -6,7 +6,7 @@ import lockfile from 'proper-lockfile';
 import { KernelError } from '../errors.js';
 import { workspaceIdentity } from '../workspace-identity.js';
 import { dataRoot } from '../data-root.js';
-import { sessionDirectories, workspaceDataDirectory, type SessionDirectoryConfig } from '../session/list.js';
+import { sessionDirectories, workspaceDataDirectory, type SessionDirectoryConfig } from '../workspace-storage.js';
 import { parseSessionBytes } from '../session/record.js';
 import { resolveWithin } from './paths.js';
 import { boundaryOf, workingDirectoryOf } from './limits.js';

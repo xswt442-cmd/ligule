@@ -8,7 +8,7 @@ import { dataRoot } from '../data-root.js';
 import { workspaceIdentity } from '../workspace-identity.js';
 import { claimStorageOwner, closeStorageOwner } from './storage-gc.js';
 import { KernelError } from '../errors.js';
-import { workspaceDataDirectory, type SessionDirectoryConfig } from '../session/list.js';
+import { workspaceDataDirectory, type SessionDirectoryConfig } from '../workspace-storage.js';
 import { mcpServerConfigs, type NormalizedMcpServerConfig } from './mcp.js';
 import { BROWSER_SERVER } from './browser-policy.js';
 
