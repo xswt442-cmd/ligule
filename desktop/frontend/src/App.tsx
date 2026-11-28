@@ -15,7 +15,6 @@ import { DeliveryPanel, ArtifactDetailPanel, CheckDetailPanel } from './componen
 import { SideSessionPanel } from './components/SideSessionPanel';
 import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
-import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
 import { reopenSessionWriter } from './session-reopen';
 import { requestIsCurrent, type RequestIdentity } from './request-identity';
 import { SessionRail } from './components/SessionRail';
@@ -37,10 +36,11 @@ import { thinkingRequest } from './thinking-request';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
 import { appendProjectedRecords, metaRow, projectRecord, shownIn, type Record_, type Row } from './rows';
 import { taskSummaryLabelOf, taskSummaryOf, type Status } from './status';
-import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, saveWorkbenchSettings, updateSettings, type Settings } from './settings';
+import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, updateSettings, type Settings } from './settings';
 import { addWorkbenchCommand, closeWorkbenchCommand, closeWorkbenchTab, openWorkbenchResource, registerWorkbenchCommand, registerWorkbenchResource, selectWorkbenchCommand,
-  selectWorkbenchTab, updateWorkbenchFileDraft, workbenchStateFrom,
-  type WorkbenchCommandReference, type WorkbenchFileDraft, type WorkbenchResource } from './workbench';
+  selectWorkbenchTab,
+  type WorkbenchCommandReference, type WorkbenchResource } from './workbench';
+import { useWorkbenchController } from './use-workbench-controller';
 import { LocaleProvider, localeOf } from './locale';
 import { useNotifications } from './use-notifications';
 import { useApprovalsAndQuestions } from './use-approvals-and-questions';
@@ -369,20 +369,19 @@ export function App({ transport }: { transport: Transport }) {
   // Host 重连期间暂停发送队列，也不触发轮次结束后的自动发送。
   const reconnecting = useRef(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  // 右侧面板存在未保存编辑或进行中的写入时，关闭或切换前先确认。
-  const [dockGate, setDockGate] = useState<EditGate>({});
-  const [dockHold, setDockHold] = useState<{ reasons: string[]; go: () => void } | null>(null);
-  const reportDock = useCallback((reason: string) => setDockGate((now) => reportEdit(now, 'dock', reason)), []);
-  const leaveDock = useCallback((go: () => void) => {
-    const reasons = holdReasons(dockGate);
-    if (reasons.length === 0) go();
-    else setDockHold({ reasons, go });
-  }, [dockGate]);
   const [settings, setSettings] = useState(readSettings);
-  const workbenchRef = useRef(settings.workbench);
-  const workbenchEditRevision = useRef(0);
-  const workbenchDraftSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [workbenchError, setWorkbenchError] = useState<string | null>(null);
+  const prefsSettled = useRef<Promise<void>>(Promise.resolve());
+  const [prefsFailure, setPrefsFailure] = useState<string | null>(null);
+  const [prefsDetails, setPrefsDetails] = useState('');
+  const reportSaveFailure = useCallback((error: unknown) => {
+    setPrefsFailure(code(error));
+    setPrefsDetails(error instanceof Error ? error.message : String(error));
+  }, []);
+  const {
+    workbench: workbenchRef, reasons: dockEdits, hold: dockHold, setHold: setDockHold,
+    error: workbenchError, setError: setWorkbenchError, reportDock, leaveDock, applyWorkbenchState,
+    updateProjectFileDraft, adoptWorkbench,
+  } = useWorkbenchController(client, settings.workbench, prefsSettled, setSettings, reportSaveFailure);
   const activeWorkbenchTab = settings.workbench.tabs.find(tab => tab.key === settings.workbench.activeKey) ?? null;
   const activePanelId = activeWorkbenchTab?.resource.kind === 'panel' ? activeWorkbenchTab.resource.panelId : null;
   const panel = activePanelId === null ? null : menuPanels.find(item => item.id === activePanelId) ?? null;
@@ -426,8 +425,6 @@ export function App({ transport }: { transport: Transport }) {
   const [modelCatalogRevision, setModelCatalogRevision] = useState(0);
   const settingsEdits = useRef<string[]>([]);
   const reportSettingsEdits = useCallback((reasons: string[]) => { settingsEdits.current = reasons; }, []);
-  const dockEdits = useRef<string[]>([]);
-  dockEdits.current = holdReasons(dockGate);
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId>('general');
   const openModelSettings = useCallback(() => { setSettingsSection('model'); setSettingsOpen(true); }, []);
   const openSecuritySettings = useCallback(() => { setSettingsSection('security'); setSettingsOpen(true); }, []);
@@ -510,7 +507,6 @@ export function App({ transport }: { transport: Transport }) {
   // 桌面偏好以应用数据根中的文档为准，打开窗口时从 Host 读取。
   // 只有该文档不存在且 WebView 缓存仍有内容时，才将缓存迁入数据根。
   // 读取完成前不保存默认值，避免覆盖已有草稿或队列。
-  const prefsSettled = useRef<Promise<void>>(Promise.resolve());
   const [settingsReady, setSettingsReady] = useState(false);
   const unsavedInputs = useRef(new Map<string, { root: string; id: string; draft?: string; items?: string[] }>());
   const draftRevisions = useRef<SessionDraftRevisions>(new Map());
@@ -547,50 +543,7 @@ export function App({ transport }: { transport: Transport }) {
       ...unsavedInputs.current.get(key), root: owner.root, id: owner.id, draft: text,
     });
   }, []);
-  const [prefsFailure, setPrefsFailure] = useState<string | null>(null);
-  const [prefsDetails, setPrefsDetails] = useState('');
   const [prefsRevision, setPrefsRevision] = useState(0);
-  const applyWorkbenchState = useCallback((value: ReturnType<typeof workbenchStateFrom>) => {
-    if (workbenchDraftSaveTimer.current !== null) {
-      clearTimeout(workbenchDraftSaveTimer.current);
-      workbenchDraftSaveTimer.current = null;
-    }
-    const next = workbenchStateFrom(value);
-    workbenchRef.current = next;
-    const revision = workbenchEditRevision.current + 1;
-    workbenchEditRevision.current = revision;
-    setSettings(current => ({ ...current, workbench: next }));
-    void Promise.resolve(prefsSettled.current).then(() => saveWorkbenchSettings(client, next)).then(() => {
-      if (workbenchEditRevision.current === revision) workbenchEditRevision.current = 0;
-    }).catch(error => {
-      setPrefsFailure(code(error));
-      setPrefsDetails(error instanceof Error ? error.message : String(error));
-    });
-  }, [client]);
-  const updateProjectFileDraft = useCallback((key: string, draft: WorkbenchFileDraft | undefined) => {
-    try {
-      const next = updateWorkbenchFileDraft(workbenchRef.current, key, draft);
-      workbenchRef.current = next;
-      const revision = workbenchEditRevision.current + 1;
-      workbenchEditRevision.current = revision;
-      setSettings(current => ({ ...current, workbench: next }));
-      if (workbenchDraftSaveTimer.current !== null) clearTimeout(workbenchDraftSaveTimer.current);
-      workbenchDraftSaveTimer.current = setTimeout(() => {
-        workbenchDraftSaveTimer.current = null;
-        if (workbenchEditRevision.current !== revision) return;
-        void Promise.resolve(prefsSettled.current).then(() => saveWorkbenchSettings(client, workbenchRef.current)).then(() => {
-          if (workbenchEditRevision.current === revision) workbenchEditRevision.current = 0;
-        }).catch(error => {
-          setPrefsFailure(code(error));
-          setPrefsDetails(error instanceof Error ? error.message : String(error));
-        });
-      }, 250);
-      return true;
-    } catch (error) {
-      setWorkbenchError(code(error));
-      return false;
-    }
-  }, [client]);
   const openPanel = useCallback((item: Panel<PanelProps>) => {
     const panelIds = ['panel.delivery', 'panel.diagnostics', 'panel.branch', 'panel.export', 'panel.help'] as const;
     const panelId = panelIds.find(id => id === item.id);
@@ -873,8 +826,7 @@ export function App({ transport }: { transport: Transport }) {
     const settled = loadSettings(client).then(
       (adopted) => {
         if (!live) return;
-        const workbench = workbenchEditRevision.current > 0 ? workbenchRef.current : adopted.workbench;
-        workbenchRef.current = workbench;
+        const workbench = adoptWorkbench(adopted.workbench);
         setSettings({ ...adopted, workbench });
         saveWarned.current = false;
         setSettingsReady(true);
@@ -893,7 +845,7 @@ export function App({ transport }: { transport: Transport }) {
     return () => {
       live = false;
     };
-  }, [client, prefsRevision]);
+  }, [adoptWorkbench, client, prefsRevision]);
 
   // 每秒更新当前会话的运行时长。
   useEffect(() => {
@@ -1569,8 +1521,7 @@ export function App({ transport }: { transport: Transport }) {
       setPrefsDetails('');
       const refreshedPreferences = loadSettings(client).then(
         (adopted) => {
-          const workbench = workbenchEditRevision.current > 0 ? workbenchRef.current : adopted.workbench;
-          workbenchRef.current = workbench;
+          const workbench = adoptWorkbench(adopted.workbench);
           setSettings({ ...adopted, workbench });
           saveWarned.current = false;
           setSettingsReady(true);
@@ -1613,7 +1564,7 @@ export function App({ transport }: { transport: Transport }) {
       // 所有重连结果都要清除重连状态，避免后续无法再次重连或恢复队列。
       reconnecting.current = false;
     }
-  }, [client, openSession, projectRoot, resetInteractions, sessionId, setRunningIds, transport]);
+  }, [adoptWorkbench, client, openSession, projectRoot, resetInteractions, sessionId, setRunningIds, transport]);
 
   const readBack = useCallback(async () => {
     if (sessionId === null) return;
