@@ -734,9 +734,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       // 写入内容不在摘要行中重复显示；此处显示行数，完整内容可通过 `/show` 查看。
       setAsk(toTuiAsk(message.id, params, locale));
     };
-    client.onNotification(onNotification);
-    client.onRequest(onRequest);
+    const stopNotifications = client.onNotification(onNotification);
+    const stopRequests = client.onRequest(onRequest);
     void refreshStatus();
+    return () => {
+      stopNotifications();
+      stopRequests();
+    };
   }, [client, locale, push, refreshStatus, sessionId]);
 
   useEffect(() => {

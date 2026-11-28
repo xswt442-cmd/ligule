@@ -138,6 +138,36 @@ test('closing the output during an inbound batch stops dispatching later lines',
   }
 });
 
+test('disposing an inbound subscription leaves its replacement intact and stops delivery on cleanup', async () => {
+  const input = new PassThrough();
+  const output = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  const connection = createConnection({ input, output });
+  const handled: unknown[] = [];
+  const onRequest: Parameters<Connection['onRequest']>[0] = ({ method }) => { handled.push(method); };
+  const onNotification: Parameters<Connection['onNotification']>[0] = ({ notify }) => { handled.push(notify); };
+  try {
+    const oldRequest = connection.onRequest(onRequest);
+    const oldNotification = connection.onNotification(onNotification);
+    const stopRequest = connection.onRequest(onRequest);
+    const stopNotification = connection.onNotification(onNotification);
+    oldRequest();
+    oldNotification();
+    input.write('{"notify":"active-notification"}\n{"id":"active","method":"active-request"}\n');
+    await delay(0);
+    assert.deepEqual(handled, ['active-notification', 'active-request']);
+
+    input.write('{"id":"queued","method":"queued-request"}\n');
+    stopRequest();
+    stopNotification();
+    input.write('{"notify":"late-notification"}\n{"id":"late","method":"late-request"}\n');
+    await delay(0);
+    assert.deepEqual(handled, ['active-notification', 'active-request']);
+  } finally {
+    input.destroy();
+    output.destroy();
+  }
+});
+
 
 test('transport close invokes onClose once across all shutdown event paths', async () => {
   const input = new PassThrough();

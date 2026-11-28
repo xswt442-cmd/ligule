@@ -21,8 +21,8 @@ export interface ConnectionOptions {
 }
 
 export interface Connection {
-  onRequest(handler: (message: HostRequest) => unknown | Promise<unknown>): void;
-  onNotification(handler: (message: Record<string, unknown>) => void): void;
+  onRequest(handler: (message: HostRequest) => unknown | Promise<unknown>): () => void;
+  onNotification(handler: (message: Record<string, unknown>) => void): () => void;
   notify(message: Record<string, unknown>): void;
   reply(id: string, result: unknown): void;
   request(method: string, params?: unknown): Promise<unknown>;
@@ -54,6 +54,8 @@ export function createConnection({ input, output, onFault, onClose }: Connection
     if (closed) return;
     closed = true;
     buffer = '';
+    handler = undefined;
+    notificationHandler = undefined;
     input.off('data', onData);
     input.pause();
     // 任一传输流关闭后结束连接并停止接收请求，即使另一方向仍打开。
@@ -183,11 +185,15 @@ export function createConnection({ input, output, onFault, onClose }: Connection
   return {
     // 请求分发器处理入站请求；通知发送器处理不需要答复的消息。
     onRequest(next) {
-      handler = next;
+      const registered = (message: HostRequest) => next(message);
+      handler = closed ? undefined : registered;
+      return () => { if (handler === registered) handler = undefined; };
     },
 
     onNotification(next) {
-      notificationHandler = next;
+      const registered = (message: Record<string, unknown>) => next(message);
+      notificationHandler = closed ? undefined : registered;
+      return () => { if (notificationHandler === registered) notificationHandler = undefined; };
     },
 
     notify(message) {
