@@ -409,3 +409,80 @@ button:disabled {
   color: var(--fg);
   border-color: var(--accent);
 }
+
+/* 轮次完成状态和分支入口 */
+.row.round {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  padding-top: var(--space-1);
+  border-top: 1px solid var(--line);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.row-branch {
+  flex: none;
+  padding: 0 var(--space-2);
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font: inherit;
+}
+
+.row-branch:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+/* 会话菜单中的模式和策略面板入口。 */
+.topbar {
+  position: relative;
+}
+
+button.pill {
+  font: inherit;
+  color: inherit;
+  background: var(--bg-raised);
+  cursor: pointer;
+}
+
+button.pill:hover {
+  border-color: var(--accent);
+}
+
+/* 轮次参数快照以较弱的文字样式显示，不与回答和问题争夺视觉焦点。 */
+.row.context {
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-inline-start: 2px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: min(48vh, 420px);
+  gap: 12px;
+  text-align: center;
+}
+
+.welcome h1 { margin: 4px 0 0; font-size: 1.7rem; font-weight: 550; letter-spacing: -0.03em; }
+.welcome p { margin: 0; color: var(--fg-muted); font-size: var(--text-md); }
+
+.running-label { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 40vw; font-size: var(--text-xs); color: var(--fg-muted); white-space: nowrap; }
+.running-detail { overflow: hidden; text-overflow: ellipsis; }
+.status-dot, .unread-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.status-dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 12%, transparent); }
+
+@media (max-width: 760px) {
+  .topbar { padding: 12px 16px; gap: 8px; }
+}

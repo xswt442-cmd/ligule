@@ -386,3 +386,39 @@ button.send:hover:not(:disabled) {
 .row-body[data-folded="tight"] {
   display: none;
 }
+
+/* 输入区提示与选择器 */
+.composer-hint { display: flex; justify-content: space-between; gap: 16px; width: min(calc(100% - 64px), var(--stream)); margin: 4px auto 6px; font-size: var(--text-xs); color: var(--fg-muted); }
+.composer-choice { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 45%; padding: 0 8px; background: transparent; border-color: transparent; font-size: var(--text-sm); }
+.composer-choice span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.policy-picker { max-width: min(290px, 90vw); }
+.policy-picker [role="menuitem"] { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.policy-picker-note { margin: 6px 10px; color: var(--fg-muted); font-size: var(--text-xs); white-space: normal; }
+
+/* 工作区选择 */
+.new-workspace { padding: 0 4px; }
+.workspace-choice { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 6px; background: transparent; border-color: transparent; font-size: var(--text-sm); }
+.workspace-choice > span { overflow: hidden; text-overflow: ellipsis; }
+.workspace-picker { z-index: 41; display: grid; gap: 10px; width: min(380px, 90vw); max-height: 65vh; overflow: auto; padding: 14px; background: var(--bg-raised); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-pop); font-size: var(--text-sm); }
+.workspace-picker > p { margin: 0; color: var(--fg-muted); }
+.workspace-options { display: grid; gap: 2px; min-width: 0; max-height: 30vh; overflow: auto; }
+.workspace-options > button { display: flex; align-items: center; gap: 8px; padding: 6px; text-align: start; background: transparent; border-color: transparent; }
+.workspace-options > button[aria-selected="true"] { background: var(--bg-sunk); }
+.workspace-options > button > span { display: grid; flex: 1; min-width: 0; }
+.workspace-options strong { font-weight: 500; }
+.workspace-options small { color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; }
+.workspace-picker form { display: grid; gap: 6px; border-top: 1px solid var(--line); padding-top: 10px; }
+.workspace-picker input { min-width: 0; width: 100%; }
+.workspace-directory-field input { flex: 1; }
+.workspace-directory-field button { flex: none; }
+.workspace-picker-error { display: grid; gap: 6px; color: var(--bad); }
+.workspace-picker-error code { overflow-wrap: anywhere; }
+
+@media (max-width: 760px) {
+  .stream-row { inline-size: calc(100% - 24px); }
+  .composer-hint { width: calc(100% - 40px); }
+}
+
+@media (max-width: 480px) {
+  .composer-choice { max-width: 53%; }
+}

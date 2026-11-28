@@ -195,3 +195,70 @@
   color: var(--fg-muted);
   font-size: var(--text-sm);
 }
+
+/* 审批规则列表 */
+.rule-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-block-end: 1px solid var(--line);
+}
+
+.rule-row:last-child {
+  border-block-end: 0;
+}
+
+.rule-tool {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  color: var(--fg);
+}
+
+.rule-kind {
+  padding: 0 var(--space-2);
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  border: 1px solid var(--line);
+}
+
+.rule-kind[data-decision="allow"] {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--line));
+}
+
+.rule-kind[data-decision="deny"] {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 45%, var(--line));
+}
+
+.rule-detail {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+/* 权限选择面板 */
+.permission-trigger { max-width: min(220px, 30vw); }
+.permission-panel { z-index: 41; display: grid; gap: 10px; width: min(390px, 92vw); max-height: min(76vh, 680px); overflow: auto; padding: 14px; background: var(--bg-raised); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-pop); font-size: var(--text-sm); }
+.permission-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.permission-note { margin: 0; color: var(--fg-muted); font-size: var(--text-xs); line-height: 1.5; }
+.permission-change-state { display: flex; justify-content: space-between; gap: 12px; font-size: var(--text-xs); }
+.permission-change-state > span { color: var(--fg-muted); }
+.permission-change-state > strong { text-align: end; font-weight: 600; }
+.permission-fields { display: grid; gap: 9px; }
+.permission-fields label { display: grid; gap: 5px; }
+.permission-fields label > span { color: var(--fg-muted); font-size: var(--text-xs); }
+.permission-fields select { width: 100%; min-width: 0; }
+.permission-details-link { justify-self: start; min-height: 40px; padding: 6px 10px; color: var(--link); font: inherit; font-size: var(--text-sm); }
+.permission-failure { margin: 0; color: var(--bad); font-size: var(--text-xs); line-height: 1.5; overflow-wrap: anywhere; }
+.permission-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.stop-button { min-width: 34px; min-height: 34px; color: var(--on-accent); background: var(--bad); border-color: var(--bad); border-radius: 8px; }
+.stop-button:hover:not(:disabled) { background: color-mix(in srgb, var(--bad) 85%, var(--fg)); border-color: var(--bad); }
+.action-error { font-size: var(--text-xs); color: var(--bad); }
+
+@media (max-width: 760px) {
+  .composer { inline-size: calc(100% - 24px); }
+}
