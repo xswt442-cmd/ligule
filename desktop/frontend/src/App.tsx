@@ -19,7 +19,6 @@ import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
 import { approvalDisplaySession, approvalSession, toApprovalAsk, type ApprovalRequestParams } from './approval-request';
 import { reopenSessionWriter } from './session-reopen';
 import { requestIsCurrent, type RequestIdentity } from './request-identity';
-import { blockedSessions, type QuitInput, type QuitRow } from './quit';
 import { SessionRail } from './components/SessionRail';
 import type { SearchHit } from './components/rail/types';
 import { createCallOf, type WorkspaceRoster } from './rail';
@@ -44,7 +43,8 @@ import { addWorkbenchCommand, closeWorkbenchCommand, closeWorkbenchTab, openWork
   selectWorkbenchTab, updateWorkbenchFileDraft, workbenchStateFrom,
   type WorkbenchCommandReference, type WorkbenchFileDraft, type WorkbenchResource } from './workbench';
 import { LocaleProvider, localeOf } from './locale';
-import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
+import { useNotifications } from './use-notifications';
+import { useQuitGate } from './use-quit-gate';
 import { SessionStreamBuffer } from './session-stream';
 import { SessionWindow, olderRecoveryPage } from './session-window';
 import { observeExternalSession } from './external-session-observation';
@@ -440,31 +440,14 @@ export function App({ transport }: { transport: Transport }) {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId>('general');
   const openModelSettings = useCallback(() => { setSettingsSection('model'); setSettingsOpen(true); }, []);
   const openSecuritySettings = useCallback(() => { setSettingsSection('security'); setSettingsOpen(true); }, []);
-  const [notificationProblem, setNotificationProblem] = useState<string | null>(null);
   const [diagnosticLogs, setDiagnosticLogs] = useState<string[]>([]);
-  const [notificationDestination, setNotificationDestination] = useState<NotificationTarget | null>(null);
-  const notificationSessions = useRef(new Map<string, { root: string; name: string }>());
-  const notificationNow = useRef({ preferences: settings.notifications, language });
-  notificationNow.current = { preferences: settings.notifications, language };
-  const notificationReady = useRef<Promise<unknown>>(Promise.resolve());
-  const notify = useCallback((kind: NotificationKind, own?: string, root = '') => {
-    const bridge = transport.notifications;
-    const { preferences, language: currentLanguage } = notificationNow.current;
-    if (bridge === undefined || !preferences.enabled || !preferences[kind]) return;
-    const known = own === undefined ? undefined : notificationSessions.current.get(own);
-    const target = own === undefined ? undefined : { sessionId: own, projectRoot: known?.root ?? root };
-    void notificationReady.current.then(async () => {
-      if (!await bridge.permission()) throw new Error('notification_permission_not_granted');
-      const latest = notificationNow.current.preferences;
-      if (!latest.enabled || !latest[kind]) return;
-      await bridge.show(notificationOf(kind, currentLanguage, target, known?.name ?? ''));
-    }).catch(error => setNotificationProblem(code(error)));
-  }, [transport]);
-  // 仅当退出会影响活动会话时显示确认对话框。
-  const [quitRows, setQuitRows] = useState<QuitRow[]>([]);
-  const [quitHold, setQuitHold] = useState<string[] | null>(null);
-  const quitting = useRef(false);
-  const [closing, setClosing] = useState(false);
+  const reportTrayFailure = useCallback((message: string) => {
+    setDiagnosticLogs(current => [...current, message].slice(-50));
+  }, []);
+  const {
+    problem: notificationProblem, setProblem: setNotificationProblem,
+    destination: notificationDestination, setDestination: setNotificationDestination, sessions: notificationSessions, notify,
+  } = useNotifications(transport.notifications, settings.notifications, language, asks.length + queries.length, runningIds.length, reportTrayFailure);
   // 当前会话的模式和策略面板由顶栏对应按钮打开。
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [reading, setReading] = useState(false);
@@ -1521,23 +1504,6 @@ export function App({ transport }: { transport: Transport }) {
   }, [client, projectRoot, readOnlySessionId, sessionId]);
 
   useEffect(() => {
-    const bridge = transport.notifications;
-    if (bridge === undefined) return;
-    let disposed = false;
-    let stop: (() => void) | undefined;
-    const ready = bridge.onOpen(value => {
-      try { setNotificationDestination(notificationTarget(value)); }
-      catch { setNotificationProblem('notification_target_invalid'); }
-    });
-    notificationReady.current = ready;
-    void ready.then(unlisten => {
-      if (disposed) unlisten();
-      else stop = unlisten;
-    }).catch(() => setNotificationProblem('notification_listener_unavailable'));
-    return () => { disposed = true; stop?.(); };
-  }, [transport]);
-
-  useEffect(() => {
     if (notificationDestination === null || settingsOpen) return;
     const target = notificationDestination;
     setNotificationDestination(null);
@@ -1548,13 +1514,6 @@ export function App({ transport }: { transport: Transport }) {
     });
   }, [applyWorkbenchState, leaveDock, notificationDestination, openSession, settingsOpen]);
 
-  useEffect(() => {
-    const waiting = asks.length + queries.length;
-    const label = t(`ligule · ${waiting} 项待处理 · ${runningIds.length} 个运行中`, `ligule · ${waiting} awaiting input · ${runningIds.length} running`);
-    void transport.notifications?.updateTray(label, waiting > 0, language).catch(error => {
-      setDiagnosticLogs((current) => [...current, `Tray status update failed: ${code(error)}`].slice(-50));
-    });
-  }, [asks.length, language, queries.length, runningIds.length, t, transport]);
 
   const newSession = useCallback(async (root?: string) => {
     const request = ++openRequest.current;
@@ -1935,42 +1894,16 @@ export function App({ transport }: { transport: Transport }) {
     }
   }, [client, patchQueue, queues, sessionId]);
 
-  // 退出请求使用最新会话状态；订阅保持稳定，通过 ref 读取更新后的快照。
-  const quitInput = useRef<QuitInput>({ running: [], approvals: [], questions: [], queued: {} });
-  useEffect(() => {
-    quitInput.current = { running: runningIds, approvals: asks.map((ask) => ask.sessionId), questions: queries.map((query) => query.sessionId), queued: queues };
-  }, [asks, queues, queries, runningIds]);
-
-  // 退出前等待偏好保存完成；保存失败时保留窗口和输入，并暂停队列发送。
-  const quitApp = useCallback(async () => {
-    if (quitting.current) return;
-    quitting.current = true;
-    setClosing(true);
-    setQuitRows([]);
-    try {
-      await persistInputs();
-      for (const own of quitInput.current.running) await cancel(own);
-      await transport.quit?.();
-    } catch (error) {
-      setPrefsFailure(code(error));
-      setPrefsDetails(error instanceof Error ? error.message : String(error));
-      quitting.current = false;
-      setClosing(false);
-    }
-  }, [cancel, persistInputs, transport]);
-  const quitAction = useRef<() => void>(() => undefined);
-  quitAction.current = () => {
-    const blocked = blockedSessions(quitInput.current);
-    if (blocked.length === 0) void quitApp();
-    else setQuitRows(blocked);
-  };
-  useEffect(() => {
-    transport.onQuit?.(() => {
-      const reasons = [...settingsEdits.current, ...dockEdits.current];
-      if (reasons.length > 0) setQuitHold(reasons);
-      else quitAction.current();
-    });
-  }, [transport]);
+  const reportQuitFailure = useCallback((error: unknown) => {
+    setPrefsFailure(code(error));
+    setPrefsDetails(error instanceof Error ? error.message : String(error));
+  }, []);
+  const { rows: quitRows, setRows: setQuitRows, hold: quitHold, setHold: setQuitHold, closing, quitting,
+    quit: quitApp, approve: quitAction } = useQuitGate({
+    transport, cancel, persistInputs, reportFailure: reportQuitFailure,
+    input: { running: runningIds, approvals: asks.map(ask => ask.sessionId), questions: queries.map(query => query.sessionId), queued: queues },
+    editReasons: () => [...settingsEdits.current, ...dockEdits.current],
+  });
 
   // 输入停止 160 毫秒后查询候选；响应到达时若查询文本已变化则丢弃。
   // 传输层不支持取消正在执行的请求，因此通过忽略过期响应避免更新界面。

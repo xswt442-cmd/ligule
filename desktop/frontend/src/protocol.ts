@@ -39,7 +39,7 @@ export type Transport = {
   defaultWorkspace?: () => Promise<string>;
   // 托盘退出、macOS Cmd+Q 和关闭最后一个窗口都会触发此请求。
   // 界面列出受影响的会话并等待用户确认，再调用 `quit` 完成退出；不支持确认的传输不会自行退出。
-  onQuit?: (handle: () => void) => void;
+  onQuit?: (handle: () => void) => void | (() => void);
   quit?: () => Promise<void>;
 };
 
