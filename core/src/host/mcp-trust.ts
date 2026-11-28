@@ -10,6 +10,10 @@ import { withLockedAtomicFile } from '../storage/locked-file.js';
 
 export type McpTrustScope = 'project' | 'user';
 
+export function mcpTrustKey(server: string, identityDigest: string): string {
+  return `${server}\u0000${identityDigest}`;
+}
+
 export interface McpTrustEntry {
   readonly source: 'trusted-ui';
   readonly scope: McpTrustScope;

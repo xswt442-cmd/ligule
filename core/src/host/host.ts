@@ -20,7 +20,7 @@ import {
   listDelegationGrants, recordDelegationEvent, revokeDelegationGrant,
   type CreateDelegationGrantInput, type DelegationGrant, type DelegationPolicy,
 } from './agent-control.js';
-import { listMcpTrust, mcpServerTrust, mcpTrustPathOf, setMcpServerTrust, type McpTrustScope } from './mcp-trust.js';
+import { mcpServerTrust, mcpTrustKey, mcpTrustPathOf } from './mcp-trust.js';
 import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionContextOptions, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { createFileWriteQueue } from '../kernel/file-write-queue.js';
@@ -29,7 +29,6 @@ import {
   completeExtensionRun, loadExtensions, prepareExtensionRequest,
   type ExtensionHookRegistry,
 } from '../kernel/extensions.js';
-import { readExtensionState, writeExtensionState } from '../kernel/extension-state.js';
 import { applyModeToPrompt, DEFAULT_MODE, listModes, loadMode, resolveModeSelection } from '../kernel/modes.js';
 import { agentPresetDirectories } from '../kernel/agent-presets.js';
 import { registerWorkspace, workspaceIdentity } from '../kernel/workspace.js';
@@ -45,6 +44,7 @@ import type { SessionEvent } from '../session/format.js';
 import { chooseResumeMode, sessionDirectories, sessionDirectory } from '../session/list.js';
 import { adoptForSessionDirectory } from '../session/adopt.js';
 import { readConfig, writeConfig } from './handlers/config.js';
+import { createMcpExtensionHandlers } from './handlers/mcp-extensions.js';
 import { handleProjectRequest } from './handlers/project.js';
 import { createRunSubmissionHandler, handleRunRequest, runOriginOf } from './handlers/run.js';
 import { createSessionHandlers } from './handlers/session.js';
@@ -158,10 +158,6 @@ interface InitialSessionSettings {
 
 type ModeState = SessionModeState;
 type PolicyRememberScope = 'session' | 'project' | 'user';
-
-function mcpTrustKey(server: string, identityDigest: string): string {
-  return `${server}\u0000${identityDigest}`;
-}
 
 function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'path' | 'argsHash'>): string {
   return JSON.stringify([rule.tool, rule.match ?? '', rule.target ?? '', rule.path ?? '', rule.argsHash ?? '']);
@@ -3244,6 +3240,14 @@ export function createHost({
     serialize: serializeSessionConfiguration,
     validate: runContextOf,
   });
+  const mcpExtensions = createMcpExtensionHandlers({
+    environmentFor,
+    open,
+    sessions: () => sessions.values(),
+    currentMcpConfigs,
+    stopMcpServersWithChangedConfig,
+    revokeSessionMcp,
+  });
 
   const host: Host = {
     async handle(rawMessage: Pick<HostRequest, 'method' | 'params'>, connection: HostClientConnection): Promise<unknown> {
@@ -3954,42 +3958,11 @@ export function createHost({
             [...sessions.values()].filter((state) => state.managedGrantId === grantId));
           return result;
         }
-        case 'mcp.trust.list': {
-          const env = await environmentFor(message.params.projectRoot);
-          const session = message.params.sessionId === undefined ? undefined : open(requiredString(message.params.sessionId, 'sessionId'));
-          if (session !== undefined && session.environment !== env) throw new KernelError('session_project_forbidden');
-          const configuredServers = await currentMcpConfigs(env);
-          await stopMcpServersWithChangedConfig(env, configuredServers);
-          const store = await listMcpTrust(mcpTrustPathOf());
-          const servers = await Promise.all(configuredServers.map(async (server) => {
-            const sessionTrust = session?.mcpTrust.get(mcpTrustKey(server.name, server.identityDigest));
-            const projectIdentity = workspaceIdentity(await realpath(env.projectRoot));
-            const projectTrust = store.entries.find((entry) => entry.scope === 'project' && entry.projectIdentity === projectIdentity
-              && entry.server === server.name && entry.identityDigest === server.identityDigest);
-            const userTrust = store.entries.find((entry) => entry.scope === 'user'
-              && entry.server === server.name && entry.identityDigest === server.identityDigest);
-            const scopes = {
-              session: sessionTrust === undefined ? null : { source: sessionTrust.source, trusted: sessionTrust.trusted, updatedAt: sessionTrust.updatedAt },
-              project: projectTrust === undefined ? null : { source: projectTrust.source, trusted: projectTrust.trusted, updatedAt: projectTrust.updatedAt },
-              user: userTrust === undefined ? null : { source: userTrust.source, trusted: userTrust.trusted, updatedAt: userTrust.updatedAt },
-            };
-            const trust = scopes.session !== null ? { scope: 'session' as const, ...scopes.session }
-              : scopes.project !== null ? { scope: 'project' as const, ...scopes.project }
-                : scopes.user !== null ? { scope: 'user' as const, ...scopes.user }
-                  : undefined;
-            return {
-              name: server.name,
-              command: server.command,
-              args: server.args,
-              cwd: server.cwd,
-              environmentNames: server.environmentNames,
-              identityDigest: server.identityDigest,
-              trustScopes: scopes,
-              trust: trust === undefined ? null : { scope: trust.scope, source: trust.source, trusted: trust.trusted, updatedAt: trust.updatedAt },
-            };
-          }));
-          return { version: store.version, servers };
-        }
+        case 'mcp.trust.list':
+        case 'mcp.trust.set':
+        case 'mcp.trust.tools':
+        case 'extensions.set':
+          return await mcpExtensions[message.method](message.params);
         case 'settings.catalog': {
           const env = await environmentFor(message.params.projectRoot);
           const session = message.params.sessionId === undefined ? undefined : open(requiredString(message.params.sessionId, 'sessionId'));
@@ -4082,117 +4055,6 @@ export function createHost({
             ].map((diagnostic) => ({ code: diagnostic.code, source: extensionDiagnosticSource(diagnostic.path) })),
             customToolDiagnostics: customTools.diagnostics.map((diagnostic) => ({ code: diagnostic.code, source: basename(diagnostic.path) })),
           };
-        }
-        case 'mcp.trust.set': {
-          const env = await environmentFor(message.params.projectRoot);
-          const serverName = requiredString(message.params.server, 'server');
-          const expectedIdentity = requiredString(message.params.identityDigest, 'identityDigest');
-          const configuredServers = await currentMcpConfigs(env);
-          await stopMcpServersWithChangedConfig(env, configuredServers);
-          const server = configuredServers.find((item) => item.name === serverName);
-          if (server === undefined) throw new KernelError('mcp_server_unknown', { detail: serverName });
-          if (server.identityDigest !== expectedIdentity) throw new KernelError('mcp_server_config_changed', { detail: serverName });
-          const scope = requiredString(message.params.scope, 'scope');
-          if (scope !== 'session' && scope !== 'project' && scope !== 'user') throw new KernelError('mcp_trust_scope_invalid');
-          if (typeof message.params.trusted !== 'boolean') throw new KernelError('protocol_args_invalid', { detail: 'trusted must be a boolean' });
-          if (message.params.trusted && (message.params.confirmTrust !== true || message.params.confirmExternalAccess !== true)) {
-            throw new KernelError('mcp_trust_confirmation_required');
-          }
-          if (scope === 'session') {
-            const sessionId = requiredString(message.params.sessionId, 'sessionId');
-            const state = open(sessionId);
-            if (state.environment !== env) throw new KernelError('session_project_forbidden');
-            const sessionServer = state.environment.mcpConfigs.find((item) => item.name === serverName);
-            if (sessionServer?.identityDigest !== server.identityDigest) throw new KernelError('mcp_session_config_stale');
-            const updatedAt = new Date().toISOString();
-            await state.session.append({
-              kind: 'sessionMcpTrust', ignorable: true, server: serverName, identityDigest: server.identityDigest,
-              source: 'trusted-ui', trusted: message.params.trusted, updatedAt,
-            });
-            state.mcpTrust.set(mcpTrustKey(serverName, server.identityDigest), { source: 'trusted-ui', trusted: message.params.trusted, updatedAt });
-            if (!message.params.trusted) await revokeSessionMcp(state, serverName);
-            return { scope, server: serverName, trusted: message.params.trusted, updatedAt };
-          }
-
-          const store = await setMcpServerTrust(mcpTrustPathOf(), {
-            scope: scope as McpTrustScope,
-            projectRoot: env.projectRoot,
-            server: serverName,
-            identityDigest: server.identityDigest,
-            trusted: message.params.trusted,
-          }, requiredString(message.params.version, 'version'));
-          if (!message.params.trusted) {
-            for (const state of sessions.values()) {
-              const current = state.environment.mcpConfigs.find((item) => item.name === serverName);
-              if (current === undefined) continue;
-              if (scope === 'project' && state.environment !== env) continue;
-              if (scope === 'user' && current.identityDigest !== server.identityDigest) continue;
-              const sessionTrust = state.mcpTrust.get(mcpTrustKey(serverName, current.identityDigest));
-              const effective = sessionTrust ?? await mcpServerTrust(mcpTrustPathOf(), state.environment.projectRoot, serverName, current.identityDigest);
-              if (effective?.trusted !== true) await revokeSessionMcp(state, serverName);
-            }
-          }
-          return { version: store.version, scope, server: serverName, trusted: message.params.trusted };
-        }
-        case 'extensions.set': {
-          // 启停登记是用户范围的持久状态；只有可信界面可以修改。
-          const env = await environmentFor(message.params.projectRoot);
-          const name = requiredString(message.params.name, 'name');
-          if (typeof message.params.enabled !== 'boolean') {
-            throw new KernelError('protocol_args_invalid', { detail: 'enabled must be a boolean' });
-          }
-          // 名称必须对应安装目录中的扩展；配置层显式声明的路径不受登记管理。
-          const known = new Set([
-            ...Object.values(env.extensions.installNames ?? {}),
-            ...(env.extensions.disabled ?? []).map((entry) => entry.name),
-          ]);
-          if (!known.has(name)) {
-            throw new KernelError('extensions_set_unknown', { detail: `${name} is not an extension installed in the user extensions directory` });
-          }
-          const state = await readExtensionState();
-          // 登记存在但读不出来时停用名单不可信：中止写入，避免以空名单覆盖真实停用记录。
-          if (state.unavailable !== undefined) {
-            throw new KernelError('extensions_set_state_unavailable', { detail: state.unavailable });
-          }
-          const disabled = new Set(state.disabled);
-          if (message.params.enabled) disabled.delete(name);
-          else disabled.add(name);
-          await writeExtensionState(undefined, [...disabled]);
-          // 登记在下一次 Host 启动时生效；当前已加载的会话不受影响。
-          return { name, enabled: message.params.enabled, applies: 'next-start' };
-        }
-        case 'mcp.trust.tools': {
-          const env = await environmentFor(message.params.projectRoot);
-          const serverName = requiredString(message.params.server, 'server');
-          const configuredServers = await currentMcpConfigs(env);
-          await stopMcpServersWithChangedConfig(env, configuredServers);
-          const server = configuredServers.find((item) => item.name === serverName);
-          if (server === undefined) throw new KernelError('mcp_server_unknown', { detail: serverName });
-          const session = message.params.sessionId === undefined ? undefined : open(requiredString(message.params.sessionId, 'sessionId'));
-          if (session !== undefined && session.environment !== env) throw new KernelError('session_project_forbidden');
-          if (session !== undefined) {
-            const sessionServer = session.environment.mcpConfigs.find((item) => item.name === serverName);
-            if (sessionServer?.identityDigest !== server.identityDigest) throw new KernelError('mcp_session_config_stale');
-          }
-          const sessionTrust = session?.mcpTrust.get(mcpTrustKey(serverName, server.identityDigest));
-          const trust = sessionTrust ?? await mcpServerTrust(mcpTrustPathOf(), env.projectRoot, serverName, server.identityDigest);
-          if (trust?.trusted !== true) throw new KernelError('mcp_server_untrusted', { detail: serverName });
-          if (serverName === BROWSER_SERVER) {
-            if (session === undefined) throw new KernelError('browser_session_required');
-            const denied = permissionDenial(session.permission, 'external');
-            if (denied !== undefined) throw new KernelError(denied.code, { detail: denied.reason });
-            if (session.browserPaused) throw new KernelError('browser_stopped');
-            await session.browser.verify();
-            const tools = await session.mcp.toolsOf(serverName, AbortSignal.timeout(25_000));
-            return { server: serverName, identityDigest: server.identityDigest, tools: tools.map(({ name, description, digest }) => ({ name, description, digest })) };
-          }
-          const registry = createMcpRegistry([server]);
-          try {
-            const tools = await registry.toolsOf(serverName, AbortSignal.timeout(25_000));
-            return { server: serverName, identityDigest: server.identityDigest, tools: tools.map(({ name, description, digest }) => ({ name, description, digest })) };
-          } finally {
-            await registry.close();
-          }
         }
         case 'config.get':
           return await readConfig(await environmentFor(message.params.projectRoot));
