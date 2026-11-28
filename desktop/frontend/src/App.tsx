@@ -45,8 +45,7 @@ import { LocaleProvider, localeOf } from './locale';
 import { useNotifications } from './use-notifications';
 import { useApprovalsAndQuestions } from './use-approvals-and-questions';
 import { useQuitGate } from './use-quit-gate';
-import { SessionStreamBuffer } from './session-stream';
-import { SessionWindow, olderRecoveryPage } from './session-window';
+import { RENDER_WINDOW, useHostSession } from './use-host-session';
 import { observeExternalSession } from './external-session-observation';
 import { clearExternalSessionDraftIfCurrent, externalSessionDraftFor, externalSessionDraftRevisionFor, updateExternalSessionDrafts, type ExternalSessionDrafts } from './external-session-drafts';
 import { useSessionQueuesAndDrafts } from './use-session-queues-and-drafts';
@@ -136,7 +135,6 @@ function modelViewTargetLabel(target: ModelViewTarget, t: (chinese: string, engl
 }
 
 // 每次向前读取一页事件；打开会话时先取最近页，再按游标读取更早记录。
-const RENDER_WINDOW = 400;
 type PanelProps = {
   client: Client;
   status: Status | null;
@@ -269,39 +267,17 @@ export function App({ transport }: { transport: Transport }) {
   const creating = useRef(false);
   const newParameters = useRef<ReturnType<typeof createCallOf>>({});
   const booted = useRef(false);
-  const [rows, setRows] = useState<Row[]>([]);
-  const [live, setLive] = useState({ text: '', reasoning: '' });
-  // 按会话分别保存流式片段；切回后台会话时可先显示尚未落盘的输出。
-  const liveStreamRef = useRef<SessionStreamBuffer | null>(null);
-  if (liveStreamRef.current === null) liveStreamRef.current = new SessionStreamBuffer();
-  const liveBySession = liveStreamRef.current;
-  // 已应用的记录序号；打开会话期间收到的记录先缓存在这里，等快照落定后再按序应用。
-  const sessionWindowRef = useRef<SessionWindow<Record_> | null>(null);
-  if (sessionWindowRef.current === null) sessionWindowRef.current = new SessionWindow<Record_>();
-  const sessionWindow = sessionWindowRef.current;
-  const pendingRecords = useRef<Record_[] | null>(null);
-  const appendRecord = useCallback((record: Record_) => {
-    if (record?.kind === 'assistant') {
-      for (const call of record.toolCalls ?? []) dispatchAt.current.set(call.id, Date.now());
-    }
-    // 事件不保存逐条计时；运行时长由界面在轮次进行期间测量。
-    const started = record?.kind === 'tool' && record.callId !== undefined ? dispatchAt.current.get(record.callId) : undefined;
-    if (started !== undefined && record?.callId !== undefined) dispatchAt.current.delete(record.callId);
-    const added = projectRecord(record, started === undefined ? {} : { startedAt: started });
-    if (added.length > 0) setRows((current) => [...current, ...added]);
-  }, []);
+  const active = useRef<string | null>(null);
+  const { rows, setRows, live, setLive, openRequest, receiveDelta, receiveRecord, settleStream, clearStream,
+    beginOpen, invalidateOpen, abandonOpen, readPage, readInitial, readThrough, finishOpen } = useHostSession(client, active);
   const acceptExternalDelta = useCallback((kind: 'text' | 'reasoning', text: string) => {
-    const held = liveBySession.append(sessionId ?? '', kind, text);
-    if (held !== null && sessionId !== null) setLive(held);
-  }, [liveBySession, sessionId]);
+    if (sessionId !== null) receiveDelta(sessionId, kind, text);
+  }, [receiveDelta, sessionId]);
   const settleExternalEvent = useCallback((kind: string) => {
-    if (sessionId === null) return;
-    const held = liveBySession.settle(sessionId, kind);
-    setLive(held);
-  }, [liveBySession, sessionId]);
+    if (sessionId !== null) settleStream(sessionId, kind);
+  }, [sessionId, settleStream]);
   const terminalBySession = useRef(new Map<string, number>());
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
-  const active = useRef<string | null>(null);
   const {
     asks, queries, questionDrafts, receive: receiveInteraction, keepQuestionDraft, takeEchoes, outstandingApprovals,
     dropAsksOf, dropQueriesOf, resetInteractions, loadApprovalDetails, answer, answerQuestion,
@@ -482,13 +458,9 @@ export function App({ transport }: { transport: Transport }) {
   const anchors = useRef(new Map<string, number>());
   // 标记当前读取请求所属会话，切换会话后丢弃过期响应。
   const opening = useRef<string | null>(null);
-  // 每次打开会话都生成新的请求编号，避免 A→B→A 时旧请求释放新请求的输入保护。
-  const openRequest = useRef(0);
   const renderedSessionRequest: RequestIdentity = { scope: sessionId, generation: openRequest.current };
   // 短暂高亮定位目标，帮助用户在长转录中确认跳转位置。
   const [flash, setFlash] = useState<number | null>(null);
-  // 按调用 ID 记录派发时间，用于计算工具运行耗时。
-  const dispatchAt = useRef(new Map<string, number>());
   // 记录 Host 连接状态；null 表示连接正常，其他值是 Host 返回的错误信息。
   const [link, setLink] = useState<string | null>(null);
   const connectionLost = useRef(false);
@@ -858,11 +830,7 @@ export function App({ transport }: { transport: Transport }) {
     setPinned(false);
     setOlderLoading(true);
     try {
-      const observing = readOnlySessionId === sessionId;
-      const older = await client.call(observing ? 'session.observe' : 'session.read', {
-        ...(observing ? { projectRoot } : {}),
-        sessionId, before: page.before, limit: RENDER_WINDOW, fullResults: true,
-      }, 15_000) as { events: Record_[]; hasMore: boolean };
+      const older = await readPage({ id: sessionId, root: projectRoot, observing: readOnlySessionId === sessionId }, page.before);
       // 用户已切换会话时忽略过期响应，不更改新会话的列表和游标。
       if (opening.current !== sessionId || openRequest.current !== request) return;
       const added = older.events.flatMap((record) => projectRecord(record));
@@ -880,7 +848,7 @@ export function App({ transport }: { transport: Transport }) {
     } finally {
       if (!restoring && openRequest.current === request) setOlderLoading(false);
     }
-  }, [client, olderLoading, page, projectRoot, readOnlySessionId, sessionId]);
+  }, [olderLoading, page, projectRoot, readOnlySessionId, readPage, sessionId]);
 
   useEffect(() => {
     if (!settingsReady || inputOwner !== sessionId || quitting.current) return;
@@ -983,9 +951,7 @@ export function App({ transport }: { transport: Transport }) {
       }
       if (message.notify === 'delta') {
         const event = message.event as { type?: string; text?: string } | undefined;
-        const held = liveBySession.append(owner, event?.type ?? '', event?.text ?? '');
-        if (held === null) return;
-        if (inView) setLive(held);
+        receiveDelta(owner, event?.type ?? '', event?.text ?? '');
         return;
       }
       if (message.notify === 'event') {
@@ -999,17 +965,7 @@ export function App({ transport }: { transport: Transport }) {
             else if (record.status === 'failed' || record.status === 'interrupted') notify('failed', owner);
           }
         }
-        // 记录事件写入后，以持久事件替换对应会话的流式片段。
-        const held = liveBySession.settle(owner, record?.kind ?? '');
-        if (inView) setLive(held);
-        if (!inView) return;
-        // 打开会话的读取尚未完成：先按序缓存，等快照替换页面后再逐条应用。
-        const buffered = pendingRecords.current;
-        if (buffered !== null) {
-          buffered.push(record);
-          return;
-        }
-        appendRecord(record);
+        receiveRecord(owner, record);
       }
     });
 
@@ -1054,7 +1010,7 @@ export function App({ transport }: { transport: Transport }) {
       stopNotifications();
       stopRequests();
     };
-  }, [client, notify, receiveInteraction, transport]);
+  }, [client, notify, receiveDelta, receiveInteraction, receiveRecord, transport]);
 
   const refreshStatus = useCallback(async (id: string) => {
     const request: RequestIdentity = { scope: id, generation: openRequest.current };
@@ -1082,7 +1038,7 @@ export function App({ transport }: { transport: Transport }) {
   const openSession = useCallback(async (id: string, hit?: SearchHit, reclaimQueue = false, askedRoot?: string) => {
     const savedAnchor = anchors.current.get(id);
     opening.current = id;
-    const request = ++openRequest.current;
+    const request = beginOpen(id);
     // 同步更新前台会话和打开状态，再读取会话状态，避免渲染提交后将有效响应误判为过期。
     active.current = id;
     setSessionId(id);
@@ -1090,9 +1046,6 @@ export function App({ transport }: { transport: Transport }) {
     setUnread((current) => current.filter((item) => item !== id));
     setMobileSidebar(false);
     setRows([]);
-    // 记录事件可能在快照返回前就已到达；先缓存，等快照落定后按序号再应用。
-    pendingRecords.current = [];
-    sessionWindow.reset(0);
     setPage(null);
     setOlderLoading(false);
     prependAnchor.current = null;
@@ -1100,42 +1053,20 @@ export function App({ transport }: { transport: Transport }) {
     setInitialIndex({ index: 'LAST', align: 'end' });
     readerScrolling.current = false;
     setPinned(true);
-    // 切回会话时立即显示其尚未落盘的流式输出，避免正在运行的轮次暂时显示为空。
-    setLive(liveBySession.read(id));
     setWanted(null);
     setInputOwner(null);
     setReadOnlySessionId(null);
     setSessionWriterActive(false);
     setExternalControlSessionId(null);
     setStatus(null);
-    dispatchAt.current.clear();
     setReading(true);
     let observing = false;
-    let writerLockHeld = false;
-    let newest: {
-      events: Record_[];
-      hasMore: boolean;
-      header: { projectRoot?: string } | null;
-      label: { name: string; archived: boolean };
-      writerActive?: boolean;
-    };
     const requestedRoot = askedRoot === undefined || askedRoot === '' ? projectRoot : askedRoot;
     try {
-      // 为记录读取设置超时，避免客户端一直停留在加载状态。
-      // 指定项目时同时传递项目根目录，由 Host 选择对应环境并验证记录归属。
-      try {
-        await client.call('session.open', requestedRoot === '' ? { sessionId: id } : { sessionId: id, projectRoot: requestedRoot }, 60_000);
-        // 请求完整工具结果以读取溢出文件内容；只读取最近一页，更早记录由分页操作加载。
-        newest = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 60_000) as typeof newest;
-      } catch (error) {
-        if (code(error) !== 'session_locked') throw error;
-        writerLockHeld = true;
-        newest = await client.call('session.observe', {
-          projectRoot: requestedRoot, sessionId: id, limit: RENDER_WINDOW, fullResults: true,
-        }, 60_000) as typeof newest;
-        observing = true;
-      }
-      if (openRequest.current !== request) return;
+      const initial = await readInitial(id, requestedRoot, request);
+      if (initial === null || openRequest.current !== request) return;
+      observing = initial.observing;
+      const newest = initial.page;
       // 打开会话时恢复其草稿和暂停队列。
       const root = newest.header?.projectRoot ?? '';
       notificationSessions.current.set(id, { root, name: newest.label.name });
@@ -1149,21 +1080,11 @@ export function App({ transport }: { transport: Transport }) {
       setReadOnlySessionId(observing ? id : null);
       setSessionWriterActive(observing && newest.writerActive === true);
       setSettings((current) => ({ ...current, lastSession: { id, projectRoot: root } }));
-      let events = newest.events;
-      let hasMore = newest.hasMore;
-      while (hit !== undefined && hit.seq < Number(events[0]?.seq ?? 0) && hasMore) {
-        const older = await client.call(observing ? 'session.observe' : 'session.read', {
-          ...(observing ? { projectRoot: root } : {}),
-          sessionId: id, before: Number(events[0]?.seq), limit: RENDER_WINDOW, fullResults: true,
-        }, 15_000) as { events: Record_[]; hasMore: boolean };
-        // 用户已切换会话时忽略过期响应，不更新当前页面。
-        if (openRequest.current !== request) return;
-        if (older.events.length === 0) { hasMore = false; break; }
-        events = [...older.events, ...events];
-        hasMore = older.hasMore;
-      }
-      if (openRequest.current !== request) return;
-      setWriterLockNoticeSessionId(writerLockHeld && reclaimQueue ? id : null);
+      const scope = { id, root, observing };
+      const loaded = await readThrough(scope, newest, hit?.seq, request);
+      if (loaded === null || openRequest.current !== request) return;
+      const { events, hasMore } = loaded;
+      setWriterLockNoticeSessionId(observing && reclaimQueue ? id : null);
       // 将后台会话中已关闭问题卡片的题目和答案写入该会话记录。
       const kept = takeEchoes(id);
       setRows([
@@ -1173,54 +1094,14 @@ export function App({ transport }: { transport: Transport }) {
       connectionLost.current = false;
       setLink(null);
       setPage({ before: Number(events[0]?.seq ?? 1), hasMore });
-      // 快照已覆盖读取期间到达的记录；只把其中更新的记录接到末尾，重复的直接丢弃。
-      sessionWindow.reset(Number(events.at(-1)?.seq ?? 0));
-      const buffered = pendingRecords.current;
-      pendingRecords.current = null;
-      if (buffered !== null) {
-        let missing = 0;
-        for (const record of buffered) {
-          const decision = sessionWindow.incoming(record);
-          if (decision.apply) { appendRecord(record); continue; }
-          if (decision.reason === 'gap') { missing = decision.missingFrom; break; }
+      try {
+        const skipped = await finishOpen(scope, request, Number(events.at(-1)?.seq ?? 0));
+        if (skipped === null || openRequest.current !== request) return false;
+        if (skipped > 0) {
+          setRows(current => [...current, metaRow('meta', `有 ${skipped} 条更早的记录未能读取（已超出可恢复窗口）。`, `${skipped} earlier record(s) could not be read (outside the recoverable window).`)]);
         }
-        if (missing > 0) {
-          // 中间记录没有送达：从最新窗口往回补读，直到覆盖缺口或用完更早的记录。
-          try {
-            const collected = new Map<number, Record_>();
-            const remember = (events: Record_[]) => {
-              for (const event of events) {
-                const seq = Number(event.seq);
-                if (Number.isSafeInteger(seq)) collected.set(seq, event);
-              }
-            };
-            let page = await client.call(observing ? 'session.observe' : 'session.read', {
-              ...(observing ? { projectRoot: root } : {}),
-              sessionId: id, limit: RENDER_WINDOW, fullResults: true,
-            }, 15_000) as { events: Record_[]; hasMore: boolean };
-            if (openRequest.current !== request) return false;
-            remember(page.events);
-            let older = olderRecoveryPage(page, missing);
-            for (let reads = 0; older !== null && reads < 8; reads += 1) {
-              const previous = await client.call(observing ? 'session.observe' : 'session.read', {
-                ...(observing ? { projectRoot: root } : {}),
-                sessionId: id, before: older.before, limit: RENDER_WINDOW, fullResults: true,
-              }, 15_000) as { events: Record_[]; hasMore: boolean };
-              if (openRequest.current !== request) return false;
-              remember(previous.events);
-              older = olderRecoveryPage(previous, missing);
-            }
-            const ordered = [...collected.values()].sort((left, right) => Number(left.seq) - Number(right.seq));
-            for (const record of sessionWindow.adopt(ordered)) appendRecord(record);
-            const head = Number(buffered.at(-1)?.seq);
-            if (Number.isSafeInteger(head) && head > sessionWindow.loadedThrough) {
-              // 缺口早于可恢复窗口：如实说明，不把不连续的记录当成完整视图。
-              const skipped = head - sessionWindow.loadedThrough;
-              setRows((current) => [...current, metaRow('meta', `有 ${skipped} 条更早的记录未能读取（已超出可恢复窗口）。`, `${skipped} earlier record(s) could not be read (outside the recoverable window).`)]);
-            }
-          } catch { /* 传输已断开时由重新连接流程统一处理 */ }
-        }
-      }
+      } catch { /* 传输已断开时由重新连接流程统一处理 */ }
+      if (openRequest.current !== request) return false;
       // 如果保存的阅读位置仍在已加载页面中就恢复该位置；否则停在末尾，不改变展示档或自动加载更多页面。
       const back = savedAnchor !== undefined && savedAnchor > Number(events[0]?.seq) && savedAnchor < Number(events.at(-1)?.seq)
         ? { sessionId: id, seq: savedAnchor, kind: 'anchor' }
@@ -1228,7 +1109,7 @@ export function App({ transport }: { transport: Transport }) {
       setWanted(hit ?? back);
     } catch (error) {
       // 忽略旧请求的失败，避免将过期错误显示在当前会话中。
-      pendingRecords.current = null;
+      abandonOpen(request);
       if (openRequest.current === request) setRows((current) => [...current, metaRow('error', `无法打开会话：${code(error)}`, `Could not open conversation: ${code(error)}`)]);
       return false;
     } finally {
@@ -1238,7 +1119,7 @@ export function App({ transport }: { transport: Transport }) {
     if (openRequest.current !== request) return;
     if (!observing) void refreshStatus(id);
     return true;
-  }, [client, projectRoot, refreshStatus, restoreInputs, takeEchoes]);
+  }, [abandonOpen, beginOpen, finishOpen, projectRoot, readInitial, readThrough, refreshStatus, restoreInputs, takeEchoes]);
 
   // Side chat 的选区捕获、确认框与创建流程由 use-side-chat 持有；App 只传入当前会话与打开方式。
   const sideChat = useSideChat({
@@ -1311,7 +1192,7 @@ export function App({ transport }: { transport: Transport }) {
 
 
   const newSession = useCallback(async (root?: string) => {
-    const request = ++openRequest.current;
+    const request = invalidateOpen();
     setNewSessionSettingsRevision((revision) => revision + 1);
     setSessionMenuOpen(false);
     prependAnchor.current = null;
@@ -1371,7 +1252,7 @@ export function App({ transport }: { transport: Transport }) {
     } finally {
       if (openRequest.current === request) setReading(false);
     }
-  }, [client, pendingDraft, setDraft, setInputOwner, transport]);
+  }, [client, invalidateOpen, pendingDraft, setDraft, setInputOwner, transport]);
 
   useEffect(() => {
     if (!settingsReady || booted.current) return;
@@ -1517,15 +1398,14 @@ export function App({ transport }: { transport: Transport }) {
       // 轮次结束后移除该会话的待答问题卡片，避免旧请求阻挡其他会话或接受过期答复。
       dropQueriesOf(own, '这一轮已经收尾');
       // 轮次结束后移除该会话的流式片段；最终内容由已落盘记录提供。
-      liveBySession.clear(own);
-      if (inView()) setLive({ text: '', reasoning: '' });
+      clearStream(own);
       // 只有该会话自己的轮次结束后才继续发送其队列；其他会话结束不会触发发送。
       allowSend.current.add(own);
       // 后台会话结束时标记为有未读结果，切回时再清除。
       if (!inView()) setUnread((current) => [...new Set([...current, own])]);
       void refreshStatus(own);
     }
-  }, [client, dropAsksOf, dropQueriesOf, notify, outstandingApprovals, patchQueue, readOnlySessionId, refreshStatus, runningIds, sessionId, t]);
+  }, [clearStream, client, dropAsksOf, dropQueriesOf, notify, outstandingApprovals, patchQueue, readOnlySessionId, refreshStatus, runningIds, sessionId, t]);
 
   // 轮次结束后每次只发送队首一条。队列暂停时不发送，等待用户明确继续。
   // 连接断开或正在重连时不发送，避免将输入交给已退出的 Host。
@@ -2240,43 +2120,35 @@ export function App({ transport }: { transport: Transport }) {
         starting={starting}
         running={running}
         inputOwner={inputOwner}
-        draft={draft}
-        composerRef={composerRef}
-        queue={queue}
-        mention={mention}
-        sessionMenuOpen={sessionMenuOpen}
-        initialMode={newSessionMode}
-        initialPolicy={newSessionPolicy}
-        initialPermission={newSessionPermission}
-        initialPermissionConfirmations={newSessionPermissionConfirmations}
-        newSessionSettingsRevision={newSessionSettingsRevision}
-        modelCatalogRevision={modelCatalogRevision}
-        workspaceRevision={sessionsRevision}
         othersRunning={othersRunning}
-        onDraftChange={setDraft}
-        onCaretChange={setCaret}
-        onWalkChange={setWalk}
-        onDraftKeyDown={handleDraftKeyDown}
+        workspaceRevision={sessionsRevision}
         onSelectWorkspace={selectWorkspace}
-        onToggleQueue={toggleQueue}
-        onRecoverQueueItem={(index, all) => recoverQueueItem(index, all)}
-        onPickMention={pickMention}
-        onSelectModel={selectModel}
-        onSetThinking={selectThinking}
-        onManageModel={openModelSettings}
-        onOpenSecurity={openSecuritySettings}
-        onSessionMenuChange={setSessionMenuOpen}
-        onSetMode={(name) => void setMode(name)}
-        onSetPolicy={setPolicy}
-        onInitialPermissionChange={(target, confirmations) => {
-          setNewSessionPermission(target);
-          setNewSessionPermissionConfirmations(confirmations);
+        input={{ value: draft, ref: composerRef, onChange: setDraft, onCaretChange: setCaret, onWalkChange: setWalk, onKeyDown: handleDraftKeyDown }}
+        queue={{ value: queue, onToggle: toggleQueue, onRecover: (index, all) => recoverQueueItem(index, all),
+          onSend: () => void send(), onSteer: () => void steer(), onStop: () => void cancel() }}
+        mode={{
+          menuOpen: sessionMenuOpen,
+          initialMode: newSessionMode,
+          initialPolicy: newSessionPolicy,
+          initialPermission: newSessionPermission,
+          initialPermissionConfirmations: newSessionPermissionConfirmations,
+          newSessionSettingsRevision,
+          modelCatalogRevision,
+          onMenuChange: setSessionMenuOpen,
+          onSetMode: (name) => void setMode(name),
+          onSetPolicy: setPolicy,
+          onInitialPermissionChange: (target, confirmations) => {
+            setNewSessionPermission(target);
+            setNewSessionPermissionConfirmations(confirmations);
+          },
+          onPermissionStatus: (next) => { if (next.sessionId === renderedSessionRequest.scope
+            && requestIsCurrent(renderedSessionRequest, active.current, openRequest.current)) { setStatus(next); setTaskSnapshotAt(Date.now()); } },
+          onOpenSecurity: openSecuritySettings,
+          onSelectModel: selectModel,
+          onSetThinking: selectThinking,
+          onManageModel: openModelSettings,
         }}
-        onPermissionStatus={(next) => { if (next.sessionId === renderedSessionRequest.scope
-          && requestIsCurrent(renderedSessionRequest, active.current, openRequest.current)) { setStatus(next); setTaskSnapshotAt(Date.now()); } }}
-        onStop={() => void cancel()}
-        onSend={() => void send()}
-        onSteer={() => void steer()}
+        mention={{ state: mention, onPick: pickMention }}
       />}
       <section className="bottom-workbench" aria-label={t('命令工作区', 'Command workspace')}
         hidden={!settings.workbench.bottomOpen}
