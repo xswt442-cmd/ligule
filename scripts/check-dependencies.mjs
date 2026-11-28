@@ -342,11 +342,17 @@ try {
   const capabilityRuntime = dependencyCruiser([
     '--config', config, '--output-type', 'err', 'core/src/capability/kernel-runtime.ts',
   ], fixtureRoot);
-  assertStatus(capabilityRuntime, 1, 'capability_kernel_runtime_negative_fixture', 'capability-no-kernel-runtime-imports');
+  assertStatus(capabilityRuntime, 1, 'capability_kernel_runtime_negative_fixture', 'capability-no-kernel-or-session-runtime-imports');
   const capabilityType = dependencyCruiser([
     '--config', config, '--output-type', 'err', 'core/src/capability/kernel-type.ts',
   ], fixtureRoot);
   assertStatus(capabilityType, 0, 'capability_kernel_type_positive_fixture');
+  await writeFixture(fixtureRoot, 'core/src/session/capability-fixture.ts', "export const fixture = 1;\n");
+  await writeFixture(fixtureRoot, 'core/src/capability/session-runtime.ts', "export { fixture } from '../session/capability-fixture.js';\n");
+  const sessionRuntime = dependencyCruiser([
+    '--config', config, '--output-type', 'err', 'core/src/capability/session-runtime.ts',
+  ], fixtureRoot);
+  assertStatus(sessionRuntime, 1, 'capability_session_runtime_negative_fixture', 'capability-no-kernel-or-session-runtime-imports');
 
   process.stdout.write('dependency guard fixtures passed: Core -> TUI, Core/TUI/Desktop runtime npm-dev, renderer runtime Core imports via TypeScript AST (value, mixed, side-effect, dynamic, computed, relative core/src and core/dist), client deep core imports, internal host imports, domain imports of an assembly entry, wire imports of product assembly, runtime cycles and Core type cycles rejected; Electron host API, Core entry -> host, the @ligule/core entry, renderer type-only imports of @ligule/core, type-only npm-dev imports/references and non-Core type cycles allowed\n');
 } finally {

@@ -7,7 +7,8 @@ import { KernelError } from '../kernel/error.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
 import { workspaceDataDirectory } from '../session/list.js';
 import type { SessionDirectoryConfig } from '../session/list.js';
-import { createMediaStore, type SessionMediaScan } from '../capability/media.js';
+import type { SessionMediaScan } from '../capability/media.js';
+import { createMediaStore } from '../session/media-store.js';
 import { applyStorageGarbage, previewStorageGarbage, type StorageGcCandidate } from '../capability/storage-gc.js';
 
 export type StorageEnvironment = {

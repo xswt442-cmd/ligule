@@ -25,7 +25,7 @@ export { createReadImagePlugin } from './tools/read-image.js';
 export { createReadDocumentPlugin } from './tools/read-document.js';
 export { createWebSearchPlugin } from './tools/web-search.js';
 export { createScreenshotPlugin } from './tools/screenshot.js';
-export { createMediaStore } from './capability/media.js';
+export { createMediaStore } from './session/media-store.js';
 export { currentTodoSnapshot } from './session/todo.js';
 export { createMcpPlugin, createMcpTools } from './tools/mcp.js';
 export { createSubagentPlugin } from './tools/subagent.js';

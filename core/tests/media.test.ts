@@ -4,13 +4,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { access, mkdir, mkdtemp, open, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import sharp from 'sharp';
-import { createMediaStore, imagePreview, IMAGE_LIMITS } from '../dist/capability/media.js';
-import type { MediaStore } from '../dist/capability/media.js';
+import { imagePreview, IMAGE_LIMITS } from '../dist/capability/media.js';
+import { createMediaStore } from '../dist/session/media-store.js';
 import { sessionDirectory, workspaceDataDirectory } from '../dist/session/list.js';
 import type { SessionDirectoryConfig } from '../dist/session/list.js';
 import { createSessionLog } from '../dist/session/session.js';
 
-type StoreFixture = { root: string; config: SessionDirectoryConfig; store: MediaStore };
+type StoreFixture = { root: string; config: SessionDirectoryConfig; store: ReturnType<typeof createMediaStore> };
 
 async function withStore(run: (fixture: StoreFixture) => Promise<void>): Promise<void> {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'media-'));

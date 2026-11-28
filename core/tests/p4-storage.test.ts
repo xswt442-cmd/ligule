@@ -4,8 +4,9 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
-import { createMediaStore, IMAGE_LIMITS } from '../dist/capability/media.js';
-import type { ImageReference, MediaStore } from '../dist/capability/media.js';
+import { IMAGE_LIMITS } from '../dist/capability/media.js';
+import { createMediaStore } from '../dist/session/media-store.js';
+import type { ImageReference } from '../dist/capability/media.js';
 import { sessionDirectory } from '../dist/session/list.js';
 import type { SessionDirectoryConfig } from '../dist/session/list.js';
 import { createSessionLog } from '../dist/session/session.js';
@@ -13,6 +14,7 @@ import { createSessionLog } from '../dist/session/session.js';
 const fixtureRoot = fileURLToPath(new URL('../../testplace/v0.1.1/', import.meta.url));
 
 type StoreFixture = { root: string; config: SessionDirectoryConfig; store: MediaStore };
+type MediaStore = ReturnType<typeof createMediaStore>;
 
 async function withStore(run: (fixture: StoreFixture) => Promise<void>): Promise<void> {
   await mkdir(fixtureRoot, { recursive: true });

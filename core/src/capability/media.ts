@@ -7,7 +7,6 @@ import { KernelError } from '../errors.js';
 import { workspaceIdentity } from '../workspace-identity.js';
 import { dataRoot } from '../data-root.js';
 import { sessionDirectories, workspaceDataDirectory, type SessionDirectoryConfig } from '../workspace-storage.js';
-import { parseSessionBytes } from '../session/record.js';
 import { resolveWithin } from './paths.js';
 import { boundaryOf, workingDirectoryOf } from './limits.js';
 import { IMAGE_ID, IMAGE_LIMITS, isImageReference, type ImageReference } from '../media.js';
@@ -32,6 +31,11 @@ export interface SessionMediaScan {
   readonly sessions: Set<string>;
   position: number;
 }
+
+type ReadMediaRecord = (bytes: Buffer) => {
+  readonly header?: { readonly workspace?: string; readonly projectRoot?: string };
+  readonly events: readonly { readonly kind?: string; readonly result?: unknown }[];
+};
 
 const FORMATS = new Set(['png', 'jpeg', 'webp', 'gif']);
 
@@ -123,7 +127,7 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
     return { workspace, directories, entries, position: 0, stamps: [], referenced: new Set(), sessions: new Set() };
   }
 
-  async function advanceSessionScan(scan: SessionMediaScan): Promise<{
+  async function advanceSessionScan(scan: SessionMediaScan, readRecord: ReadMediaRecord): Promise<{
     complete: boolean; scannedSessions: number; readBytes: number; totalSessions: number;
   }> {
     if (scan.workspace !== workspace || scan.position > scan.entries.length
@@ -174,7 +178,7 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
         ?? (typeof header?.projectRoot === 'string' && header.projectRoot !== '' ? workspaceIdentity(header.projectRoot) : undefined);
       if (!((attributed !== undefined && attributed !== workspace)
         || (entry.directoryIndex !== 0 && attributed !== workspace))) {
-        const record = parseSessionBytes(bytes);
+        const record = readRecord(bytes);
         const verified = record.header?.workspace
           ?? (record.header?.projectRoot ? workspaceIdentity(record.header.projectRoot) : undefined);
         if (verified === workspace || entry.directoryIndex === 0) {
@@ -231,15 +235,15 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
     }
   }
 
-  async function readSessionMedia(): Promise<{ referenced: Set<string>; sessions: Set<string> }> {
+  async function readSessionMedia(readRecord: ReadMediaRecord): Promise<{ referenced: Set<string>; sessions: Set<string> }> {
     const scan = await beginSessionScan();
-    const page = await advanceSessionScan(scan);
+    const page = await advanceSessionScan(scan, readRecord);
     if (!page.complete) throw new KernelError('image_cleanup_scan_incomplete');
     await verifySessionScan(scan);
     return { referenced: scan.referenced, sessions: scan.sessions };
   }
 
-  async function cleanup({ dryRun = true, limit = 100, allowedIds, expectedFingerprints, withFingerprints = false, sessionScan }: {
+  async function cleanup(readRecord: ReadMediaRecord, { dryRun = true, limit = 100, allowedIds, expectedFingerprints, withFingerprints = false, sessionScan }: {
     dryRun?: boolean; limit?: number; allowedIds?: readonly string[];
     expectedFingerprints?: Readonly<Record<string, string>>; withFingerprints?: boolean; sessionScan?: SessionMediaScan;
   } = {})
@@ -250,7 +254,7 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
     if (allowedIds !== undefined && (!Array.isArray(allowedIds) || allowedIds.length > 1000
       || allowedIds.some(id => typeof id !== 'string' || !IMAGE_ID.test(id)))) throw new KernelError('image_cleanup_ids_invalid');
     await checkDirectory(false);
-    const mediaState = sessionScan === undefined ? await readSessionMedia() : (await verifySessionScan(sessionScan), sessionScan);
+    const mediaState = sessionScan === undefined ? await readSessionMedia(readRecord) : (await verifySessionScan(sessionScan), sessionScan);
     const references = mediaState.referenced;
     let compromised: Error | undefined;
     const unlock = await lockfile.lock(directory, { realpath: false, lockfilePath: join(directory, '.write.lock'),
@@ -304,7 +308,7 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
       const fingerprints = withFingerprints ? Object.fromEntries(candidates.slice(0, limit).map(candidate => [candidate.id, candidate.fingerprint])) : undefined;
       if (!dryRun) {
         // Re-scan canonical logs immediately under the media lock; source session existence protects append/branch races.
-        const latest = sessionScan === undefined ? await readSessionMedia() : (await verifySessionScan(sessionScan), sessionScan);
+        const latest = sessionScan === undefined ? await readSessionMedia(readRecord) : (await verifySessionScan(sessionScan), sessionScan);
         let removed = 0;
         let bytesFreed = 0;
         const removedIds: string[] = [];
@@ -489,7 +493,7 @@ export function createMediaStore(config: SessionDirectoryConfig, sessionId: stri
   };
 }
 
-export type MediaStore = ReturnType<typeof createMediaStore>;
+export type MediaStore = Pick<ReturnType<typeof createMediaStore>, 'read' | 'put' | 'reference'>;
 
 /** A transient display derivative; canonical records contain only the original reference. */
 export async function imagePreview(media: MediaStore, reference: ImageReference) {
