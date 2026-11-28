@@ -2,8 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { DropdownMenu } from 'radix-ui';
 import { type FlatIndexLocationWithAlign, type VirtuosoHandle } from 'react-virtuoso';
 import { code, createClient, type Client, type Transport } from './protocol';
-import { ApprovalCard, type Ask } from './components/ApprovalCard';
-import { QuestionCard, type QuestionAsk, type QuestionDrafts } from './components/QuestionCard';
+import { ApprovalCard } from './components/ApprovalCard';
+import { QuestionCard, type QuestionDrafts } from './components/QuestionCard';
 import { Icon } from './components/Icon';
 import { SettingsDialog, type SettingsSectionId } from './components/Settings';
 import { BranchPanel } from './components/BranchPanel';
@@ -16,7 +16,6 @@ import { SideSessionPanel } from './components/SideSessionPanel';
 import { HoldSheet } from './components/HoldSheet';
 import { QuitSheet } from './components/QuitSheet';
 import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
-import { approvalDisplaySession, approvalSession, toApprovalAsk, type ApprovalRequestParams } from './approval-request';
 import { reopenSessionWriter } from './session-reopen';
 import { requestIsCurrent, type RequestIdentity } from './request-identity';
 import { SessionRail } from './components/SessionRail';
@@ -36,7 +35,7 @@ import { insertMention, mentionToken } from './mentions';
 import type { ModelSelection } from './model-catalog';
 import { thinkingRequest } from './thinking-request';
 import { createSlotRegistry, SLOTS, type Panel } from './slots';
-import { appendProjectedRecords, changeBody, changeOf, metaRow, projectRecord, questionEcho, shownIn, type Record_, type Row } from './rows';
+import { appendProjectedRecords, metaRow, projectRecord, shownIn, type Record_, type Row } from './rows';
 import { taskSummaryLabelOf, taskSummaryOf, type Status } from './status';
 import { loadSettings, mergeQueueIntoDraft, readSettings, saveSettings, saveWorkbenchSettings, updateSettings, type Settings } from './settings';
 import { addWorkbenchCommand, closeWorkbenchCommand, closeWorkbenchTab, openWorkbenchResource, registerWorkbenchCommand, registerWorkbenchResource, selectWorkbenchCommand,
@@ -44,6 +43,7 @@ import { addWorkbenchCommand, closeWorkbenchCommand, closeWorkbenchTab, openWork
   type WorkbenchCommandReference, type WorkbenchFileDraft, type WorkbenchResource } from './workbench';
 import { LocaleProvider, localeOf } from './locale';
 import { useNotifications } from './use-notifications';
+import { useApprovalsAndQuestions } from './use-approvals-and-questions';
 import { useQuitGate } from './use-quit-gate';
 import { SessionStreamBuffer } from './session-stream';
 import { SessionWindow, olderRecoveryPage } from './session-window';
@@ -300,22 +300,13 @@ export function App({ transport }: { transport: Transport }) {
     setLive(held);
   }, [liveBySession, sessionId]);
   const terminalBySession = useRef(new Map<string, number>());
-  // 同一会话的待答问题按顺序排队，一次显示一个。
-  const [asks, setAsks] = useState<Ask[]>([]);
-  // 保存每个会话剩余的待答问题数，供轮次结束处理使用；在渲染后同步以避免读取旧状态。
-  const asksLeft = useRef<Ask[]>([]);
-  useEffect(() => { asksLeft.current = asks; }, [asks]);
-  // 提问和审批使用不同卡片与请求流程：审批决定是否允许操作，提问收集用户信息。
-  const [queries, setQueries] = useState<QuestionAsk[]>([]);
-  // 轮次结束时需要知道该会话剩余问题数和用户已输入的答案。
-  const queriesLeft = useRef<QuestionAsk[]>([]);
-  useEffect(() => { queriesLeft.current = queries; }, [queries]);
-  // 暂存卡片中的答案；卡片关闭后将问题和答案写入转录，并禁止重复提交。
-  const questionDrafts = useRef(new Map<string, QuestionDrafts>());
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const active = useRef<string | null>(null);
+  const {
+    asks, queries, questionDrafts, receive: receiveInteraction, keepQuestionDraft, takeEchoes, outstandingApprovals,
+    dropAsksOf, dropQueriesOf, resetInteractions, loadApprovalDetails, answer, answerQuestion,
+  } = useApprovalsAndQuestions(client, sessionId, active, composerRef, setRows);
   const externalQuestionDrafts = useRef(new Map<string, Map<string, QuestionDrafts>>());
-  // 会话不在前台时暂存其问题和答案，等重新打开该会话时再写入记录。
-  const pendingEchoes = useRef(new Map<string, Array<{ zh: string; en: string }>>());
-  const keepQuestionDraft = useCallback((id: string, drafts: QuestionDrafts) => { questionDrafts.current.set(id, drafts); }, []);
   const getExternalQuestionDraft = useCallback((owner: string, id: string) => externalQuestionDrafts.current.get(owner)?.get(id), []);
   const keepExternalQuestionDraft = useCallback((owner: string, id: string, drafts: QuestionDrafts | null) => {
     const sessionDrafts = externalQuestionDrafts.current.get(owner);
@@ -471,9 +462,6 @@ export function App({ transport }: { transport: Transport }) {
   const patchQueue = useCallback((own: string, next: (current: { items: string[]; paused: boolean }) => { items: string[]; paused: boolean }) => {
     setQueues((current) => ({ ...current, [own]: next(current[own] ?? { items: [], paused: false }) }));
   }, []);
-  const composerRef = useRef<HTMLTextAreaElement | null>(null);
-  // 当前前台会话 ID，与会话打开状态同步更新；后台会话的响应不得覆盖前台状态。
-  const active = useRef<string | null>(null);
   const updateExternalControlAvailability = useCallback((owner: string, available: boolean) => {
     if (active.current !== owner) return;
     setExternalControlSessionId(available ? owner : null);
@@ -1188,28 +1176,7 @@ export function App({ transport }: { transport: Transport }) {
         }).catch(() => reply('view_unavailable'));
         return;
       }
-      // 用户提问一次可以包含多道题，答复按题目编号关联；此流程与审批分开处理。
-      if (message.method === 'question.request') {
-        const asked = message.params as { sessionId?: string; projectRoot?: string; questions?: QuestionAsk['questions'] };
-        const owner = asked.sessionId;
-        const items = asked.questions;
-        if (typeof owner !== 'string' || owner === '' || !Array.isArray(items)) return;
-        const id = message.id ?? '';
-        if (!queriesLeft.current.some(one => one.id === id)) notify('question', owner, asked.projectRoot ?? '');
-        // 同一个请求编号只保留一张卡，且只能答复一次。
-        setQueries((current) => current.some((one) => one.id === id) ? current : [...current, { id, sessionId: owner, project: asked.projectRoot ?? '', questions: items }]);
-        return;
-      }
-      // Host 发出的交互请求分为审批和用户提问。
-      if (message.method !== 'approval.request') return;
-      const params = message.params as ApprovalRequestParams | undefined;
-      // 请求属于发起它的会话；即使会话在后台等待，也必须显示并允许答复。
-      const asked = approvalSession(params);
-      if (asked === null || params === undefined) return;
-      const displaySessionId = approvalDisplaySession(params) ?? asked;
-      notify('approval', displaySessionId, params.projectRoot ?? '');
-      const ask = toApprovalAsk(message.id ?? '', params);
-      setAsks((current) => [...current, ask]);
+      receiveInteraction(message, notify);
     });
 
     // 显示 Host 进程的标准错误输出；它不属于协议帧。
@@ -1218,7 +1185,7 @@ export function App({ transport }: { transport: Transport }) {
       stopNotifications();
       stopRequests();
     };
-  }, [client, notify, transport]);
+  }, [client, notify, receiveInteraction, transport]);
 
   const refreshStatus = useCallback(async (id: string) => {
     const request: RequestIdentity = { scope: id, generation: openRequest.current };
@@ -1239,30 +1206,6 @@ export function App({ transport }: { transport: Transport }) {
       if (isCurrent()) setRows((current) => [...current, metaRow('error', `无法读取状态：${code(error)}`, `Could not load status: ${code(error)}`)]);
     }
   }, [client]);
-
-  // 待答请求保留在所属会话中，切换前台会话时不清除。
-  // 只有该会话轮次结束、取消或 Host 重启时才清理请求。
-  const dropAsksOf = useCallback((id: string) => setAsks((current) => current.filter((ask) => ask.sessionId !== id)), [setAsks]);
-
-  // 会话轮次结束、取消或 Host 重启后，未答问题不再等待响应。
-  // 移除卡片前将题目和已输入内容写入记录，避免丢失用户输入。
-  const dropQueriesOf = useCallback((id: string, reason: string) => {
-    const left = queriesLeft.current.filter((one) => one.sessionId === id);
-    if (left.length === 0) return;
-    const lines = left.map((one) => {
-      const drafts = questionDrafts.current.get(one.id);
-      const reasonEnglish = reason === '宿主换了一具' ? 'The host restarted' : 'The turn ended';
-      return {
-        zh: `${questionEcho(one, drafts)}（${reason}，问题已结束）`,
-        en: `${questionEcho(one, drafts, 'en')} (${reasonEnglish}; the question is closed)`,
-      };
-    });
-    // 在后台结束的会话将完成提示暂存到自身状态，切回时再显示。
-    if (active.current === id) setRows((current) => [...current, metaRow('meta', lines.map((line) => line.zh).join('\n'), lines.map((line) => line.en).join('\n'))]);
-    else pendingEchoes.current.set(id, [...(pendingEchoes.current.get(id) ?? []), ...lines]);
-    for (const one of left) questionDrafts.current.delete(one.id);
-    setQueries((current) => current.filter((one) => one.sessionId !== id));
-  }, [setQueries]);
 
   // 切换会话时先通过 Host 打开记录；已打开的会话复用现有状态。
   // 指定搜索结果时一并读取到目标事件，并同时更新定位目标，避免列表扩展后视口短暂滚到末尾。
@@ -1366,8 +1309,7 @@ export function App({ transport }: { transport: Transport }) {
       if (openRequest.current !== request) return;
       setWriterLockNoticeSessionId(writerLockHeld && reclaimQueue ? id : null);
       // 将后台会话中已关闭问题卡片的题目和答案写入该会话记录。
-      const kept = pendingEchoes.current.get(id) ?? [];
-      pendingEchoes.current.delete(id);
+      const kept = takeEchoes(id);
       setRows([
         ...events.flatMap((record) => projectRecord(record)),
         ...kept.map((line) => metaRow('meta', line.zh, line.en)),
@@ -1440,7 +1382,7 @@ export function App({ transport }: { transport: Transport }) {
     if (openRequest.current !== request) return;
     if (!observing) void refreshStatus(id);
     return true;
-  }, [client, projectRoot, refreshStatus]);
+  }, [client, projectRoot, refreshStatus, takeEchoes]);
 
   // Side chat 的选区捕获、确认框与创建流程由 use-side-chat 持有；App 只传入当前会话与打开方式。
   const sideChat = useSideChat({
@@ -1610,9 +1552,7 @@ export function App({ transport }: { transport: Transport }) {
     const isCurrent = () => requestIsCurrent(request, active.current, openRequest.current);
     reconnecting.current = true;
     client.discard('host_restarted');
-    setAsks([]);
-    // Host 重启后旧请求编号失效；将未完成的问题和已输入答案写入记录，不自动提交给新 Host。
-    for (const owner of new Set(queriesLeft.current.map((one) => one.sessionId))) dropQueriesOf(owner, '宿主换了一具');
+    resetInteractions();
     setRunningIds([]);
     try {
       try {
@@ -1673,7 +1613,7 @@ export function App({ transport }: { transport: Transport }) {
       // 所有重连结果都要清除重连状态，避免后续无法再次重连或恢复队列。
       reconnecting.current = false;
     }
-  }, [client, dropQueriesOf, openSession, projectRoot, sessionId, setAsks, setRunningIds, transport]);
+  }, [client, openSession, projectRoot, resetInteractions, sessionId, setRunningIds, transport]);
 
   const readBack = useCallback(async () => {
     if (sessionId === null) return;
@@ -1717,7 +1657,7 @@ export function App({ transport }: { transport: Transport }) {
       setRunningIds((current) => current.filter((id) => id !== own));
       roundStart.current.delete(own);
       // 轮次结束后 Host 会拒绝未答审批；移除界面中的待答卡片并说明原因。
-      const left = asksLeft.current.filter((ask) => ask.sessionId === own).length;
+      const left = outstandingApprovals(own);
       if (left > 0 && inView()) {
         setRows((current) => [...current, metaRow('meta', `本轮结束时有 ${left} 个问题未回答，已按未允许处理。`, `${left} unanswered question(s) were closed as refused when the turn ended.`)]);
       }
@@ -1733,7 +1673,7 @@ export function App({ transport }: { transport: Transport }) {
       if (!inView()) setUnread((current) => [...new Set([...current, own])]);
       void refreshStatus(own);
     }
-  }, [client, dropAsksOf, dropQueriesOf, notify, patchQueue, readOnlySessionId, refreshStatus, runningIds, sessionId, t]);
+  }, [client, dropAsksOf, dropQueriesOf, notify, outstandingApprovals, patchQueue, readOnlySessionId, refreshStatus, runningIds, sessionId, t]);
 
   // 轮次结束后每次只发送队首一条。队列暂停时不发送，等待用户明确继续。
   // 连接断开或正在重连时不发送，避免将输入交给已退出的 Host。
@@ -2041,60 +1981,6 @@ export function App({ transport }: { transport: Transport }) {
       })),
     ];
   }, [branchFrom, cancel, collapsed, copyLastAnswer, compact, newSession, openSession, observingExternalSession, patch, projectRoot, readBack, sessionId, status, t]);
-
-  const loadApprovalDetails = useCallback(async (ask: Ask) => {
-    if (ask.detailsRef === undefined || ask.detailsLoaded === true || ask.detailsLoading === true) return;
-    setAsks((current) => current.map((item) => item.id === ask.id ? { ...item, detailsLoading: true, detailsError: undefined } : item));
-    try {
-      const result = await client.call('approval.details', { sessionId: ask.sessionId, requestId: ask.detailsRef }, 15_000) as { args?: unknown };
-      if (typeof result.args !== 'object' || result.args === null || Array.isArray(result.args)) throw new Error('approval_details_invalid');
-      const args = result.args as Record<string, unknown>;
-      const change = changeOf(ask.tool, args);
-      const englishChange = changeOf(ask.tool, args, 'en');
-      setAsks((current) => current.map((item) => item.id === ask.id ? {
-        ...item,
-        change: change.summary,
-        content: `${changeBody(change, args)}${item.detailsSuffix?.chinese ?? ''}`,
-        english: { change: englishChange.summary, content: `${changeBody(englishChange, args, 'en')}${item.detailsSuffix?.english ?? ''}` },
-        detailsLoading: false,
-        detailsLoaded: true,
-      } : item));
-    } catch (error) {
-      const failure = code(error);
-      setAsks((current) => current.map((item) => item.id === ask.id ? { ...item, detailsLoading: false, detailsError: failure } : item));
-    }
-  }, [client]);
-
-  const answer = useCallback((decision: 'allow' | 'deny', rememberScope?: 'session' | 'project' | 'user', rememberTarget?: 'file' | 'workspace' | 'tool' | 'command') => {
-    const head = asks.find((ask) => (ask.displaySessionId ?? ask.sessionId) === sessionId);
-    if (head === undefined) return;
-    setAsks((current) => current.filter((ask) => ask.id !== head.id));
-    // 答复按原请求编号返回，与当前前台会话无关。
-    // 答案回显只写入发起请求的会话转录。
-    if (head.sessionId === sessionId) {
-      // 先更新本地转录再发送答复，因为 Host 收到答复后可能立即返回工具结果。
-    }
-    client.reply(head.id, { decision, ...(rememberScope === undefined ? {} : { rememberScope }), ...(rememberTarget === undefined ? {} : { rememberTarget }) });
-    // 答复后移走按钮焦点，避免下一次 Enter 重复提交。
-    // 将焦点移至输入框，让键盘用户可以继续输入。
-    (document.activeElement as HTMLElement | null)?.blur();
-    composerRef.current?.focus();
-  }, [asks, client, sessionId]);
-
-  // 每个提问请求只能答复一次；提交后立即移除对应卡片。
-  const answerQuestion = useCallback((answers: { id: string; selected: string[]; custom?: string }[]) => {
-    const head = queries.find((query) => query.sessionId === sessionId);
-    if (head === undefined) return;
-    setQueries((current) => current.filter((query) => query.id !== head.id));
-    questionDrafts.current.delete(head.id);
-    if (head.sessionId === sessionId) {
-      setRows((current) => [...current, metaRow('meta', `${answers.length}/${head.questions.length} 个问题已回答，其余已标记为未回答。`, `${answers.length} of ${head.questions.length} questions answered; the rest were marked unanswered.`)]);
-    }
-    client.reply(head.id, { answers });
-    // 答复后移走按钮焦点，防止 Enter 重复提交。
-    (document.activeElement as HTMLElement | null)?.blur();
-    composerRef.current?.focus();
-  }, [client, queries, sessionId]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
