@@ -255,7 +255,7 @@ export function DeliveryPanel({ client, sessionId, projectRoot, status, hostRevi
       const page = await client.call('execution.logs', {
         sessionId, runId, executionId: check.executionId,
         ...(checkLogs[key]?.cursor === undefined ? {} : { cursor: checkLogs[key]?.cursor }), limitBytes: 4096,
-      }, 15_000) as Record<string, unknown>;
+      }, 15_000);
       if (sessionGeneration.current !== generation) return;
       const events = Array.isArray(page.events) ? page.events.flatMap(value => {
         if (!object(value) || typeof value.text !== 'string' || typeof value.stream !== 'string') return [];
@@ -490,7 +490,7 @@ export function CheckDetailPanel({ client, sessionId, projectRoot, runId, eventS
     try {
       const page = await client.call('execution.logs', {
         sessionId, runId, executionId, ...(cursor === undefined ? {} : { cursor }), limitBytes: 4096,
-      }, 15_000) as Record<string, unknown>;
+      }, 15_000);
       const events = Array.isArray(page.events) ? page.events.flatMap(value => {
         if (!object(value) || typeof value.text !== 'string' || typeof value.stream !== 'string') return [];
         return [{ stream: value.stream, text: value.text }];

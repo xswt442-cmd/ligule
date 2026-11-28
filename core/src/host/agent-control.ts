@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
-import lockfile from 'proper-lockfile';
-import { setTimeout as delay } from 'node:timers/promises';
+import { isAbsolute, join, resolve } from 'node:path';
 import { dataRoot } from '../kernel/config-file.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 import { isPolicyMode, POLICY_SEMANTICS, readPolicyMode, type PolicyMode } from '../kernel/policy.js';
+import { errorCode, isRecord } from '../shared/guards.js';
+import { withLockedAtomicFile } from '../storage/locked-file.js';
 import { grantState } from './review-evidence.js';
 import type { PermissionNetwork, PermissionProfile } from '../kernel/permission.js';
 
@@ -96,11 +96,6 @@ interface StoreRead {
   readonly mode?: number;
 }
 
-interface StoreLock {
-  assertOwned(): void;
-  release(): Promise<void>;
-}
-
 const STORE_LIMIT_BYTES = 2 * 1024 * 1024;
 const GRANT_LIMIT = 256;
 const AUDIT_LIMIT = 2048;
@@ -116,10 +111,6 @@ export function delegationPathOf(home = homedir()): string {
 
 function invalidStore(cause?: unknown): KernelError {
   return new KernelError('agent_control_store_invalid', { cause });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function onlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
@@ -312,58 +303,42 @@ async function readStore(path: string): Promise<StoreRead> {
   return { store, version: storeVersion(grants), mode: (await stat(path)).mode & 0o777 };
 }
 
-async function acquireStoreLock(path: string): Promise<StoreLock> {
-  let compromised: Error | undefined;
-  let unlock: (() => Promise<void>) | undefined;
-  try {
-    await mkdir(dirname(path), { recursive: true });
-    unlock = await lockfile.lock(path, {
-      realpath: false,
-      lockfilePath: `${path}.lock`,
-      stale: LOCK_STALE_MS,
-      update: 2_000,
-      retries: { retries: 6, minTimeout: 10, maxTimeout: 80 },
-      onCompromised: (error) => { compromised = error; },
-    });
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === 'ELOCKED') throw new KernelError('agent_control_store_locked', { cause });
-    throw new KernelRuntimeError('agent_control_store_lock_failed', { cause });
-  }
-  return {
-    assertOwned() {
-      if (compromised !== undefined) throw new KernelRuntimeError('agent_control_store_lock_lost', { cause: compromised });
+async function mutateStore<T>(
+  path: string,
+  expectedVersion: string | undefined,
+  mutate: (before: StoreRead) => { readonly store: DelegationStore; readonly result: T },
+): Promise<T> {
+  return withLockedAtomicFile(path, {
+    lockStaleMs: LOCK_STALE_MS,
+    lockRetries: { retries: 6, minTimeout: 10, maxTimeout: 80 },
+    renameMaxAttempts: 8,
+    renameMaxBackoffMs: 200,
+    errors: {
+      onLockFailed: (cause) => errorCode(cause) === 'ELOCKED'
+        ? new KernelError('agent_control_store_locked', { cause })
+        : new KernelRuntimeError('agent_control_store_lock_failed', { cause }),
+      onLockLost: (cause) => new KernelRuntimeError('agent_control_store_lock_lost', { cause }),
+      onUnlockFailed: (cause) => new KernelRuntimeError('agent_control_store_unlock_failed', { cause }),
+      onReplaceFailed: (cause) => new KernelRuntimeError('agent_control_store_replace_failed', { cause }),
     },
-    async release() {
-      if (compromised !== undefined) throw new KernelRuntimeError('agent_control_store_lock_lost', { cause: compromised });
-      try { await unlock!(); } catch (cause) { throw new KernelRuntimeError('agent_control_store_unlock_failed', { cause }); }
-    },
-  };
-}
-
-async function writeStore(path: string, before: StoreRead, store: DelegationStore, lock: StoreLock): Promise<void> {
-  const json = `${JSON.stringify(store)}\n`;
-  const bytes = Buffer.from(json, 'utf8');
-  if (bytes.byteLength > STORE_LIMIT_BYTES) throw new KernelError('agent_control_store_too_large');
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  try {
-    lock.assertOwned();
-    await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 });
-    await chmod(temporary, before.mode ?? 0o600);
-    for (let attempt = 0; ; attempt += 1) {
-      lock.assertOwned();
-      if ((await readStore(path)).version !== before.version) throw new KernelError('agent_control_version_stale');
-      try { await rename(temporary, path); break; }
-      catch (cause) {
-        const code = (cause as NodeJS.ErrnoException).code;
-        if (process.platform !== 'win32' || !['EACCES', 'EBUSY', 'EPERM'].includes(code ?? '') || attempt >= 8) {
-          throw new KernelRuntimeError('agent_control_store_replace_failed', { cause });
-        }
-        await delay(Math.min(20 * (2 ** attempt), 200));
+    run: async ({ target }) => {
+      const before = await readStore(target);
+      if (expectedVersion !== undefined && expectedVersion !== before.version) {
+        throw new KernelError('agent_control_version_stale');
       }
-    }
-  } finally {
-    await rm(temporary, { force: true });
-  }
+      const { store, result } = mutate(before);
+      const bytes = Buffer.from(`${JSON.stringify(store)}\n`, 'utf8');
+      if (bytes.byteLength > STORE_LIMIT_BYTES) throw new KernelError('agent_control_store_too_large');
+      return {
+        content: bytes,
+        mode: before.mode ?? 0o600,
+        beforeRename: async () => {
+          if ((await readStore(target)).version !== before.version) throw new KernelError('agent_control_version_stale');
+        },
+        result,
+      };
+    },
+  });
 }
 
 function publicSnapshot(store: DelegationStore, version: string): DelegationSnapshot {
@@ -441,7 +416,6 @@ export async function createDelegationGrant(
   input: CreateDelegationGrantInput,
   expectedVersion: string,
 ): Promise<DelegationSnapshot> {
-  const target = resolve(path);
   const checked = checkedInput(input);
   let projectRoot: string;
   try {
@@ -451,10 +425,7 @@ export async function createDelegationGrant(
     if (cause instanceof KernelError) throw cause;
     throw new KernelError('agent_control_project_invalid', { cause });
   }
-  const lock = await acquireStoreLock(target);
-  try {
-    const before = await readStore(target);
-    if (expectedVersion !== before.version) throw new KernelError('agent_control_version_stale');
+  return mutateStore(path, expectedVersion, (before) => {
     if (before.store.grants.length >= GRANT_LIMIT) throw new KernelError('agent_control_grant_limit');
     const now = new Date().toISOString();
     const grant = validateGrant({ ...checked, id: randomUUID(), projectRoot, source: 'trusted-ui', createdAt: now, revokedAt: null });
@@ -463,17 +434,12 @@ export async function createDelegationGrant(
       grants: [...before.store.grants, grant],
       audit: [...before.store.audit, { at: now, kind: 'grant.created' as const, grantId: grant.id, source: grant.source }].slice(-AUDIT_LIMIT),
     };
-    await writeStore(target, before, store, lock);
-    return publicSnapshot(store, storeVersion(store.grants));
-  } finally { await lock.release(); }
+    return { store, result: publicSnapshot(store, storeVersion(store.grants)) };
+  });
 }
 
 export async function revokeDelegationGrant(path: string, id: string, expectedVersion: string): Promise<DelegationSnapshot> {
-  const target = resolve(path);
-  const lock = await acquireStoreLock(target);
-  try {
-    const before = await readStore(target);
-    if (expectedVersion !== before.version) throw new KernelError('agent_control_version_stale');
+  return mutateStore(path, expectedVersion, (before) => {
     const index = before.store.grants.findIndex((grant) => grant.id === id);
     if (index < 0) throw new KernelError('agent_control_grant_not_found');
     const current = before.store.grants[index]!;
@@ -486,9 +452,8 @@ export async function revokeDelegationGrant(path: string, id: string, expectedVe
       grants,
       audit: [...before.store.audit, { at: now, kind: 'grant.revoked' as const, grantId: id }].slice(-AUDIT_LIMIT),
     };
-    await writeStore(target, before, store, lock);
-    return publicSnapshot(store, storeVersion(store.grants));
-  } finally { await lock.release(); }
+    return { store, result: publicSnapshot(store, storeVersion(store.grants)) };
+  });
 }
 
 export async function requireDelegationGrant(path: string, id: string, projectRoot: string): Promise<DelegationGrant> {
@@ -552,12 +517,9 @@ export async function recordDelegationEvent(
   path: string,
   event: Omit<DelegationAuditEvent, 'at'>,
 ): Promise<void> {
-  const target = resolve(path);
-  const lock = await acquireStoreLock(target);
-  try {
-    const before = await readStore(target);
+  await mutateStore(path, undefined, (before) => {
     const auditEvent = validateAudit({ ...event, at: new Date().toISOString() });
     const store: DelegationStore = { ...before.store, audit: [...before.store.audit, auditEvent].slice(-AUDIT_LIMIT) };
-    await writeStore(target, before, store, lock);
-  } finally { await lock.release(); }
+    return { store, result: undefined };
+  });
 }

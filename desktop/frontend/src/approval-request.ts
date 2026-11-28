@@ -1,39 +1,10 @@
 // 把 Host 的 approval.request 参数整理成审批卡需要的形状。
 // 这里只做参数归一与文案，不决定是否放行，也不持有界面状态。
+import type { ApprovalRequestParams } from '@ligule/core';
 import type { Ask } from './components/ApprovalCard';
 import { capabilityOf, changeBody, changeOf } from './rows.ts';
 
-export type ApprovalRequestParams = {
-  sessionId?: string;
-  sourceSessionId?: string;
-  projectRoot?: string;
-  tool?: string;
-  command?: string;
-  args?: Record<string, unknown>;
-  reason?: string;
-  shell?: string;
-  executable?: string;
-  policy?: string;
-  policySource?: string;
-  policyForced?: boolean;
-  detailsRef?: string;
-  argumentBytes?: number;
-  argumentSha256?: string;
-  identityDigest?: string;
-  contentBytes?: number;
-  contentSha256?: string;
-  rememberable?: boolean;
-  rememberScopes?: ('session' | 'project' | 'user')[];
-  rememberHintKey?: 'file' | 'tool' | 'command' | 'mcp';
-  rememberTargetOptions?: ('file' | 'workspace' | 'tool' | 'command')[];
-  scriptBinding?: {
-    path?: string;
-    sha256?: string;
-    interpreter?: string;
-    workspaceRoot?: string;
-    permission?: { profile?: string; network?: string; capabilities?: Record<string, string> };
-  };
-};
+export type { ApprovalRequestParams };
 
 /** 请求必须属于某个会话，否则不显示审批卡。 */
 export function approvalSession(params: ApprovalRequestParams | undefined): string | null {

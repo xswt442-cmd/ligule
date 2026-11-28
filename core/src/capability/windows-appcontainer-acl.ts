@@ -1,3 +1,5 @@
+import { isNullNativeHandle as isNull } from '../shared/guards.js';
+
 type Koffi = typeof import('koffi')['default'];
 import type { NativeHandle } from './windows-appcontainer-process.js';
 import { createHash } from 'node:crypto';
@@ -48,15 +50,11 @@ interface AceRecord {
   readonly sid: AppContainerHandle;
 }
 
-function isNull(pointer: AppContainerHandle | null | undefined): boolean {
-  return pointer === null || pointer === undefined || pointer === 0 || pointer === 0n;
-}
-
 function pointerOffset(pointer: AppContainerHandle, offset: number): AppContainerHandle {
   return typeof pointer === 'bigint' ? pointer + BigInt(offset) : pointer + offset;
 }
 
-function bindings(koffi: Koffi) {
+function createBindings(koffi: Koffi) {
   const kernel = koffi.load('kernel32.dll');
   const advapi = koffi.load('advapi32.dll');
   const PVOID = koffi.pointer('void');
@@ -98,6 +96,16 @@ function bindings(koffi: Koffi) {
     localFree: bind(kernel, 'LocalFree', PVOID, [PVOID]),
     lastError: bind(kernel, 'GetLastError', 'uint32_t', []),
   };
+}
+
+const bindingsCache = new WeakMap<Koffi, ReturnType<typeof createBindings>>();
+function bindings(koffi: Koffi) {
+  let cached = bindingsCache.get(koffi);
+  if (cached === undefined) {
+    cached = createBindings(koffi);
+    bindingsCache.set(koffi, cached);
+  }
+  return cached;
 }
 
 function aceSidOffset(koffi: Koffi, ace: AppContainerHandle, type: number): number {

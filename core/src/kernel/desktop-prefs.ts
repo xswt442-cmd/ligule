@@ -1,12 +1,12 @@
 // 桌面偏好文档按完整 JSON 保存；版本核对与替换都在同一把跨进程锁内完成。
-import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
-import lockfile from 'proper-lockfile';
+import { createHash } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { setTimeout as delay } from 'node:timers/promises';
 import { dataRoot } from './config-file.js';
 import { KernelError, KernelRuntimeError } from './error.js';
+import { errorCode, errorMessage, isPlainObject } from '../shared/guards.js';
+import { withLockedAtomicFile } from '../storage/locked-file.js';
 
 /** 偏好文档的最大字节数。 */
 export const DESKTOP_PREFS_LIMIT_BYTES = 1024 * 1024;
@@ -15,10 +15,6 @@ const PREFS_LOCK_STALE_MS = 10_000;
 
 export function prefsPathOf(home = homedir()): string {
   return join(dataRoot(home), 'desktop.json');
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function invalidPrefs(cause?: unknown): KernelError {
@@ -74,60 +70,25 @@ export function parsePrefsJson(json: string): Record<string, unknown> {
   return parsePrefsBytes(Buffer.from(json, 'utf8'));
 }
 
-type PrefsLock = { assertOwned(): void; release(): Promise<void> };
-
-async function acquirePrefsLock(path: string): Promise<PrefsLock> {
-  let compromised: Error | undefined;
-  let unlock: (() => Promise<void>) | undefined;
-  try {
-    await mkdir(dirname(path), { recursive: true });
-    unlock = await lockfile.lock(path, {
-      realpath: false,
-      lockfilePath: `${path}.lock`,
-      stale: PREFS_LOCK_STALE_MS,
-      update: 2_000,
-      retries: { retries: 6, minTimeout: 10, maxTimeout: 80 },
-      onCompromised: (error) => { compromised = error; },
-    });
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === 'ELOCKED') {
-      throw new KernelError('desktop_prefs_locked', { cause, detail: `${path} has an active writer` });
-    }
-    throw new KernelRuntimeError('desktop_prefs_lock_failed', { cause, detail: path });
-  }
-  return {
-    assertOwned() {
-      if (compromised !== undefined) {
-        throw new KernelRuntimeError('desktop_prefs_lock_lost', { cause: compromised, detail: path });
-      }
-    },
-    async release() {
-      if (compromised !== undefined) {
-        throw new KernelRuntimeError('desktop_prefs_lock_lost', { cause: compromised, detail: path });
-      }
-      try {
-        await unlock!();
-      } catch (cause) {
-        throw new KernelRuntimeError('desktop_prefs_unlock_failed', { cause, detail: path });
-      }
-    },
-  };
-}
-
-// 进程内串行化写入，并使用文件锁协调其他 Host 进程。
-const pendingSaves = new Map<string, Promise<{ settings: Record<string, unknown>; version: string }>>();
-
 export async function savePrefs(
   path: string,
   value: Record<string, unknown>,
   options: { version?: string } = {},
 ): Promise<{ settings: Record<string, unknown>; version: string }> {
-  const target = resolve(path);
-  const queued = pendingSaves.get(target) ?? Promise.resolve({ settings: {}, version: '' });
-  const current = queued.catch(() => ({ settings: {}, version: '' })).then(async () => {
-    const lock = await acquirePrefsLock(target);
-    let temporary: string | undefined;
-    try {
+  return withLockedAtomicFile(path, {
+    lockStaleMs: PREFS_LOCK_STALE_MS,
+    lockRetries: { retries: 6, minTimeout: 10, maxTimeout: 80 },
+    renameMaxAttempts: 24,
+    renameMaxBackoffMs: 250,
+    errors: {
+      onLockFailed: (cause, target) => errorCode(cause) === 'ELOCKED'
+        ? new KernelError('desktop_prefs_locked', { cause, detail: `${target} has an active writer` })
+        : new KernelRuntimeError('desktop_prefs_lock_failed', { cause, detail: target }),
+      onLockLost: (cause, target) => new KernelRuntimeError('desktop_prefs_lock_lost', { cause, detail: target }),
+      onUnlockFailed: (cause, target) => new KernelRuntimeError('desktop_prefs_unlock_failed', { cause, detail: target }),
+      onReplaceFailed: (cause) => new KernelRuntimeError('desktop_prefs_replace_failed', { cause, detail: errorMessage(cause) }),
+    },
+    run: async ({ target }) => {
       const before = await readPrefsFile(target);
       if (options.version !== undefined && options.version !== before.version) {
         throw new KernelError('desktop_prefs_version_stale', { detail: `${target} changed since it was read; nothing was written` });
@@ -135,41 +96,16 @@ export async function savePrefs(
       const json = `${JSON.stringify(value)}\n`;
       const settings = parsePrefsJson(json);
       const bytes = Buffer.from(json, 'utf8');
-      lock.assertOwned();
-      temporary = `${target}.${randomUUID()}.tmp`;
-      await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 });
-      await chmod(temporary, before.mode ?? 0o600);
-      // Windows 文件锁可能延迟释放；有限重试期间继续持锁并重新校验版本。
-      for (let attempt = 0; ; attempt += 1) {
-        lock.assertOwned();
-        if ((await readPrefsFile(target)).version !== before.version) {
-          throw new KernelError('desktop_prefs_version_stale', { detail: `${target} changed before replacement; nothing was written` });
-        }
-        try {
-          await rename(temporary, target);
-          break;
-        } catch (cause) {
-          const code = (cause as NodeJS.ErrnoException)?.code;
-          if (process.platform !== 'win32' || !['EACCES', 'EBUSY', 'EPERM'].includes(code ?? '') || attempt >= 24) {
-            throw new KernelRuntimeError('desktop_prefs_replace_failed', { cause, detail: cause instanceof Error ? cause.message : String(cause) });
+      return {
+        content: bytes,
+        mode: before.mode ?? 0o600,
+        beforeRename: async () => {
+          if ((await readPrefsFile(target)).version !== before.version) {
+            throw new KernelError('desktop_prefs_version_stale', { detail: `${target} changed before replacement; nothing was written` });
           }
-        }
-        await delay(Math.min(20 * (2 ** attempt), 250));
-      }
-      temporary = undefined;
-      return { settings, version: createHash('sha256').update(bytes).digest('hex') };
-    } finally {
-      try {
-        if (temporary !== undefined) await rm(temporary, { force: true });
-      } finally {
-        await lock.release();
-      }
-    }
+        },
+        result: { settings, version: createHash('sha256').update(bytes).digest('hex') },
+      };
+    },
   });
-  pendingSaves.set(target, current);
-  try {
-    return await current;
-  } finally {
-    if (pendingSaves.get(target) === current) pendingSaves.delete(target);
-  }
 }

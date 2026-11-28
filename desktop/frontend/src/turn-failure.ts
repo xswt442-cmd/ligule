@@ -77,6 +77,16 @@ export function turnFailure(code: string, diagnostics?: unknown): TurnFailure {
       return { explanation: ['模型服务返回了不支持的结束原因。请检查接口类型与兼容性。', 'The model service returned an unsupported finish reason. Check its API type and compatibility.'], action: 'models' };
     case 'provider_tool_call_invalid':
       return { explanation: ['模型返回的工具调用缺少有效标识或名称，或标识重复。请检查模型服务兼容性。', 'The model returned a tool call with a missing or duplicate identity, or missing name. Check model service compatibility.'], action: 'models' };
+    case 'exec_temp_cleanup_failed':
+      return { explanation: ['命令结束后无法清理私有临时目录。检查系统文件占用或权限，核对已完成操作后再决定是否重试。', 'Ligule could not remove its private execution directory. Check OS file locks or permissions and inspect completed effects before retrying.'] };
+    case 'exec_script_snapshot_cleanup_failed':
+      return { explanation: ['命令结束后无法清理脚本快照。检查源文件所在目录的权限和占用，并核对已完成操作后再决定是否重试。', 'Ligule could not remove the execution script snapshot. Check permissions and file locks in its source directory, then inspect completed effects before retrying.'] };
+    case 'exec_sandbox_cleanup_failed':
+      return { explanation: ['平台沙箱清理未能确认完成。检查操作系统权限或 ACL 状态，确认后再重试受限命令。', 'Platform sandbox cleanup could not be confirmed. Check OS permissions or ACL state before retrying the restricted command.'] };
+    case 'exec_sandbox_setup_failed':
+      return { explanation: ['受限命令的操作系统沙箱未能初始化。检查当前平台的隔离能力与系统权限后重试。', 'The operating-system sandbox for the restricted command could not be initialized. Check platform isolation support and OS permissions before retrying.'] };
+    case 'exec_termination_cleanup_failed':
+      return { explanation: ['进程是否已终止和临时资源清理均未确认。先检查进程状态和已完成操作，再决定是否重试。', 'Process termination and temporary-resource cleanup are both unconfirmed. Check running processes and completed effects before retrying.'] };
     case 'provider_output_budget_invalid':
     case 'provider_output_budget_unsupported':
       return { explanation: ['输出预算无效或超过当前模型及配置允许的上限。检查 model.outputTokens 和能力限制。', 'The output budget is invalid or exceeds this model and configuration limit. Check model.outputTokens and capability limits.'], action: 'models' };
@@ -84,6 +94,16 @@ export function turnFailure(code: string, diagnostics?: unknown): TurnFailure {
       return { explanation: ['当前模型未配置 API Key。请在模型服务中设置密钥或检查环境变量。', 'No API key is configured for this model. Set a key in Model services or check its environment variable.'], action: 'models' };
     case 'provider_credential_unbound':
       return { explanation: ['模型服务地址与凭据引用未在用户配置中绑定。请将该服务保存到用户层，或通过命令行明确配置服务目标。', 'The model endpoint and credential reference are not bound in user configuration. Save the service in the user layer or explicitly configure its target through command-line flags.'], action: 'models' };
+    case 'credential_store_unavailable':
+      return { explanation: ['系统凭据存储当前不可用。检查系统凭据服务，或改用环境变量提供凭据。', 'The system credential store is unavailable. Check the OS credential service or provide the credential through an environment variable.'], action: 'models' };
+    case 'host_model_config_missing':
+      return { explanation: ['尚未配置模型。请在桌面配置模型服务。', 'No model is configured. Configure a model service in Desktop.'], action: 'models' };
+    case 'provider_api_form_required':
+      return { explanation: ['尚未选择模型服务接口类型。检查模型服务配置并选择支持的接口类型。', 'The model service API type is missing. Check the model service settings and choose a supported API type.'], action: 'models' };
+    case 'model_service_not_found':
+      return { explanation: ['所选模型服务不存在。请查看可用服务并重新选择。', 'The selected model service was not found. View available services and select one again.'], action: 'models' };
+    case 'model_not_available':
+      return { explanation: ['所选模型不在该服务的可用列表中。请选择该服务列出的模型。', 'The selected model is not available from this service. Choose a model listed for that service.'], action: 'models' };
     case 'provider_model_required':
     case 'provider_base_url_required':
     case 'provider_base_url_invalid':

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { KernelError } from '../errors.js';
+import { isNullNativeHandle as isNull } from '../shared/guards.js';
 
 type Koffi = typeof import('koffi')['default'];
 export type NativeHandle = number | bigint;
@@ -15,10 +16,6 @@ const HANDLE_FLAG_INHERIT = 0x00000001;
 const WAIT_OBJECT_0 = 0;
 const WAIT_TIMEOUT = 258;
 const STILL_ACTIVE = 259;
-
-function isNull(handle: NativeHandle | null | undefined): boolean {
-  return handle === null || handle === undefined || handle === 0 || handle === 0n;
-}
 
 function nativeHandle(koffi: Koffi, value: unknown): NativeHandle {
   if (value === null || value === undefined) return 0n;
@@ -56,7 +53,7 @@ function environmentBlock(environment: NodeJS.ProcessEnv): Buffer {
   return Buffer.from(text, 'utf16le');
 }
 
-function bindings(koffi: Koffi) {
+function createBindings(koffi: Koffi) {
   const kernel = koffi.load('kernel32.dll');
   const userenv = koffi.load('userenv.dll');
   const advapi = koffi.load('advapi32.dll');
@@ -92,6 +89,16 @@ function bindings(koffi: Koffi) {
     getExitCode: bind(kernel, 'GetExitCodeProcess', 'int32_t', [PVOID, koffi.pointer('uint32_t')]),
     setHandleInformation: bind(kernel, 'SetHandleInformation', 'int32_t', [PVOID, 'uint32_t', 'uint32_t']),
   };
+}
+
+const bindingsCache = new WeakMap<Koffi, ReturnType<typeof createBindings>>();
+function bindings(koffi: Koffi) {
+  let cached = bindingsCache.get(koffi);
+  if (cached === undefined) {
+    cached = createBindings(koffi);
+    bindingsCache.set(koffi, cached);
+  }
+  return cached;
 }
 
 export interface AppContainerProfile {

@@ -1,13 +1,13 @@
 // 扩展启停登记：数据根下的持久状态，记录用户显式停用的已安装扩展。
 // 登记只过滤安装目录的发现结果；配置层显式声明的路径不受其约束。
 // 读取失败时已安装扩展全部停用，同时把原因交回环境装载器报告。
-import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import lockfile from 'proper-lockfile';
+import { join } from 'node:path';
 import { dataRoot } from './config-file.js';
-import { KernelError } from './error.js';
+import { KernelError, KernelRuntimeError } from './error.js';
+import { errorCode } from '../shared/guards.js';
+import { withLockedAtomicFile } from '../storage/locked-file.js';
 
 const STATE_VERSION = 1;
 
@@ -52,34 +52,17 @@ export async function readExtensionState(home = homedir()): Promise<ExtensionSta
 // 读取-合并-写入在同一文件锁内完成；临时文件加原子替换落盘。
 export async function writeExtensionState(home = homedir(), disabled: readonly string[] = []): Promise<void> {
   const target = extensionStatePath(home);
-  await mkdir(dirname(target), { recursive: true });
-  let release: () => Promise<void>;
-  try {
-    release = await lockfile.lock(target, { realpath: false, lockfilePath: `${target}.lock`, stale: 10_000, update: 2_000, retries: 0 });
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === 'ELOCKED') {
-      throw new KernelError('extension_state_locked', { detail: `${target} has an active writer` });
-    }
-    throw cause;
-  }
-  const temporary = `${target}.${randomUUID()}.tmp`;
-  let created = false;
-  try {
-    const document = JSON.stringify({ version: STATE_VERSION, disabled: [...new Set(disabled)].sort() }, null, 2);
-    const handle = await open(temporary, 'wx', 0o600);
-    created = true;
-    try {
-      await handle.writeFile(document, 'utf8');
-    } finally {
-      await handle.close();
-    }
-    await rename(temporary, target);
-    created = false;
-  } finally {
-    try {
-      if (created) await rm(temporary, { force: true });
-    } finally {
-      await release();
-    }
-  }
+  await withLockedAtomicFile(target, {
+    errors: {
+      onLockFailed: (cause, path) => errorCode(cause) === 'ELOCKED'
+        ? new KernelError('extension_state_locked', { detail: `${path} has an active writer` })
+        : (cause instanceof Error ? cause : new Error(String(cause))),
+      onLockLost: (cause, path) => new KernelRuntimeError('extension_state_lock_lost', { cause, detail: path }),
+      onUnlockFailed: (cause, path) => new KernelRuntimeError('extension_state_unlock_failed', { cause, detail: path }),
+    },
+    run: async () => ({
+      content: JSON.stringify({ version: STATE_VERSION, disabled: [...new Set(disabled)].sort() }, null, 2),
+      result: undefined,
+    }),
+  });
 }

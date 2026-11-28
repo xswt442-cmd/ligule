@@ -1,18 +1,14 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, isAbsolute } from 'node:path';
-import lockfile from 'proper-lockfile';
 import { dataRoot } from './config-file.js';
 import { KernelError, KernelRuntimeError } from './error.js';
 import { workspaceIdentity } from '../workspace-identity.js';
+import { withLockedAtomicFile } from '../storage/locked-file.js';
 
 type TrustDocument = { version: 1; directories: string[] };
 
 const LOCK_STALE_MS = 10_000;
-const pendingWrites = new Map<string, Promise<void>>();
-
-type TrustLock = { assertOwned(): void; release(): Promise<void> };
 
 export function trustPathOf(home = homedir()): string {
   return join(dataRoot(home), 'trust.json');
@@ -86,74 +82,27 @@ export async function isTrusted(directory: string, path = trustPathOf()): Promis
   return document.directories.includes(identity);
 }
 
-async function acquireLock(path: string): Promise<TrustLock> {
-  let compromised: Error | undefined;
-  let unlock: (() => Promise<void>) | undefined;
-  try {
-    unlock = await lockfile.lock(path, {
-      realpath: false,
-      lockfilePath: `${path}.lock`,
-      stale: LOCK_STALE_MS,
-      update: 2_000,
-      retries: { retries: 12, minTimeout: 20, maxTimeout: 100 },
-      onCompromised: (error) => { compromised = error; },
-    });
-  } catch (cause) {
-    throw new KernelRuntimeError('tui_trust_locked', { cause, detail: 'the TUI trust document could not be locked' });
-  }
-  return {
-    assertOwned() {
-      if (compromised !== undefined) {
-        throw new KernelRuntimeError('tui_trust_lock_lost', { cause: compromised, detail: 'the TUI trust document lock was lost' });
-      }
-    },
-    async release() {
-      try {
-        await unlock!();
-      } catch (cause) {
-        throw new KernelRuntimeError('tui_trust_unlock_failed', { cause, detail: 'the TUI trust document lock could not be released' });
-      }
-      if (compromised !== undefined) {
-        throw new KernelRuntimeError('tui_trust_lock_lost', { cause: compromised, detail: 'the TUI trust document lock was lost' });
-      }
-    },
-  };
-}
-
-async function writeTrust(path: string, identity: string, trusted: boolean): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const lock = await acquireLock(path);
-  let temporary: string | undefined;
-  try {
-    // 读取旧名后备，写入新名：首次写入即把旧文件的内容合并进新文件。
-    const document = await readDocument(path, legacyPathOf(path));
-    const directories = new Set(document.directories);
-    if (trusted) directories.add(identity);
-    else directories.delete(identity);
-    temporary = `${path}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify({ version: 1, directories: [...directories] }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    lock.assertOwned();
-    await rename(temporary, path);
-    temporary = undefined;
-  } finally {
-    try {
-      if (temporary !== undefined) await rm(temporary, { force: true });
-    } finally {
-      await lock.release();
-    }
-  }
-}
-
 export async function setTrusted(directory: string, trusted: boolean, path = trustPathOf()): Promise<void> {
   if (typeof trusted !== 'boolean') throw new KernelError('tui_trust_value_invalid');
   const identity = await verifiedIdentity(directory);
-  const target = resolve(path);
-  const previous = pendingWrites.get(target) ?? Promise.resolve();
-  const current = previous.catch(() => {}).then(() => writeTrust(target, identity, trusted));
-  pendingWrites.set(target, current);
-  try {
-    await current;
-  } finally {
-    if (pendingWrites.get(target) === current) pendingWrites.delete(target);
-  }
+  await withLockedAtomicFile(path, {
+    lockStaleMs: LOCK_STALE_MS,
+    lockRetries: { retries: 12, minTimeout: 20, maxTimeout: 100 },
+    errors: {
+      onLockFailed: (cause) => new KernelRuntimeError('tui_trust_locked', { cause, detail: 'the TUI trust document could not be locked' }),
+      onLockLost: (cause) => new KernelRuntimeError('tui_trust_lock_lost', { cause, detail: 'the TUI trust document lock was lost' }),
+      onUnlockFailed: (cause) => new KernelRuntimeError('tui_trust_unlock_failed', { cause, detail: 'the TUI trust document lock could not be released' }),
+    },
+    run: async ({ target }) => {
+      // 读取旧名后备，写入新名：首次写入即把旧文件的内容合并进新文件。
+      const document = await readDocument(target, legacyPathOf(target));
+      const directories = new Set(document.directories);
+      if (trusted) directories.add(identity);
+      else directories.delete(identity);
+      return {
+        content: `${JSON.stringify({ version: 1, directories: [...directories] }, null, 2)}\n`,
+        result: undefined,
+      };
+    },
+  });
 }

@@ -1487,8 +1487,8 @@ export function App({ transport }: { transport: Transport }) {
     if (source.running === true || source.activeRunId !== null) {
       throw Object.assign(new Error('side_chat_origin_run_stale'), { code: 'side_chat_origin_run_stale' });
     }
-    const preferences = await client.call('prefs.read', {}, 15_000) as { settings?: Settings };
-    const storedDrafts = preferences.settings?.drafts ?? readSettings().drafts;
+    const preferences = await client.call('prefs.read', {}, 15_000);
+    const storedDrafts = (preferences.settings as Partial<Settings> | undefined)?.drafts ?? readSettings().drafts;
     const storedRoot = Object.keys(storedDrafts).find(candidate => sameProjectRoot(candidate, root));
     const canonicalRoot = storedRoot ?? root;
     const key = JSON.stringify([canonicalRoot, sourceSessionId]);
@@ -1634,7 +1634,7 @@ export function App({ transport }: { transport: Transport }) {
   const branchFrom = useCallback(async (at?: number) => {
     if (sessionId === null) return;
     try {
-      const branched = await client.call('session.branch', { sessionId, ...(at === undefined ? {} : { at }) }, 15_000) as { sessionId: string; at: number };
+      const branched = await client.call('session.branch', { sessionId, ...(at === undefined ? {} : { at }) }, 15_000);
       await openSession(branched.sessionId);
       setSessionsRevision((current) => current + 1);
       setRows((current) => [...current, metaRow('meta', `已从第 ${branched.at} 条创建分支 ${branched.sessionId.slice(0, 8)}。`, `Created branch ${branched.sessionId.slice(0, 8)} through event ${branched.at}.`)]);
@@ -2057,7 +2057,7 @@ export function App({ transport }: { transport: Transport }) {
   const compact = useCallback(async () => {
     if (sessionId === null) return;
     try {
-      const result = await client.call('session.compact', { sessionId }) as { fromSeq: number; toSeq: number; tokensBefore: number; tokensAfter: number };
+      const result = await client.call('session.compact', { sessionId });
       setRows((current) => [...current, metaRow('meta', `已压缩记录 ${result.fromSeq}–${result.toSeq}：${result.tokensBefore} → ${result.tokensAfter} 个词元。`, `Compacted events ${result.fromSeq}–${result.toSeq}: ${result.tokensBefore} → ${result.tokensAfter} tokens.`)]);
     } catch (error) {
       setRows((current) => [...current, metaRow('error', `压缩失败：${code(error)}`, `Could not compact context: ${code(error)}`)]);

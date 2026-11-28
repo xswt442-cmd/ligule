@@ -1,4 +1,4 @@
-import type { Client } from './protocol';
+import type { Client, HostMethodParamsOf } from './protocol';
 import type { PermissionEnforcement, PermissionNetwork, PermissionProfile, SessionPermission, Status } from './status';
 
 export type PermissionTarget = { profile: PermissionProfile; network: PermissionNetwork };
@@ -55,8 +55,10 @@ function permissionRequest(
   target: PermissionTarget,
   confirmed: PermissionConfirmations,
   running: boolean,
-): Record<string, unknown> | null {
-  if (!canChangePermission(status, running)) throw new Error('permission_change_unavailable');
+): HostMethodParamsOf<'permission.set'> | null {
+  if (!canChangePermission(status, running) || status === null || status.sessionId === undefined) {
+    throw new Error('permission_change_unavailable');
+  }
   const current = permissionOf(status);
   const required = permissionConfirmations(current, target);
   if (required.includes('full-access') && !confirmed.fullAccess) {
@@ -73,7 +75,7 @@ function permissionRequest(
   }
   if (target.profile === current.profile && target.network === current.network) return null;
   return {
-    sessionId: status?.sessionId,
+    sessionId: status.sessionId,
     permissionProfile: target.profile,
     // Send the network only when the user actually changed it. Otherwise it is
     // derived from the current effective permission, and re-sending it would

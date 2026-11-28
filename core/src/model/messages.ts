@@ -8,6 +8,7 @@ import {
 } from './http.js';
 import type { ModelMessage, ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { imageInputOf, resolveRequestImages } from './images.js';
+import { asRecord, booleanCapability, numberCapability, parseArgs, tokenCount, type JsonRecord, type ModelProvider } from './common.js';
 import type { ImageReference } from '../media.js';
 
 interface MessagesCapabilities extends ProviderCapabilities {
@@ -28,17 +29,6 @@ interface MessagesProviderOptions {
   readonly retry?: RetryPolicy;
 }
 
-interface ModelProvider {
-  readonly imageInput: boolean;
-  readonly requiresCompletion: true;
-  readonly name: string;
-  readonly model: string;
-  readonly capabilities: MessagesCapabilities;
-  readonly outputTokens: number;
-  stream(request: ModelRequest, options?: { readonly signal?: AbortSignal | null }): AsyncGenerator<ProviderEvent>;
-  withModel(model: string): ModelProvider;
-}
-
 type ImageContentBlock = { readonly type: 'text'; readonly text: string }
   | { readonly type: 'image'; readonly source: { readonly type: 'base64'; readonly media_type: 'image/png'; readonly data: string } };
 type MessagesBlock =
@@ -55,26 +45,9 @@ type MessageBlockState =
   | { readonly kind: 'tool'; readonly id: string; readonly name: string; readonly input: unknown; json: string }
   | { readonly kind: 'reasoning'; signature?: string };
 
-type JsonRecord = Record<string, unknown>;
-
-function isJsonRecord(value: unknown): value is JsonRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function asRecord(value: unknown, detail: string): JsonRecord {
-  if (!isJsonRecord(value)) {
-    throw new KernelError('provider_stream_invalid', { detail });
-  }
-  return value;
-}
-
 function requiredString(value: unknown, detail: string): string {
   if (typeof value !== 'string' || value === '') throw new KernelError('provider_tool_call_invalid', { detail });
   return value;
-}
-
-function tokenCount(value: unknown): number | null {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function messagesUsageEvent(usage: JsonRecord): ProviderEvent | undefined {
@@ -114,16 +87,6 @@ function messagesUsageEvent(usage: JsonRecord): ProviderEvent | undefined {
 
 function stringOrEmpty(value: unknown): string {
   return typeof value === 'string' ? value : '';
-}
-
-function numberCapability(value: boolean | number, name: string): number {
-  if (typeof value !== 'number') throw new KernelError('provider_capability_invalid', { detail: `${name} must be a number` });
-  return value;
-}
-
-function booleanCapability(value: boolean | number, name: string): boolean {
-  if (typeof value !== 'boolean') throw new KernelError('provider_capability_invalid', { detail: `${name} must be a boolean` });
-  return value;
 }
 
 // 提供方声明的能力上限；配置不能超过这些值。
@@ -412,15 +375,4 @@ export function createMessagesProvider({
     },
   };
   return Object.freeze(provider);
-}
-
-// 参数无法解析时立即报错，不等待流结束。空参数片段表示无参数调用，不等于参数缺失。
-function parseArgs(json: string): unknown {
-  if (json === '') return {};
-  try {
-    const parsed: unknown = JSON.parse(json);
-    return parsed;
-  } catch (error) {
-    throw new KernelError('provider_tool_args_invalid', { detail: 'tool arguments are not valid JSON' });
-  }
 }

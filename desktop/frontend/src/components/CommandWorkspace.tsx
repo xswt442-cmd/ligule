@@ -176,14 +176,14 @@ export function CommandWorkspace({
         client.call('status.get', { sessionId: reference.operationSessionId }, 10_000) as Promise<Status>,
         client.call('execution.status', {
           sessionId: reference.operationSessionId, runId: reference.operationId, executionId: reference.executionId,
-        }, 10_000) as Promise<Record<string, unknown>>,
+        }, 10_000),
         client.call('execution.logs', {
           sessionId: reference.operationSessionId,
           runId: reference.operationId,
           executionId: reference.executionId,
           ...(viewsRef.current[key]?.cursor === undefined ? {} : { cursor: viewsRef.current[key]?.cursor }),
           limitBytes: 4096,
-        }, 10_000) as Promise<Record<string, unknown>>,
+        }, 10_000),
       ]);
       if (sessionStatus.operation?.operationId !== reference.operationId
         || sessionStatus.operation.sourceSessionId !== reference.sourceSessionId) {

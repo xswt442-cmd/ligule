@@ -1,15 +1,16 @@
 // TOML 解析器提供语法节点和文本范围；编辑器只修改允许字段和规则表。
 // 写入前校验文件版本和完整配置，同时保留其他注释、键顺序和原始字节。
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { parse } from 'smol-toml';
 import { getStaticTOMLValue, parseTOML, traverseNodes, VisitorKeys, type AST } from 'toml-eslint-parser';
-import lockfile from 'proper-lockfile';
 import { isDeepStrictEqual } from 'node:util';
 import { KernelError, KernelRuntimeError } from './error.js';
 import { isPolicyRule, POLICY_MODES, POLICY_SEMANTICS } from './policy.js';
 import { modelSelection, modelServices, selectionLiteral, servicesLiteral } from './model-services.js';
+import { errorCode, isPortableAbsolutePath } from '../shared/guards.js';
+import { withLockedAtomicFile } from '../storage/locked-file.js';
 
 /** `[[policy.rules]]` 中的一条工具规则。 */
 export type PolicyRule = {
@@ -354,102 +355,86 @@ export async function writeConfigField(
   const rule = definition.kind === 'rules' && op !== 'remove' ? checkedRule(request.rule) : undefined;
   const server = definition.kind === 'mcpServer' && op !== 'remove' ? checkedMcpServer(request.server)
     : definition.kind === 'mcpServer' ? checkedMcpServerName(request.server) : undefined;
-  const target = resolve(file);
-  let release: () => Promise<void>;
-  try {
-    await mkdir(dirname(target), { recursive: true });
-    release = await lockfile.lock(target, { realpath: false, lockfilePath: `${target}.lock`, stale: 10_000, update: 2_000, retries: 0 });
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === 'ELOCKED') throw new KernelError('config_locked', { detail: `${target} has an active writer` });
-    throw new KernelRuntimeError('config_lock_failed', { cause, detail: target });
-  }
-  const temporary = `${target}.${randomUUID()}.tmp`;
-  let temporaryCreated = false;
-  try {
-    let current = '';
-    let exists = true;
-    let mode: number | undefined;
-    try {
-      const bytes = await readFile(target);
-      current = bytes.toString('utf8');
-      mode = (await stat(target)).mode & 0o777;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw new KernelRuntimeError('config_file_read_failed', { cause: error, detail: target });
-      }
-      exists = false;
-    }
-    // 版本比较和写入都在同一文件锁内完成，避免覆盖其他进程的更新。
-    // 文件不存在时使用空版本；已存在的空文件仍使用其内容哈希。
-    if ((exists ? configVersion(current) : '') !== request.version) {
-      throw new KernelError('config_version_stale', { detail: `${target} changed since it was read; nothing was written` });
-    }
-    const read = (text: string, code: 'config_file_invalid' | 'config_edit_verify_failed'): Record<string, unknown> => {
+  return withLockedAtomicFile(file, {
+    lockStaleMs: 10_000,
+    lockRetries: 0,
+    errors: {
+      onLockFailed: (cause, target) => errorCode(cause) === 'ELOCKED'
+        ? new KernelError('config_locked', { detail: `${target} has an active writer` })
+        : new KernelRuntimeError('config_lock_failed', { cause, detail: target }),
+      onLockLost: (cause, target) => new KernelRuntimeError('config_lock_lost', { cause, detail: target }),
+      onUnlockFailed: (cause, target) => new KernelRuntimeError('config_unlock_failed', { cause, detail: target }),
+    },
+    run: async ({ target }) => {
+      let current = '';
+      let exists = true;
+      let mode: number | undefined;
       try {
-        return parse(text) as Record<string, unknown>;
-      } catch (cause) {
-        throw new KernelError(code, { cause, detail: `${code === 'config_file_invalid' ? 'that file' : 'the edited text'} does not read back as TOML` });
+        const bytes = await readFile(target);
+        current = bytes.toString('utf8');
+        mode = (await stat(target)).mode & 0o777;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new KernelRuntimeError('config_file_read_failed', { cause: error, detail: target });
+        }
+        exists = false;
       }
-    };
-    const before = definition.kind === 'rules' ? rulesOfLayer(read(current, 'config_file_invalid')) : [];
-    const beforeServers = definition.kind === 'mcpServer' ? mcpServersOfLayer(read(current, 'config_file_invalid')) : {};
-    let edited = scalar === undefined
-      ? definition.kind === 'mcpServer'
-        ? editMcpServerTable(current, op as McpOp, server as McpServerWrite)
-        : editRuleTable(current, op as RuleOp, index, rule)
-      : editTomlValue(current, definition.path, scalar.literal, definition.kind === 'services' || definition.kind === 'selection');
-    // 审批档位写入时同时标记语义版本，读取方据此区分新四档与历史的 none/never 字面值。
-    if (definition.path[0] === 'policy' && definition.path[1] === 'mode') {
-      edited = editTomlValue(edited.text, ['policy', 'semantics'], String(POLICY_SEMANTICS), false);
-    }
-    const parsed = read(edited.text, 'config_edit_verify_failed');
-    if (scalar === undefined && definition.kind === 'rules') {
-      // 比较整个规则表，检测写入期间其他规则是否发生变化。
-      const landed = digestRules(rulesOfLayer(parsed));
-      const wanted = digestRules(expectedRules(before, op as RuleOp, index, rule));
-      if (landed !== wanted) {
-        throw new KernelError('config_edit_verify_failed', { detail: `policy.rules reads back as ${landed}` });
+      // 版本比较和写入都在同一文件锁内完成，避免覆盖其他进程的更新。
+      // 文件不存在时使用空版本；已存在的空文件仍使用其内容哈希。
+      if ((exists ? configVersion(current) : '') !== request.version) {
+        throw new KernelError('config_version_stale', { detail: `${target} changed since it was read; nothing was written` });
       }
-    } else if (scalar === undefined) {
-      // 比较整个服务器表，检测写入期间其他服务器是否发生变化。
-      const landedServers = mcpServersOfLayer(parsed);
-      const wantedServers = expectedMcpServers(beforeServers, op as McpOp, server as McpServerWrite);
-      if (!isDeepStrictEqual(structuredClone(landedServers), structuredClone(wantedServers))) {
-        throw new KernelError('config_edit_verify_failed', { detail: `mcp.servers reads back as ${JSON.stringify(Object.keys(landedServers).sort())}` });
+      const read = (text: string, code: 'config_file_invalid' | 'config_edit_verify_failed'): Record<string, unknown> => {
+        try {
+          return parse(text) as Record<string, unknown>;
+        } catch (cause) {
+          throw new KernelError(code, { cause, detail: `${code === 'config_file_invalid' ? 'that file' : 'the edited text'} does not read back as TOML` });
+        }
+      };
+      const before = definition.kind === 'rules' ? rulesOfLayer(read(current, 'config_file_invalid')) : [];
+      const beforeServers = definition.kind === 'mcpServer' ? mcpServersOfLayer(read(current, 'config_file_invalid')) : {};
+      let edited = scalar === undefined
+        ? definition.kind === 'mcpServer'
+          ? editMcpServerTable(current, op as McpOp, server as McpServerWrite)
+          : editRuleTable(current, op as RuleOp, index, rule)
+        : editTomlValue(current, definition.path, scalar.literal, definition.kind === 'services' || definition.kind === 'selection');
+      // 审批档位写入时同时标记语义版本，读取方据此区分新四档与历史的 none/never 字面值。
+      if (definition.path[0] === 'policy' && definition.path[1] === 'mode') {
+        edited = editTomlValue(edited.text, ['policy', 'semantics'], String(POLICY_SEMANTICS), false);
       }
-    } else {
-      const landed = definition.path.reduce<unknown>((node, part) => (node as Record<string, unknown>)?.[part], parsed);
-      if (!isDeepStrictEqual(structuredClone(landed), structuredClone(scalar.value))) {
-        throw new KernelError('config_edit_verify_failed', { detail: `${definition.path.join('.')} reads back as ${JSON.stringify(landed)}` });
+      const parsed = read(edited.text, 'config_edit_verify_failed');
+      if (scalar === undefined && definition.kind === 'rules') {
+        // 比较整个规则表，检测写入期间其他规则是否发生变化。
+        const landed = digestRules(rulesOfLayer(parsed));
+        const wanted = digestRules(expectedRules(before, op as RuleOp, index, rule));
+        if (landed !== wanted) {
+          throw new KernelError('config_edit_verify_failed', { detail: `policy.rules reads back as ${landed}` });
+        }
+      } else if (scalar === undefined) {
+        // 比较整个服务器表，检测写入期间其他服务器是否发生变化。
+        const landedServers = mcpServersOfLayer(parsed);
+        const wantedServers = expectedMcpServers(beforeServers, op as McpOp, server as McpServerWrite);
+        if (!isDeepStrictEqual(structuredClone(landedServers), structuredClone(wantedServers))) {
+          throw new KernelError('config_edit_verify_failed', { detail: `mcp.servers reads back as ${JSON.stringify(Object.keys(landedServers).sort())}` });
+        }
+      } else {
+        const landed = definition.path.reduce<unknown>((node, part) => (node as Record<string, unknown>)?.[part], parsed);
+        if (!isDeepStrictEqual(structuredClone(landed), structuredClone(scalar.value))) {
+          throw new KernelError('config_edit_verify_failed', { detail: `${definition.path.join('.')} reads back as ${JSON.stringify(landed)}` });
+        }
       }
-    }
-    await validate?.(parsed);
-    const handle = await open(temporary, 'wx', mode ?? 0o600);
-    temporaryCreated = true;
-    try {
-      await handle.writeFile(edited.text, 'utf8');
-      await handle.chmod(mode ?? 0o600);
-    } finally {
-      await handle.close();
-    }
-    await rename(temporary, target);
-    temporaryCreated = false;
-    return {
-      version: configVersion(edited.text),
-      created: edited.created,
-      ...(definition.kind === 'rules' ? { rules: expectedRules(before, op as RuleOp, index, rule) } : {}),
-    };
-  } finally {
-    try {
-      if (temporaryCreated) await rm(temporary, { force: true });
-    } finally {
-      try {
-        await release();
-      } catch (cause) {
-        throw new KernelRuntimeError('config_unlock_failed', { cause, detail: target });
-      }
-    }
-  }
+      await validate?.(parsed);
+      return {
+        content: edited.text,
+        mode: mode ?? 0o600,
+        result: {
+          version: configVersion(edited.text),
+          created: edited.created,
+          ...(definition.kind === 'rules' ? { rules: expectedRules(before, op as RuleOp, index, rule) } : {}),
+        },
+      };
+    },
+  });
 }
 
 // `[[policy.rules]]` 规则表的增删改。
@@ -457,10 +442,6 @@ export async function writeConfigField(
 const RULE_FIELDS = ['tool', 'match', 'decision', 'reason', 'target', 'path', 'argsHash'] as const;
 const RULE_OPS = ['add', 'update', 'remove'] as const;
 type RuleOp = (typeof RULE_OPS)[number];
-
-function isPortableAbsolutePath(value: string): boolean {
-  return isAbsolute(value) || /^[A-Za-z]:[\\/]/u.test(value) || /^\\\\[^\\/]+[\\/]/u.test(value);
-}
 
 function checkedOp(op: unknown): RuleOp {
   if (typeof op !== 'string' || !(RULE_OPS as readonly string[]).includes(op)) {

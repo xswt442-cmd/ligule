@@ -1,5 +1,6 @@
 import { randomInt } from 'node:crypto';
 import { KernelError } from '../errors.js';
+import { isNullNativeHandle as isNull } from '../shared/guards.js';
 import type { NativeHandle } from './windows-appcontainer-process.js';
 import type { OwnedProcessJob } from './win32-job.js';
 
@@ -38,10 +39,6 @@ interface AllocationSet {
   free(): void;
 }
 
-function isNull(handle: NativeHandle | null | undefined): boolean {
-  return handle === null || handle === undefined || handle === 0 || handle === 0n;
-}
-
 function pointer(koffi: Koffi, value: unknown): NativeHandle {
   if (value === null || value === undefined) return 0n;
   return typeof value === 'number' || typeof value === 'bigint' ? value : koffi.address(value);
@@ -70,7 +67,7 @@ function win32Failure(api: ReturnType<typeof bindings>, operation: string, code 
   return new Error(`${operation} failed with Win32 error ${code}`);
 }
 
-function bindings(koffi: Koffi) {
+function createBindings(koffi: Koffi) {
   const kernel = koffi.load('kernel32.dll');
   const advapi = koffi.load('advapi32.dll');
   const PVOID = koffi.pointer('void');
@@ -120,6 +117,16 @@ function bindings(koffi: Koffi) {
     localFree: bind(kernel, 'LocalFree', PVOID, [PVOID]),
     lastError: bind(kernel, 'GetLastError', 'uint32_t', []),
   };
+}
+
+const bindingsCache = new WeakMap<Koffi, ReturnType<typeof createBindings>>();
+function bindings(koffi: Koffi) {
+  let cached = bindingsCache.get(koffi);
+  if (cached === undefined) {
+    cached = createBindings(koffi);
+    bindingsCache.set(koffi, cached);
+  }
+  return cached;
 }
 
 function quoteWindowsArgument(argument: string): string {

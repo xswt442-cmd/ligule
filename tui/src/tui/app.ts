@@ -46,16 +46,32 @@ import { TUI_COLORS } from './ui-style.js';
 import { selectedText, transcriptLines, viewportPosition, wrapLine } from './viewport.js';
 import { CURRENT, applyOverrides, hit, keyHint } from './keymap.js';
 import { buildStatusLine } from './status-line.js';
-import { controlPresets, textOf as chooseText, VIEW_REQUEST_METHOD, type Locale } from '@ligule/core/tui.js';
+import {
+  controlPresets,
+  normalizeApprovalRequest,
+  textOf as chooseText,
+  VIEW_REQUEST_METHOD,
+  type HostAgentControlSnapshot,
+  type HostAgentGrant,
+  type HostExternalControlSnapshot,
+  type HostMethodMap,
+  type HostMethodName,
+  type HostMethodParamsOf,
+  type HostProgress,
+  type HostSessionPage,
+  type HostStatus,
+  type HostSubrunReference,
+  type HostSubrunStatus,
+  type HostExecutionReference,
+  type Locale,
+} from '@ligule/core/tui.js';
 import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type ControlWizardValues } from './control-wizard.js';
 import { createSessionNavigation, type SessionNavigation, type SessionNavigationLease } from './session-navigation.js';
-import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionSummary, UsageSummary } from '@ligule/core/tui.js';
-import type { SessionControlSnapshot, SessionReadPage, SubrunReference, SubrunStatus } from '@ligule/core/wire.js';
-import type { AgentPresetPage, AgentPresetPreview } from '@ligule/core/tui.js';
+import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionSummary } from '@ligule/core/tui.js';
 import type { McpTrustScope, TemplateCommand } from './commands.js';
 import type { EditorOutcome } from './editor.js';
 import type { SavedInput } from './input-store.js';
-import type { BranchResult, CredentialStatus, Exported, LoopResult, ModelSelection, ModelService, PathListing, SearchHit } from '@ligule/core/tui.js';
+import type { ModelSelection } from '@ligule/core/tui.js';
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 // 显示模式来源的中文名称；记录值与 Host 返回的来源标识保持一致。
@@ -89,83 +105,8 @@ function isAskQuestion(value: unknown): value is AskQuestion {
     && value.options.every((option) => isRecord(option) && typeof option.label === 'string');
 }
 
-export interface TuiStatus {
-  readonly running?: boolean;
-  readonly activeRunId?: string | null;
-  readonly screenCapture?: { readonly enabled: boolean; readonly source: string; readonly changeAllowed?: boolean };
-  readonly browser?: {
-    readonly configured: boolean;
-    readonly available: boolean;
-    readonly permitted: boolean;
-    readonly code?: string;
-    readonly paused: boolean;
-    readonly connected: boolean;
-    readonly changeAllowed: boolean;
-  };
-  readonly model?: string | null;
-  readonly pendingModel?: string | null;
-  readonly thinking?: {
-    readonly available: readonly string[];
-    readonly defaultEffort: string | null;
-    readonly effective: string;
-    readonly pending: string | null;
-  } | null;
-  readonly mode?: string | null;
-  readonly pendingMode?: string | null;
-  readonly policy: string;
-  readonly policySource?: string;
-  readonly permission?: {
-    readonly profile: 'read-only' | 'workspace-write' | 'full-access';
-    readonly network: 'policy' | 'unrestricted' | 'disabled';
-    readonly capabilities: {
-      readonly filesystemRead: 'full' | 'partial' | 'unavailable';
-      readonly filesystemWrite: 'full' | 'partial' | 'unavailable';
-      readonly network: 'full' | 'partial' | 'unavailable';
-      readonly process: 'full' | 'partial' | 'unavailable';
-    };
-    readonly profiles: {
-      readonly readOnly: 'full' | 'partial' | 'unavailable';
-      readonly workspaceWrite: 'full' | 'partial' | 'unavailable';
-    };
-    readonly limitations: readonly string[];
-    readonly partialWorkspaceWriteConfirmationRequired: boolean;
-    readonly partialWorkspaceWriteConfirmed: boolean;
-    readonly workspaceTrusted: boolean;
-    readonly execution: { readonly available: boolean; readonly code: string | null; readonly reason: string | null };
-    readonly changeAllowed: boolean;
-    readonly changeReason?: string;
-  };
-  readonly tools: readonly string[];
-  readonly eventCount: number;
-  readonly denials: { readonly consecutive: number; readonly total: number };
-  readonly usage?: { readonly estimated: number; readonly window: number; readonly threshold: number } | null;
-  readonly progress?: TuiProgress | null;
-  readonly taskLimits?: { readonly maxModelCalls: number; readonly timeoutMs: number; readonly requestTimeoutMs: number; readonly interactionWaitTimeoutMs: number };
-  readonly task?: TuiTaskBudget | null;
-  readonly templates?: readonly TemplateCommand[];
-  readonly [key: string]: unknown;
-}
-
-interface TuiTaskBudget {
-  readonly modelCalls: number;
-  readonly maxModelCalls: number;
-  readonly timeoutMs: number;
-  readonly interactionWaitTimeoutMs: number;
-  readonly interactionWaitMs: number;
-  readonly executionElapsedMs: number;
-  readonly executionPaused: boolean;
-}
-
-interface TuiProgress {
-  readonly phase: 'preparing' | 'model_request' | 'tool_execution' | 'compaction' | 'awaiting_approval' | 'awaiting_input' | 'settling';
-  readonly startedAt: number;
-  readonly phaseStartedAt: number;
-  readonly lastProgressAt: number;
-  readonly modelCalls: number;
-  readonly toolCalls: number;
-  readonly outputTokens: number | null;
-  readonly task?: TuiTaskBudget;
-}
+export type TuiStatus = HostStatus<TemplateCommand>;
+type TuiProgress = HostProgress;
 
 interface DetailState {
   readonly seq: number | null;
@@ -189,39 +130,8 @@ interface SearchState {
 
 type PickerKind = 'model' | 'thinking' | 'mode' | 'policy' | 'policy-confirm-never' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network' | 'permission-confirm-partial'
   | 'control' | 'control-action' | 'control-revoke-confirm';
-type PolicyValue = 'always' | 'ask' | 'auto' | 'never';
-export type AgentGrant = {
-  readonly id: string;
-  readonly name: string;
-  readonly projectRoot: string;
-  readonly source: 'trusted-ui' | 'legacy';
-  readonly defaultPermissionProfile: 'read-only' | 'workspace-write' | 'full-access';
-  readonly maxPermissionProfile: 'read-only' | 'workspace-write' | 'full-access';
-  readonly defaultNetwork: 'disabled' | 'policy' | 'unrestricted';
-  readonly maxNetwork: 'disabled' | 'policy' | 'unrestricted';
-  readonly defaultPolicy: PolicyValue;
-  readonly allowedPolicies: readonly PolicyValue[];
-  readonly allowOperator: boolean;
-  readonly allowedMcpServers: readonly string[];
-  readonly allowedMcpTools: readonly string[];
-  readonly confirmedPartialWorkspaceWrite: boolean;
-  readonly createdAt: string;
-  readonly expiresAt: string | null;
-  readonly revokedAt: string | null;
-};
-export type AgentControlSnapshot = { readonly version: string; readonly grants: readonly AgentGrant[] };
-type McpServerSummary = {
-  readonly name: string;
-  readonly command: string;
-  readonly args: readonly string[];
-  readonly cwd: string;
-  readonly environmentNames: readonly string[];
-  readonly identityDigest: string;
-  readonly trust: { readonly scope: McpTrustScope; readonly source: 'trusted-ui'; readonly trusted: boolean } | null;
-  readonly trustScopes: Readonly<Record<McpTrustScope, { readonly source: 'trusted-ui'; readonly trusted: boolean } | null>>;
-};
-type McpTrustSnapshot = { readonly version: string; readonly servers: readonly McpServerSummary[] };
-type McpToolsSnapshot = { readonly server: string; readonly identityDigest: string; readonly tools: readonly { readonly name: string; readonly description: string; readonly digest: string }[] };
+export type AgentGrant = HostAgentGrant;
+export type AgentControlSnapshot = HostAgentControlSnapshot;
 
 interface RuntimeChoice extends PanelChoice {
   readonly selection?: ModelSelection;
@@ -313,179 +223,18 @@ interface SessionInputState {
   readonly draft: string;
 }
 
-type SessionPage = Pick<SessionReadPage, 'sessionId' | 'events' | 'header' | 'endSeq' | 'hasMore' | 'writerActive'>;
+type SessionPage = HostSessionPage;
+type ExternalControlSnapshot = HostExternalControlSnapshot;
+export type TuiSubrunReference = HostSubrunReference;
+export type TuiSubrunStatus = HostSubrunStatus;
+export type TuiExecutionReference = HostExecutionReference;
 
-// 外控状态只读取这几个字段；其余由 Host 的完整快照携带，界面不复制字段表。
-type ExternalControlSnapshot = Pick<SessionControlSnapshot,
-  'sessionId' | 'state' | 'pendingInteractions' | 'events' | 'nextCursor' | 'eventGap' | 'firstAvailableCursor' | 'queue'> & {
-  readonly operationId?: string;
-  readonly phase?: string | null;
-  readonly progress?: TuiProgress | null;
+type TuiRequestResults = {
+  readonly [K in HostMethodName]: K extends 'status.get' ? TuiStatus : HostMethodMap[K]['result'];
 };
 
-interface TuiConfigResult extends Record<string, unknown> {
-  readonly services: ModelService[];
-  readonly selection: ModelSelection | null;
-  readonly model?: { readonly model?: string; readonly apiKeyEnv?: string };
-  readonly layers?: readonly { readonly layer: string; readonly version: string }[];
-}
-
-export type TuiSubrunReference = SubrunReference & { readonly parentRunId: string };
-
-export type TuiSubrunStatus = TuiSubrunReference & Pick<SubrunStatus, 'state' | 'phase' | 'errorCode'>;
-
-interface TuiPresetPreview extends Pick<AgentPresetPreview, 'presetId' | 'layer' | 'description'> {
-  readonly instruction: string;
-  readonly executable: boolean;
-  readonly mode: { readonly name: string; readonly tools: readonly string[] | '*'; readonly prompt: readonly string[] | '*' };
-  readonly permission: { readonly profile: string; readonly network: string };
-  readonly generation: { readonly outputTokens: number | null; readonly thinkingEffort: string | null };
-  readonly limits: { readonly loopIterations: number; readonly modelCalls: number };
-  readonly requiredChecks: readonly string[];
-  readonly narrowedFields: readonly string[];
-}
-
-export interface TuiExecutionReference {
-  readonly executionId: string;
-  readonly runId: string;
-}
-
-interface TuiExecutionStatus {
-  readonly executionId: string;
-  readonly state: string;
-  readonly exitCode?: number;
-  readonly errorCode?: string;
-  readonly cancelRequested: boolean;
-  readonly deadlineExceeded: boolean;
-  readonly terminationPending: boolean;
-  readonly cleanupPending: boolean;
-  readonly logAvailable: boolean;
-  readonly logUnavailableReason?: string;
-}
-
-interface TuiExecutionWait extends TuiExecutionStatus {
-  readonly waitTimedOut: boolean;
-}
-
-interface TuiExecutionLogPage {
-  readonly executionId: string;
-  readonly cursor: string;
-  readonly nextCursor: string;
-  readonly hasMore: boolean;
-  readonly gap: boolean;
-  readonly truncated: boolean;
-  readonly available: boolean;
-  readonly unavailableReason?: string;
-  readonly events: readonly { readonly stream: 'stdout' | 'stderr'; readonly text: string; readonly decodeLossPossible: boolean }[];
-}
-
-interface TuiToolResult {
-  readonly sessionId: string;
-  readonly runId: string;
-  readonly callId: string;
-  readonly tool?: string;
-  readonly state: string;
-  readonly code?: string;
-  readonly eventSeq?: number;
-  readonly output?: {
-    readonly returnedValueBytes: number | null;
-    readonly modelVisibleBytes: number | null;
-    readonly storageStatus: string;
-    readonly storedBytes: number | null;
-    readonly storedComplete: boolean | null;
-    readonly page: { readonly bytes: number; readonly dataBase64: string; readonly done: boolean; readonly nextCursor: string | null } | null;
-  };
-  readonly fileChanges?: readonly {
-    readonly path: string;
-    readonly operation: string;
-    readonly outcome: string;
-    readonly baselineStatus: string;
-    readonly observedStatus: string;
-    readonly beforeVersion: string | null;
-    readonly expectedAfterVersion: string | null;
-    readonly observedAfterVersion: string | null;
-    readonly changedFromBaseline: boolean | null;
-  }[];
-  readonly check?: {
-    readonly status: string;
-    readonly declaration: { readonly name: string };
-    readonly commandStatus?: string;
-    readonly errorCode?: string;
-    readonly reportStatus?: string;
-    readonly logStatus?: string;
-    readonly scopeStatus?: string;
-    readonly startedAt?: string;
-    readonly endedAt?: string;
-    readonly logsRef?: { readonly name: string; readonly bytes: number; readonly sha256: string };
-    readonly report?: { readonly passed: number; readonly failed: number; readonly skipped: number; readonly todo: number };
-  };
-}
-
-interface TuiRequestResults {
-  readonly 'screen-capture.set': { readonly sessionId: string; readonly enabled: boolean; readonly source: string };
-  readonly 'browser.stop': { readonly sessionId: string; readonly browser: NonNullable<TuiStatus['browser']> };
-  readonly 'browser.resume': { readonly sessionId: string; readonly browser: NonNullable<TuiStatus['browser']> };
-  readonly 'session.create': { readonly sessionId: string };
-  readonly 'session.open': { readonly sessionId: string };
-  readonly 'session.close': { readonly sessionId: string };
-  readonly 'session.read': SessionPage;
-  readonly 'session.observe': SessionPage & { readonly writerActive: boolean };
-  // 同一方法的回复随 request.action 变化；共享快照字段按 wire 类型，动作附加字段仍由调用处按类型判断。
-  readonly 'session.control': ExternalControlSnapshot & Record<string, unknown>;
-  readonly 'approval.details': { readonly requestId: string; readonly sessionId: string; readonly argumentSha256: string; readonly args: Record<string, unknown> };
-  readonly 'session.export': Exported;
-  readonly 'session.branch': BranchResult;
-  readonly 'preset.list': AgentPresetPage;
-  readonly 'preset.preview': TuiPresetPreview;
-  readonly 'session.label': { readonly sessionId: string; readonly name: string; readonly archived: boolean };
-  readonly 'sessions.list': { readonly sessions: SessionSummary[] };
-  readonly 'sessions.search': { readonly hits: SearchHit[] };
-  readonly 'paths.list': PathListing;
-  readonly 'run.start': LoopResult;
-  readonly 'run.cancel': { readonly cancelled: boolean };
-  readonly 'subrun.status': TuiSubrunStatus;
-  readonly 'subrun.start': TuiSubrunReference;
-  readonly 'subrun.list': { readonly subruns: readonly TuiSubrunStatus[]; readonly nextCursor?: string; readonly truncated: boolean };
-  readonly 'subrun.message': { readonly subrunId: string; readonly runId: string; readonly state: 'accepted'; readonly pendingCount: number };
-  readonly 'subrun.wait': { readonly timedOut: boolean; readonly subruns: readonly TuiSubrunStatus[] };
-  readonly 'subrun.cancel': { readonly subrunId: string; readonly runId: string; readonly cancelRequested: boolean; readonly state: string };
-  readonly 'execution.status': TuiExecutionStatus;
-  readonly 'execution.wait': TuiExecutionWait;
-  readonly 'execution.logs': TuiExecutionLogPage;
-  readonly 'execution.cancel': TuiExecutionStatus;
-  readonly 'tool.result': TuiToolResult;
-  readonly 'run.steer': {
-    readonly inputId: string;
-    readonly runId: string;
-    readonly state: 'accepted';
-    readonly source: 'human' | 'controller';
-    readonly pendingCount: number;
-    readonly cancelledInteractions: number;
-  };
-  readonly 'status.get': TuiStatus;
-  readonly 'usage.get': { readonly sessionId: string; readonly summary: UsageSummary };
-  readonly 'usage.diagnostics': { readonly enabled: boolean; readonly entries: readonly Record<string, unknown>[] };
-  readonly 'permission.set': { readonly sessionId: string; readonly permission: NonNullable<TuiStatus['permission']>; readonly applies: 'now' | 'unchanged' };
-  readonly 'model.select': { readonly model: string | null; readonly serviceId: string; readonly when: 'now' | 'round' };
-  readonly 'session.configure': { readonly applies: 'now' | 'next_round' | 'unchanged'; readonly [key: string]: unknown };
-  readonly 'config.get': TuiConfigResult;
-  readonly 'credentials.status': CredentialStatus;
-  readonly 'mode.set': { readonly mode: string | null; readonly layer: string | null; readonly pending: string | null; readonly tools: string[] };
-  readonly 'policy.set': { readonly policy: string; readonly policySource: string; readonly policyDefault: string };
-  readonly 'agent-control.list': AgentControlSnapshot;
-  readonly 'agent-control.create': AgentControlSnapshot;
-  readonly 'agent-control.revoke': AgentControlSnapshot;
-  readonly 'mcp.trust.list': McpTrustSnapshot;
-  readonly 'mcp.trust.set': { readonly server: string; readonly scope: McpTrustScope; readonly trusted: boolean; readonly version?: string };
-  readonly 'mcp.trust.tools': McpToolsSnapshot;
-  readonly 'config.set': { readonly version: string; readonly created: boolean; readonly [key: string]: unknown };
-  readonly 'extensions.set': { readonly name: string; readonly enabled: boolean; readonly applies: string };
-  readonly 'settings.catalog': { readonly tools: readonly { readonly name: string; readonly description: string; readonly source: string }[]; readonly extensions: { readonly name: string; readonly source: string; readonly enabled: boolean; readonly loaded: boolean; readonly registeredTools: readonly string[] }[]; readonly extensionDiagnostics: readonly { readonly code: string; readonly source: string }[]; readonly customToolDiagnostics: readonly { readonly code: string; readonly source: string }[] };
-  readonly 'session.compact': { readonly sessionId: string; readonly [key: string]: unknown };
-}
-
 export interface TuiClient extends Omit<Connection, 'request'> {
-  request<Method extends keyof TuiRequestResults>(method: Method, params?: Record<string, unknown>): Promise<TuiRequestResults[Method]>;
+  request<Method extends HostMethodName>(method: Method, params?: HostMethodParamsOf<Method> | Record<string, unknown>): Promise<TuiRequestResults[Method]>;
 }
 
 function requestFailure(error: unknown, fallback: string): { readonly code: string } {
@@ -548,6 +297,39 @@ export function controlTargetFromChoice(id: string, current: string | null): str
 
 // 展开写入类审批时显示目标路径、原内容和新内容，并分别加上减号与加号。
 // 未读取过的内容不展示；删除操作只说明文件会移入回收站。
+export function toTuiAsk(id: string, raw: unknown, locale: Locale, external = false): AskState {
+  const normalized = normalizeApprovalRequest(id, raw);
+  const binding = normalized.scriptBinding;
+  const bindingText = binding === undefined ? '' : `\n\n${chooseText(locale, '脚本审批绑定', 'Script approval binding')}\n${chooseText(locale, '路径', 'Path')}: ${binding.path ?? ''}\nSHA-256: ${binding.sha256 ?? ''}\n${chooseText(locale, '解释器', 'Interpreter')}: ${binding.interpreter ?? ''}\n${chooseText(locale, '工作区', 'Workspace')}: ${binding.workspaceRoot ?? ''}\n${chooseText(locale, '权限', 'Permission')}: ${binding.permission === undefined ? '' : `${binding.permission.profile ?? ''} / ${binding.permission.network ?? ''} / ${JSON.stringify(binding.permission.capabilities ?? {})}`}`;
+  const detailsSummary = normalized.contentBytes !== undefined && normalized.contentSha256 !== undefined
+    ? chooseText(locale, `内容 ${normalized.contentBytes} 字节 · SHA-256 ${normalized.contentSha256}`, `Content ${normalized.contentBytes} bytes · SHA-256 ${normalized.contentSha256}`)
+    : normalized.argumentSha256 !== undefined
+      ? chooseText(locale, `参数 ${normalized.argumentBytes ?? 0} 字节 · SHA-256 ${normalized.argumentSha256}`, `Arguments ${normalized.argumentBytes ?? 0} bytes · SHA-256 ${normalized.argumentSha256}`)
+      : '';
+  return {
+    id: normalized.id,
+    tool: normalized.tool,
+    detail: normalized.target === '' ? JSON.stringify(normalized.args) : normalized.target,
+    change: changeSummary(normalized.tool, normalized.args, locale),
+    reason: normalized.reason,
+    content: `${detailsSummary === '' ? '' : `${detailsSummary}\n\n`}${approvalBody(normalized.tool, normalized.args, locale)}${bindingText}`,
+    backend: normalized.backend,
+    rememberable: normalized.rememberable,
+    rememberScopes: normalized.rememberScopes,
+    rememberHintKey: normalized.rememberHintKey,
+    rememberTargetOptions: normalized.rememberTargetOptions,
+    ...(normalized.detailsRef === undefined ? {} : { detailsRef: normalized.detailsRef }),
+    ...(normalized.argumentBytes === undefined ? {} : { argumentBytes: normalized.argumentBytes }),
+    ...(normalized.argumentSha256 === undefined ? {} : { argumentSha256: normalized.argumentSha256 }),
+    ...(normalized.identityDigest === undefined ? {} : { identityDigest: normalized.identityDigest }),
+    detailsSummary,
+    detailSuffix: bindingText,
+    detailsLoaded: false,
+    detailsLoading: false,
+    ...(external ? { external: true } : {}),
+  };
+}
+
 function approvalBody(tool: string, args: Record<string, unknown>, locale: Locale = 'zh'): string {
   const t = (zh: string, en: string) => chooseText(locale, zh, en);
   const change = describeChange(tool, args, locale);
@@ -940,7 +722,6 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       pickerRequest.current += 1;
       navigationOf().invalidate();
       setPanel(null);
-      const args = isRecord(params.args) ? params.args : {};
       setApprovalExpanded(false);
       setApprovalCursor(0);
       // 新审批从收起态开始：先给主操作，规则选项再按 m 打开。
@@ -951,40 +732,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setExpanded(false);
       // 审批摘要显示操作对象，例如命令、路径、网络地址或 MCP 工具。
       // 写入内容不在摘要行中重复显示；此处显示行数，完整内容可通过 `/show` 查看。
-      const shown = typeof params.command === 'string' ? params.command : typeof args.path === 'string' ? args.path : typeof args.url === 'string' ? args.url : typeof args.server === 'string' ? `mcp:${args.server}/${typeof args.tool === 'string' ? args.tool : ''}` : '';
-      const binding = isRecord(params.scriptBinding) ? params.scriptBinding : undefined;
-      const bindingText = binding === undefined ? '' : `\n\n${chooseText(locale, '脚本审批绑定', 'Script approval binding')}\n${chooseText(locale, '路径', 'Path')}: ${String(binding.path ?? '')}\nSHA-256: ${String(binding.sha256 ?? '')}\n${chooseText(locale, '解释器', 'Interpreter')}: ${String(binding.interpreter ?? '')}\n${chooseText(locale, '工作区', 'Workspace')}: ${String(binding.workspaceRoot ?? '')}\n${chooseText(locale, '权限', 'Permission')}: ${isRecord(binding.permission) ? `${String(binding.permission.profile ?? '')} / ${String(binding.permission.network ?? '')} / ${JSON.stringify(binding.permission.capabilities ?? {})}` : ''}`;
-      const detailsSummary = typeof params.contentBytes === 'number' && typeof params.contentSha256 === 'string'
-        ? chooseText(locale, `内容 ${params.contentBytes} 字节 · SHA-256 ${params.contentSha256}`, `Content ${params.contentBytes} bytes · SHA-256 ${params.contentSha256}`)
-        : typeof params.argumentSha256 === 'string'
-          ? chooseText(locale, `参数 ${params.argumentBytes ?? 0} 字节 · SHA-256 ${params.argumentSha256}`, `Arguments ${params.argumentBytes ?? 0} bytes · SHA-256 ${params.argumentSha256}`)
-          : '';
-      setAsk({
-        id: message.id,
-        tool: params.tool,
-        detail: shown === '' ? JSON.stringify(args) : String(shown),
-        change: changeSummary(params.tool, args, locale),
-        reason: typeof params.reason === 'string' ? params.reason : '',
-        content: `${detailsSummary === '' ? '' : `${detailsSummary}\n\n`}${approvalBody(params.tool, args, locale)}${bindingText}`,
-        // 显示本次判定和执行使用的命令语法及可执行文件。
-        backend: typeof params.shell === 'string' ? `${params.shell} · ${typeof params.executable === 'string' ? params.executable : ''}` : '',
-        rememberable: params.rememberable === true,
-        rememberScopes: Array.isArray(params.rememberScopes)
-          ? params.rememberScopes.filter((scope): scope is McpTrustScope => scope === 'session' || scope === 'project' || scope === 'user')
-          : [],
-        rememberHintKey: params.rememberHintKey === 'file' || params.rememberHintKey === 'command' || params.rememberHintKey === 'mcp' || params.rememberHintKey === 'tool' ? params.rememberHintKey : '',
-        rememberTargetOptions: Array.isArray(params.rememberTargetOptions)
-          ? params.rememberTargetOptions.filter((target): target is 'file' | 'workspace' | 'tool' | 'command' => target === 'file' || target === 'workspace' || target === 'tool' || target === 'command')
-          : [],
-        ...(typeof params.detailsRef === 'string' ? { detailsRef: params.detailsRef } : {}),
-        ...(typeof params.argumentBytes === 'number' ? { argumentBytes: params.argumentBytes } : {}),
-        ...(typeof params.argumentSha256 === 'string' ? { argumentSha256: params.argumentSha256 } : {}),
-        ...(typeof params.identityDigest === 'string' ? { identityDigest: params.identityDigest } : {}),
-        detailsSummary,
-        detailSuffix: bindingText,
-        detailsLoaded: false,
-        detailsLoading: false,
-      });
+      setAsk(toTuiAsk(message.id, params, locale));
     };
     client.onNotification(onNotification);
     client.onRequest(onRequest);
@@ -1122,48 +870,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             setApprovalCursor(0);
             setRememberOpen(false);
           }
-          const args = isRecord(approval.details.args) ? approval.details.args : {};
-          const shown = typeof approval.details.command === 'string' ? approval.details.command
-            : typeof args.path === 'string' ? args.path
-              : typeof args.url === 'string' ? args.url
-                : typeof args.server === 'string' ? `mcp:${args.server}/${typeof args.tool === 'string' ? args.tool : ''}`
-                  : '';
-          const detailsSummary = typeof approval.details.contentBytes === 'number' && typeof approval.details.contentSha256 === 'string'
-            ? chooseText(locale, `内容 ${approval.details.contentBytes} 字节 · SHA-256 ${approval.details.contentSha256}`, `Content ${approval.details.contentBytes} bytes · SHA-256 ${approval.details.contentSha256}`)
-            : typeof approval.details.argumentSha256 === 'string'
-              ? chooseText(locale, `参数 ${approval.details.argumentBytes ?? 0} 字节 · SHA-256 ${approval.details.argumentSha256}`, `Arguments ${approval.details.argumentBytes ?? 0} bytes · SHA-256 ${approval.details.argumentSha256}`)
-              : '';
-          const approvalTool = typeof approval.details.tool === 'string' ? approval.details.tool : 'unknown';
           setAsk((current) => current?.external === true && current.id === approval.requestId
             ? current
-            : {
-                id: approval.requestId,
-                tool: approvalTool,
-                detail: shown === '' ? JSON.stringify(args) : shown,
-                change: changeSummary(approvalTool, args, locale),
-                content: `${detailsSummary === '' ? '' : `${detailsSummary}\n\n`}${approvalBody(approvalTool, args, locale)}`,
-                backend: typeof approval.details.shell === 'string' ? `${approval.details.shell} · ${typeof approval.details.executable === 'string' ? approval.details.executable : ''}` : '',
-                reason: typeof approval.details.reason === 'string' ? approval.details.reason : '',
-                rememberable: approval.details.rememberable === true,
-                rememberScopes: Array.isArray(approval.details.rememberScopes)
-                  ? approval.details.rememberScopes.filter((scope): scope is McpTrustScope => scope === 'session' || scope === 'project' || scope === 'user')
-                  : [],
-                rememberHintKey: approval.details.rememberHintKey === 'file' || approval.details.rememberHintKey === 'command'
-                  || approval.details.rememberHintKey === 'mcp' || approval.details.rememberHintKey === 'tool'
-                  ? approval.details.rememberHintKey
-                  : '',
-                rememberTargetOptions: Array.isArray(approval.details.rememberTargetOptions)
-                  ? approval.details.rememberTargetOptions.filter((target): target is 'file' | 'workspace' | 'tool' | 'command' => target === 'file' || target === 'workspace' || target === 'tool' || target === 'command')
-                  : [],
-                ...(typeof approval.details.detailsRef === 'string' ? { detailsRef: approval.details.detailsRef } : {}),
-                ...(typeof approval.details.argumentBytes === 'number' ? { argumentBytes: approval.details.argumentBytes } : {}),
-                ...(typeof approval.details.argumentSha256 === 'string' ? { argumentSha256: approval.details.argumentSha256 } : {}),
-                ...(typeof approval.details.identityDigest === 'string' ? { identityDigest: approval.details.identityDigest } : {}),
-                detailsSummary,
-                detailsLoaded: false,
-                detailsLoading: false,
-                external: true,
-              });
+            : toTuiAsk(approval.requestId, approval.details, locale, true));
         } else {
           lastExternalApprovalId = '';
           setAsk((current) => current?.external === true ? null : current);

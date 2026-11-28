@@ -10,9 +10,9 @@ import { createGrantRequest, emptyGrantDraft, grantDraftFlags, grantReady, grant
 import { requestIsCurrent } from '../request-identity';
 type Snapshot = { version: string; grants: Grant[] };
 type WorkspaceRoster = { default: string | null; workspaces: { identity: string; directory: string; name: string }[] };
-type McpTool = { name: string; description: string; digest: string };
-type McpServer = { name: string; identityDigest: string; trust: { scope: string; trusted: boolean } | null };
-type McpTools = { identityDigest: string; tools: McpTool[] };
+type McpTool = { readonly name: string; readonly description: string; readonly digest: string };
+type McpServer = { readonly name: string; readonly identityDigest: string; readonly trust: { readonly scope: string; readonly trusted: boolean } | null };
+type McpTools = { readonly identityDigest: string; readonly tools: readonly McpTool[] };
 export function AgentControlPanel({ client, projectRoot, onEdit }: {
   client: Client;
   projectRoot: string;
@@ -108,9 +108,9 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
         ? current : ownGrants.find((grant) => grant.revokedAt === null)?.id ?? ownGrants[0]?.id ?? '');
       setMcpTools({});
       try {
-        const mcp = await client.call('mcp.trust.list', project === '' ? {} : { projectRoot: project }, 15_000) as { servers: McpServer[] };
+        const mcp = await client.call('mcp.trust.list', project === '' ? {} : { projectRoot: project }, 15_000);
         if (!isCurrent()) return;
-        setMcpServers(mcp.servers);
+        setMcpServers([...mcp.servers]);
       } catch (error) {
         if (!isCurrent()) return;
         setMcpServers([]);
@@ -140,7 +140,7 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
     try {
       const result = await client.call('mcp.trust.tools', project === ''
         ? { server: server.name }
-        : { projectRoot: project, server: server.name }, 30_000) as McpTools;
+        : { projectRoot: project, server: server.name }, 30_000);
       if (!isCurrent()) return;
       setMcpTools(current => ({ ...current, [server.name]: result }));
     } catch (error) {
@@ -173,7 +173,7 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
     setBusy(true);
     setNote(null);
     try {
-      const result = await client.call('agent-control.create', createGrantRequest(draft, project, snapshot.version), 30_000) as Snapshot;
+      const result = await client.call('agent-control.create', createGrantRequest(draft, project, snapshot.version) as Parameters<Client['call']>[1] & { projectRoot: string; grantName: string; defaultPermissionProfile: string; maxPermissionProfile: string; defaultNetwork: string; maxNetwork: string; defaultPolicy: string; version: string }, 30_000) as Snapshot;
       setSnapshot(result);
       const created = result.grants.find((grant) => !snapshot.grants.some((previous) => previous.id === grant.id));
       if (created !== undefined) setSelectedGrantId(created.id);

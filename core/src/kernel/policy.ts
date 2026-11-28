@@ -9,6 +9,7 @@ import { classifyDangerousCommand } from '../capability/dangerous-command.js';
 import { resolveWithin } from '../capability/paths.js';
 import { KernelError } from './error.js';
 import { matches } from './match.js';
+import { isPortableAbsolutePath, isRecord } from '../shared/guards.js';
 import type { NetworkTarget } from '../capability/network.js';
 import type { ShellSelection } from '../capability/shell.js';
 import type { PolicyRule } from './config-edit.js';
@@ -48,16 +49,12 @@ export function readPersistedPolicyMode(value: unknown, semantics: unknown): Pol
   return readPolicyMode(value, true);
 }
 
-function isPortableAbsolutePath(value: string): boolean {
-  return isAbsolute(value) || /^[A-Za-z]:[\\/]/u.test(value) || /^\\\\[^\\/]+[\\/]/u.test(value);
-}
-
 /** 规则表条目来自配置文件，类型定义在 `config-edit.ts`；这里重新导出，避免调用方多引一个模块。 */
 export type { PolicyRule } from './config-edit.js';
 
 export function isPolicyRule(value: unknown): value is PolicyRule {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const rule = value as Record<string, unknown>;
+  if (!isRecord(value)) return false;
+  const rule = value;
   return 'tool' in value && typeof value.tool === 'string'
     && 'decision' in value && (value.decision === 'allow' || value.decision === 'ask' || value.decision === 'deny')
     && (!('match' in value) || value.match === undefined || typeof value.match === 'string')

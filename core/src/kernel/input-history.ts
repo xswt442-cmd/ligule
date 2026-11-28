@@ -1,12 +1,11 @@
 // CLI/TUI 与 Desktop 共用已发送输入历史；历史跨会话保留，不写入会话记录，也不提供给模型。
 // 两端可能运行在不同进程，因此读—改—写需要跨进程锁。
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import lockfile from 'proper-lockfile';
+import { join } from 'node:path';
 import { dataRoot } from './config-file.js';
 import { KernelError, KernelRuntimeError } from './error.js';
+import { flushLockedFile, withLockedAtomicFile } from '../storage/locked-file.js';
 
 /** 内存和文件中保留的最大历史条数。 */
 export const HISTORY_LIMIT = 200;
@@ -53,58 +52,29 @@ export async function loadHistory(path = historyPathOf()): Promise<string[]> {
   return entries;
 }
 
-// 同一进程中的操作按文件排队，跨进程通过文件锁协调，避免并发更新互相覆盖。
-const pendingSaves = new Map<string, Promise<void>>();
-
 /** 在锁内读取最新历史，合并新输入并去重，再通过临时文件和原子重命名整体写回。
  * 返回写入后的完整历史，供界面更新显示。
  */
 export async function rememberHistory(path: string, fresh: readonly string[]): Promise<string[]> {
-  const queued = pendingSaves.get(path) ?? Promise.resolve();
-  let written: string[] = [];
-  const current = queued.catch(() => {}).then(async () => {
-    await mkdir(dirname(path), { recursive: true });
-    const release = await acquireHistoryLock(path);
-    try {
-      const existing = await loadHistory(path);
+  return withLockedAtomicFile(path, {
+    lockStaleMs: HISTORY_LOCK_STALE_MS,
+    lockRetries: { retries: 10, minTimeout: 20, maxTimeout: 200 },
+    errors: {
+      onLockFailed: (cause, target) => new KernelRuntimeError('input_history_locked', { cause, detail: target }),
+    },
+    run: async ({ target }) => {
+      const existing = await loadHistory(target);
       // `fresh` 按最新在先排列；新增内容排在磁盘历史前面，并移除重复项。
       const added = [...new Set(fresh.map((entry) => entry.trim()).filter((entry) => entry !== ''))];
-      written = [...new Set([...added, ...existing])].slice(0, HISTORY_LIMIT);
-      const temporary = `${path}.${randomUUID()}.tmp`;
-      try {
-        await writeFile(temporary, written.map((entry) => JSON.stringify(entry)).join('\n') + '\n', { encoding: 'utf8', flag: 'wx' });
-        await rename(temporary, path);
-      } finally {
-        await rm(temporary, { force: true });
-      }
-    } finally {
-      await release();
-    }
+      const written = [...new Set([...added, ...existing])].slice(0, HISTORY_LIMIT);
+      return {
+        content: written.map((entry) => JSON.stringify(entry)).join('\n') + '\n',
+        result: written,
+      };
+    },
   });
-  pendingSaves.set(path, current);
-  try {
-    await current;
-  } finally {
-    if (pendingSaves.get(path) === current) pendingSaves.delete(path);
-  }
-  return written;
-}
-
-/** 获取历史文件锁；成功时返回释放函数，失败时报告被锁定的文件。 */
-async function acquireHistoryLock(path: string): Promise<() => Promise<void>> {
-  try {
-    return await lockfile.lock(path, {
-      realpath: false,
-      lockfilePath: `${path}.lock`,
-      stale: HISTORY_LOCK_STALE_MS,
-      retries: { retries: 10, minTimeout: 20, maxTimeout: 200 },
-      onCompromised: () => {},
-    });
-  } catch (cause) {
-    throw new KernelRuntimeError('input_history_locked', { cause, detail: path });
-  }
 }
 
 export async function flushHistory(path: string): Promise<void> {
-  await pendingSaves.get(path);
+  await flushLockedFile(path);
 }

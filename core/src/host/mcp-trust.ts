@@ -1,12 +1,12 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
-import lockfile from 'proper-lockfile';
-import { setTimeout as delay } from 'node:timers/promises';
+import { isAbsolute, join, resolve } from 'node:path';
 import { dataRoot } from '../kernel/config-file.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
+import { errorCode, isRecord } from '../shared/guards.js';
+import { withLockedAtomicFile } from '../storage/locked-file.js';
 
 export type McpTrustScope = 'project' | 'user';
 
@@ -31,11 +31,6 @@ interface StoreRead {
   readonly mode?: number;
 }
 
-interface StoreLock {
-  assertOwned(): void;
-  release(): Promise<void>;
-}
-
 const STORE_LIMIT_BYTES = 1024 * 1024;
 const ENTRY_LIMIT = 4096;
 const LOCK_STALE_MS = 10_000;
@@ -43,10 +38,6 @@ const SCOPES: readonly McpTrustScope[] = ['project', 'user'];
 
 export function mcpTrustPathOf(home = homedir()): string {
   return join(dataRoot(home), 'mcp-trust.json');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function onlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
@@ -106,59 +97,6 @@ async function readStore(path: string): Promise<StoreRead> {
   return { store: { schemaVersion: 1, entries }, version: storeVersion(entries), mode: (await stat(path)).mode & 0o777 };
 }
 
-async function acquireStoreLock(path: string): Promise<StoreLock> {
-  let compromised: Error | undefined;
-  let unlock: (() => Promise<void>) | undefined;
-  try {
-    await mkdir(dirname(path), { recursive: true });
-    unlock = await lockfile.lock(path, {
-      realpath: false,
-      lockfilePath: `${path}.lock`,
-      stale: LOCK_STALE_MS,
-      update: 2_000,
-      retries: { retries: 8, minTimeout: 10, maxTimeout: 100 },
-      onCompromised: (error) => { compromised = error; },
-    });
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === 'ELOCKED') throw new KernelError('mcp_trust_store_locked', { cause });
-    throw new KernelRuntimeError('mcp_trust_store_lock_failed', { cause });
-  }
-  return {
-    assertOwned() {
-      if (compromised !== undefined) throw new KernelRuntimeError('mcp_trust_store_lock_lost', { cause: compromised });
-    },
-    async release() {
-      if (compromised !== undefined) throw new KernelRuntimeError('mcp_trust_store_lock_lost', { cause: compromised });
-      try { await unlock!(); } catch (cause) { throw new KernelRuntimeError('mcp_trust_store_unlock_failed', { cause }); }
-    },
-  };
-}
-
-async function writeStore(path: string, before: StoreRead, store: McpTrustStore, lock: StoreLock): Promise<void> {
-  const bytes = Buffer.from(`${JSON.stringify(store)}\n`, 'utf8');
-  if (bytes.byteLength > STORE_LIMIT_BYTES) throw new KernelError('mcp_trust_store_too_large');
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  try {
-    lock.assertOwned();
-    await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 });
-    await chmod(temporary, before.mode ?? 0o600);
-    for (let attempt = 0; ; attempt += 1) {
-      lock.assertOwned();
-      if ((await readStore(path)).version !== before.version) throw new KernelError('mcp_trust_version_stale');
-      try { await rename(temporary, path); break; }
-      catch (cause) {
-        const code = (cause as NodeJS.ErrnoException).code;
-        if (process.platform !== 'win32' || !['EACCES', 'EBUSY', 'EPERM'].includes(code ?? '') || attempt >= 8) {
-          throw new KernelRuntimeError('mcp_trust_store_replace_failed', { cause });
-        }
-        await delay(Math.min(20 * (2 ** attempt), 200));
-      }
-    }
-  } finally {
-    await rm(temporary, { force: true });
-  }
-}
-
 export async function listMcpTrust(path = mcpTrustPathOf()): Promise<{ readonly version: string; readonly entries: readonly McpTrustEntry[] }> {
   const { store, version } = await readStore(resolve(path));
   return { version, entries: store.entries };
@@ -185,31 +123,51 @@ export async function setMcpServerTrust(path: string, input: {
     } catch (cause) { throw new KernelError('mcp_trust_project_invalid', { cause }); }
   }
 
-  const target = resolve(path);
-  const lock = await acquireStoreLock(target);
-  try {
-    const before = await readStore(target);
-    if (expectedVersion !== before.version) throw new KernelError('mcp_trust_version_stale');
-    const now = new Date().toISOString();
-    const entry = validateEntry({
-      source: 'trusted-ui',
-      scope: input.scope,
-      projectIdentity,
-      server: input.server,
-      identityDigest: input.identityDigest,
-      trusted: input.trusted,
-      updatedAt: now,
-    });
-    const same = (one: McpTrustEntry) => one.scope === entry.scope && one.projectIdentity === entry.projectIdentity
-      && one.server === entry.server && one.identityDigest === entry.identityDigest;
-    const entries = before.store.entries.some(same)
-      ? before.store.entries.map((one) => same(one) ? entry : one)
-      : [...before.store.entries, entry];
-    if (entries.length > ENTRY_LIMIT) throw new KernelError('mcp_trust_entry_limit');
-    const store: McpTrustStore = { schemaVersion: 1, entries };
-    await writeStore(target, before, store, lock);
-    return { version: storeVersion(entries), entries };
-  } finally { await lock.release(); }
+  return withLockedAtomicFile(path, {
+    lockStaleMs: LOCK_STALE_MS,
+    lockRetries: { retries: 8, minTimeout: 10, maxTimeout: 100 },
+    renameMaxAttempts: 8,
+    renameMaxBackoffMs: 200,
+    errors: {
+      onLockFailed: (cause) => errorCode(cause) === 'ELOCKED'
+        ? new KernelError('mcp_trust_store_locked', { cause })
+        : new KernelRuntimeError('mcp_trust_store_lock_failed', { cause }),
+      onLockLost: (cause) => new KernelRuntimeError('mcp_trust_store_lock_lost', { cause }),
+      onUnlockFailed: (cause) => new KernelRuntimeError('mcp_trust_store_unlock_failed', { cause }),
+      onReplaceFailed: (cause) => new KernelRuntimeError('mcp_trust_store_replace_failed', { cause }),
+    },
+    run: async ({ target }) => {
+      const before = await readStore(target);
+      if (expectedVersion !== before.version) throw new KernelError('mcp_trust_version_stale');
+      const now = new Date().toISOString();
+      const entry = validateEntry({
+        source: 'trusted-ui',
+        scope: input.scope,
+        projectIdentity,
+        server: input.server,
+        identityDigest: input.identityDigest,
+        trusted: input.trusted,
+        updatedAt: now,
+      });
+      const same = (one: McpTrustEntry) => one.scope === entry.scope && one.projectIdentity === entry.projectIdentity
+        && one.server === entry.server && one.identityDigest === entry.identityDigest;
+      const entries = before.store.entries.some(same)
+        ? before.store.entries.map((one) => same(one) ? entry : one)
+        : [...before.store.entries, entry];
+      if (entries.length > ENTRY_LIMIT) throw new KernelError('mcp_trust_entry_limit');
+      const store: McpTrustStore = { schemaVersion: 1, entries };
+      const bytes = Buffer.from(`${JSON.stringify(store)}\n`, 'utf8');
+      if (bytes.byteLength > STORE_LIMIT_BYTES) throw new KernelError('mcp_trust_store_too_large');
+      return {
+        content: bytes,
+        mode: before.mode ?? 0o600,
+        beforeRename: async () => {
+          if ((await readStore(target)).version !== before.version) throw new KernelError('mcp_trust_version_stale');
+        },
+        result: { version: storeVersion(entries), entries },
+      };
+    },
+  });
 }
 
 export async function mcpServerTrust(path: string, projectRoot: string, server: string, identityDigest: string): Promise<McpTrustEntry | undefined> {

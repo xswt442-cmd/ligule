@@ -1,14 +1,13 @@
 // 工作区使用持久身份登记表进行管理。
 // 身份基于目录，不基于路径文本；大小写、分隔符、盘符、尾斜杠和链接等别名会归一为同一身份。
 // 登记表保存在应用数据根目录中，界面仅作为读取方，不能因隐藏工作区而删除登记。
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
-import lockfile from 'proper-lockfile';
+import { basename, join } from 'node:path';
 import { dataRoot } from './config-file.js';
 import { KernelError, KernelRuntimeError } from './error.js';
 import { canonicalWorkspaceOf } from '../workspace-identity.js';
+import { withLockedAtomicFile } from '../storage/locked-file.js';
 export { trimTrailingSeparators, workspaceIdentity } from '../workspace-identity.js';
 
 export const REGISTRY_VERSION = 1;
@@ -94,25 +93,6 @@ export async function readRegistry(path = registryPathOf()): Promise<WorkspaceRe
   return parseRegistry(text);
 }
 
-// 登记更新采用读—改—写，避免并发 Host 覆盖彼此的变更。
-// 使用 `proper-lockfile` 协调进程间访问，并在进程内串行执行更新。
-let writing: Promise<unknown> = Promise.resolve();
-
-/** 获取登记表文件锁；成功时返回释放函数，失败时报告被锁定的路径。 */
-async function acquireRegistryLock(path: string): Promise<() => Promise<void>> {
-  try {
-    return await lockfile.lock(path, {
-      realpath: false,
-      lockfilePath: `${path}.lock`,
-      stale: REGISTRY_LOCK_STALE_MS,
-      retries: { retries: 10, minTimeout: 20, maxTimeout: 200 },
-      onCompromised: () => {},
-    });
-  } catch (cause) {
-    throw new KernelRuntimeError('workspace_registry_locked', { cause, detail: path });
-  }
-}
-
 /** 记录工作区身份；首次出现时新增条目，之后更新最近使用时间和显示名称。 */
 function upsertEntry(registry: WorkspaceRegistry, canonical: { identity: string; directory: string }, name: string | undefined, now: string): void {
   const known = registry.workspaces.find((one) => one.identity === canonical.identity);
@@ -136,26 +116,21 @@ function upsertEntry(registry: WorkspaceRegistry, canonical: { identity: string;
  * 进程内的更新排队执行；每次都从锁内读取的最新内容开始修改。
  */
 function mutateRegistry(path: string, mutate: (registry: WorkspaceRegistry) => void): Promise<WorkspaceRegistry> {
-  const next = writing.then(async () => {
-    await mkdir(dirname(path), { recursive: true });
-    const release = await acquireRegistryLock(path);
-    try {
-      const registry = await readRegistry(path);
+  return withLockedAtomicFile(path, {
+    lockStaleMs: REGISTRY_LOCK_STALE_MS,
+    lockRetries: { retries: 10, minTimeout: 20, maxTimeout: 200 },
+    errors: {
+      onLockFailed: (cause, target) => new KernelRuntimeError('workspace_registry_locked', { cause, detail: target }),
+    },
+    run: async ({ target }) => {
+      const registry = await readRegistry(target);
       mutate(registry);
-      const temporary = `${path}.${randomUUID()}.tmp`;
-      try {
-        await writeFile(temporary, `${JSON.stringify(registry, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
-        await rename(temporary, path);
-      } finally {
-        await rm(temporary, { force: true });
-      }
-      return registry;
-    } finally {
-      await release();
-    }
+      return {
+        content: `${JSON.stringify(registry, null, 2)}\n`,
+        result: registry,
+      };
+    },
   });
-  writing = next.then(() => undefined, () => undefined);
-  return next;
 }
 
 /** 登记最近使用的工作区；同一身份只保留一条记录。 */

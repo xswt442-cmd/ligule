@@ -1,7 +1,14 @@
 // 桌面客户端按 Host 协议收发请求和通知。方法及参数定义由 `core/src/host/protocol.ts` 维护。
 // 请求包含 id 和 method，答复使用相同 id，通知使用 notify 字段。
 // Transport 由桌面桥注入，协议客户端不依赖 Electron。
+import type {
+  HostMethodName,
+  HostMethodParamsOf,
+  HostMethodResultOf,
+} from '@ligule/core';
 import type { NotificationBridge } from './notifications';
+
+export type { HostMethodName, HostMethodParamsOf, HostMethodResultOf };
 
 export type Frame = {
   id?: string;
@@ -38,8 +45,8 @@ export type Transport = {
 
 export type Client = {
   // `timeoutMs` 仅限制当前请求，避免全局超时中断长时间模型轮次。
-  // 返回未经解释的协议结果，由调用方负责校验其结构。
-  call: (method: string, params: Record<string, unknown>, timeoutMs?: number) => Promise<unknown>;
+  // 返回按 `HostMethodMap` 推导的协议结果；外部传输仍需在边界做结构校验。
+  call: <M extends HostMethodName>(method: M, params: HostMethodParamsOf<M>, timeoutMs?: number) => Promise<HostMethodResultOf<M>>;
   reply: (id: string, result: unknown) => void;
   receive: (text: string) => { kind: string; message?: Frame };
   // 退订函数让界面在重建订阅时能摘掉旧回调，避免同一条通知被处理两次。
@@ -125,18 +132,18 @@ export function createClient(transport: Transport): Client {
   }
 
   return {
-    call(method, params, timeoutMs = 0) {
+    call<M extends HostMethodName>(method: M, params: HostMethodParamsOf<M>, timeoutMs = 0): Promise<HostMethodResultOf<M>> {
       counter += 1;
       const id = String(counter);
-      return new Promise((resolve, reject) => {
-        const waiter: { resolve: (value: unknown) => void; reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> } = { resolve, reject };
+      return new Promise<HostMethodResultOf<M>>((resolve, reject) => {
+        const waiter: { resolve: (value: HostMethodResultOf<M>) => void; reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> } = { resolve, reject };
         if (timeoutMs > 0) {
           waiter.timer = setTimeout(() => {
             if (pending.delete(id)) reject(Object.assign(new Error('host_unanswered'), { code: 'host_unanswered' }));
           }, timeoutMs);
         }
-        pending.set(id, waiter);
-        send({ id, method, params });
+        pending.set(id, waiter as { resolve: (value: unknown) => void; reject: (error: Error) => void; timer?: ReturnType<typeof setTimeout> });
+        send({ id, method, params: params as Record<string, unknown> });
       });
     },
     reply(id, result) {

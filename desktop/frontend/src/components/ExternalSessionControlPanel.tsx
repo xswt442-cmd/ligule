@@ -142,7 +142,7 @@ export function ExternalSessionControlPanel({ client, sessionId, projectRoot, ve
           projectRoot,
           sessionId,
           request: { action: 'status', after: cursor, limit: 50, waitMs: 10_000 },
-        }, 35_000) as ControlSnapshot;
+        }, 35_000) as unknown as ControlSnapshot;
         if (disposed) return;
         const nextOperationId = result.operationId ?? null;
         if (nextOperationId !== operationId) {
@@ -343,7 +343,7 @@ export function ExternalSessionComposer({ client, sessionId, projectRoot, draft,
           projectRoot,
           sessionId,
           request: { action: 'configuration' },
-        }, 10_000) as Status;
+        }, 10_000) as unknown as Status;
         if (!disposed) {
           setStatus(current);
           setConfigurationFailed(false);

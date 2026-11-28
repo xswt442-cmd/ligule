@@ -198,7 +198,7 @@ export function BranchPanel({ client, sessionId, activeRunId = null, runStatusKn
         parentRunId: branch.reference.parentRunId,
         subrunIds: [branch.reference.subrunId],
         timeoutMs: 30_000,
-      }, 35_000) as { timedOut?: unknown; subruns?: { state?: unknown; errorCode?: unknown }[] };
+      }, 35_000);
       if (requestGeneration.current !== generation
         || !isCurrentStatusGeneration(statusGenerations.current, branch.id, statusGeneration)) return;
       const status = result.subruns?.[0];

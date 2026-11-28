@@ -11,6 +11,8 @@ import {
 } from './http.js';
 import type { ModelMessage, ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { imageInputOf, resolveRequestImages } from './images.js';
+import { isRecord } from '../shared/guards.js';
+import { asRecord, booleanCapability, numberCapability, parseArgs, tokenCount, type JsonRecord, type ModelProvider as BaseModelProvider } from './common.js';
 import type { ImageReference } from '../media.js';
 
 interface ChatCompletionsCapabilities extends ProviderCapabilities {
@@ -33,19 +35,11 @@ interface ChatCompletionsProviderOptions {
   readonly retry?: RetryPolicy;
 }
 
-interface ModelProvider {
-  readonly imageInput: boolean;
-  readonly requiresCompletion: true;
-  readonly name: string;
-  readonly model: string;
-  readonly capabilities: ChatCompletionsCapabilities;
-  readonly outputTokens: number;
+interface ModelProvider extends BaseModelProvider<ChatCompletionsCapabilities> {
   readonly thinkingEffort?: DeepSeekThinkingEffort;
-  stream(request: ModelRequest, options?: { readonly signal?: AbortSignal | null }): AsyncGenerator<ProviderEvent>;
   withModel(model: string): ModelProvider;
 }
 
-type JsonRecord = Record<string, unknown>;
 interface ChatToolCall {
   readonly id: string;
   readonly type: 'function';
@@ -74,26 +68,11 @@ interface ToolNameMapping {
   decode(name: string): string;
 }
 
-function isJsonRecord(value: unknown): value is JsonRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function asRecord(value: unknown, detail: string): JsonRecord {
-  if (!isJsonRecord(value)) {
-    throw new KernelError('provider_stream_invalid', { detail });
-  }
-  return value;
-}
-
-function tokenCount(value: unknown): number | null {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
-}
-
 function chatUsageEvent(usage: JsonRecord): ProviderEvent | undefined {
   // prompt_tokens is the reported total; cache field paths identify the format without guessing the endpoint vendor.
   const input = tokenCount(usage.prompt_tokens);
   const output = tokenCount(usage.completion_tokens);
-  const details = isJsonRecord(usage.prompt_tokens_details) ? usage.prompt_tokens_details : undefined;
+  const details = isRecord(usage.prompt_tokens_details) ? usage.prompt_tokens_details : undefined;
   const hitPresent = Object.hasOwn(usage, 'prompt_cache_hit_tokens');
   const cachedAliasPresent = details !== undefined && Object.hasOwn(details, 'cached_tokens');
   const missPresent = Object.hasOwn(usage, 'prompt_cache_miss_tokens');
@@ -128,16 +107,6 @@ function chatUsageEvent(usage: JsonRecord): ProviderEvent | undefined {
       consistent,
     } } : {}),
   };
-}
-
-function booleanCapability(value: boolean | number, name: string): boolean {
-  if (typeof value !== 'boolean') throw new KernelError('provider_capability_invalid', { detail: `${name} must be a boolean` });
-  return value;
-}
-
-function numberCapability(value: boolean | number, name: string): number {
-  if (typeof value !== 'number') throw new KernelError('provider_capability_invalid', { detail: `${name} must be a number` });
-  return value;
 }
 
 export const CHAT_COMPLETIONS_CAPABILITIES: ChatCompletionsCapabilities = Object.freeze({
@@ -458,15 +427,4 @@ export function createChatCompletionsProvider({
     },
   };
   return Object.freeze(provider);
-}
-
-// 参数无法解析时立即报错。空参数片段表示无参数调用，不等同于参数缺失。
-function parseArgs(json: string): unknown {
-  if (json === '') return {};
-  try {
-    const parsed: unknown = JSON.parse(json);
-    return parsed;
-  } catch (error) {
-    throw new KernelError('provider_tool_args_invalid', { detail: 'tool arguments are not valid JSON' });
-  }
 }

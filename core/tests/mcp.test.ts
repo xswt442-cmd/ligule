@@ -573,3 +573,24 @@ test('the host wires the two tools from the config, and not when there is no ser
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('validateToolArguments rebuilds cached Ajv validators when schemaDigest changes', async () => {
+  const { validateToolArguments } = await import('../dist/capability/mcp.js');
+  const key = { server: 'cache-probe', tool: 'echo', schemaDigest: 'digest-v1' };
+  const schemaV1 = {
+    type: 'object',
+    required: ['count'],
+    properties: { count: { type: 'integer' } },
+  };
+  assert.deepEqual(await validateToolArguments({ count: 1 }, schemaV1, key), []);
+  assert.notEqual((await validateToolArguments({ count: 'bad' }, schemaV1, key)).length, 0);
+
+  const schemaV2 = {
+    type: 'object',
+    required: ['count'],
+    properties: { count: { type: 'string' } },
+  };
+  const keyV2 = { ...key, schemaDigest: 'digest-v2' };
+  assert.deepEqual(await validateToolArguments({ count: 'ok' }, schemaV2, keyV2), []);
+  assert.notEqual((await validateToolArguments({ count: 1 }, schemaV2, keyV2)).length, 0);
+});

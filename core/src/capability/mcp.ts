@@ -138,6 +138,27 @@ function definitionOf(
 const DRAFT_2020_12 = 'https://json-schema.org/draft/2020-12/schema';
 const DRAFT_7 = 'http://json-schema.org/draft-07/schema#';
 
+type SchemaDialect = '2020-12' | 'draft-07';
+type CompiledValidator = ReturnType<InstanceType<(typeof import('@modelcontextprotocol/sdk/validation/ajv'))['AjvJsonSchemaValidator']>['getValidator']>;
+
+export interface ToolSchemaCacheKey {
+  readonly server: string;
+  readonly tool: string;
+  readonly schemaDigest: string;
+}
+
+const AJV_OPTIONS = {
+  allErrors: true,
+  strictSchema: true,
+  strictTypes: false,
+  strictTuples: false,
+  validateFormats: true,
+  validateSchema: true,
+};
+
+const ajvByDialect = new Map<SchemaDialect, Ajv>();
+const compiledValidators = new Map<string, { readonly digest: string; readonly dialect: SchemaDialect; readonly validate: CompiledValidator }>();
+
 // SDK 校验器只在真正调用 MCP 工具时加载，避免每个 Ligule 进程都拉起整套客户端 SDK。
 let validatorModule: Promise<typeof import('@modelcontextprotocol/sdk/validation/ajv')> | undefined;
 function validatorLoader() {
@@ -145,27 +166,47 @@ function validatorLoader() {
   return validatorModule;
 }
 
-export async function validateToolArguments(args: unknown, schema: Record<string, unknown>): Promise<string[]> {
+function dialectOf(declaredDialect: unknown): SchemaDialect | undefined {
+  if (declaredDialect === undefined || declaredDialect === DRAFT_2020_12) return '2020-12';
+  if (declaredDialect === DRAFT_7) return 'draft-07';
+  return undefined;
+}
+
+function ajvForDialect(dialect: SchemaDialect): Ajv {
+  const existing = ajvByDialect.get(dialect);
+  if (existing !== undefined) return existing;
+  const instance = dialect === '2020-12' ? new Ajv2020(AJV_OPTIONS) as unknown as Ajv : new Ajv(AJV_OPTIONS);
+  formatsModule.default.default(instance);
+  ajvByDialect.set(dialect, instance);
+  return instance;
+}
+
+export async function validateToolArguments(
+  args: unknown,
+  schema: Record<string, unknown>,
+  cacheKey?: ToolSchemaCacheKey,
+): Promise<string[]> {
   try {
     const declaredDialect = schema.$schema;
-    const options = {
-      allErrors: true,
-      strictSchema: true,
-      strictTypes: false,
-      strictTuples: false,
-      validateFormats: true,
-      validateSchema: true,
-    };
-    const ajv = declaredDialect === undefined || declaredDialect === DRAFT_2020_12
-      ? new Ajv2020(options)
-      : declaredDialect === DRAFT_7
-        ? new Ajv(options)
+    const dialect = dialectOf(declaredDialect);
+    if (dialect === undefined) return [`tool schema dialect is unsupported: ${String(declaredDialect)}`];
+    const toolKey = cacheKey === undefined ? undefined : `${cacheKey.server}\0${cacheKey.tool}`;
+    let validate = toolKey === undefined ? undefined : (() => {
+      const cached = compiledValidators.get(toolKey);
+      return cached !== undefined && cached.digest === cacheKey!.schemaDigest && cached.dialect === dialect
+        ? cached.validate
         : undefined;
-    if (ajv === undefined) return [`tool schema dialect is unsupported: ${String(declaredDialect)}`];
-    formatsModule.default.default(ajv as Ajv);
-    const { AjvJsonSchemaValidator } = await validatorLoader();
-    const validator = new AjvJsonSchemaValidator(ajv as Ajv);
-    const validate = validator.getValidator<Record<string, unknown>>({ type: 'object', ...schema } as JsonSchemaType);
+    })();
+    if (validate === undefined) {
+      const ajv = ajvForDialect(dialect);
+      if (typeof schema.$id === 'string') ajv.removeSchema(schema.$id);
+      const { AjvJsonSchemaValidator } = await validatorLoader();
+      const validator = new AjvJsonSchemaValidator(ajv);
+      validate = validator.getValidator<Record<string, unknown>>({ type: 'object', ...schema } as JsonSchemaType);
+      if (toolKey !== undefined && cacheKey !== undefined) {
+        compiledValidators.set(toolKey, { digest: cacheKey.schemaDigest, dialect, validate });
+      }
+    }
     const result = validate(args);
     return result.valid ? [] : [result.errorMessage ?? 'arguments do not match the tool schema'];
   } catch (error) {
@@ -555,7 +596,11 @@ export function createMcpRegistry(configs: NormalizedMcpServerConfig[], options:
         await refreshTools(opened, activeSignal);
         const definition = opened.tools.get(tool);
         if (definition === undefined) throw new KernelError('mcp_tool_unknown', { detail: `${name}/${tool}` });
-        const problems = await validateToolArguments(args, definition.inputSchema);
+        const problems = await validateToolArguments(args, definition.inputSchema, {
+          server: name,
+          tool,
+          schemaDigest: definition.digest,
+        });
         if (problems.length > 0) throw new KernelError('mcp_arguments_invalid', { detail: problems.join('; ') });
       }
       try {
