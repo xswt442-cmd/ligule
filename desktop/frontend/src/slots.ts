@@ -1,6 +1,5 @@
 // Desktop 前端的槽位定义与 `core/src/kernel/slots.ts` 保持一致。
-// Host 声明槽位数据类型，插件注册内容；卸载时执行注册返回的清理函数。
-// 新增面板或状态项只需添加槽位描述，不需修改主渲染流程。
+// 内置面板注册到实际渲染的槽位；卸载时执行注册返回的清理函数。
 import type { ReactNode } from 'react';
 
 export type Panel<P> = {
@@ -56,8 +55,4 @@ export function createSlotRegistry<P>(slots: Slot[]) {
 export const SLOTS: Slot[] = [
   { name: 'rail.sessions', accepts: isPanel },
   { name: 'rail.menu', accepts: isPanel },
-  { name: 'conversation.composer', accepts: isPanel },
-  { name: 'conversation.approval.detail', accepts: isPanel },
-  { name: 'header.status', accepts: isPanel },
-  { name: 'dock.panels', accepts: isPanel },
 ];
