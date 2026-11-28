@@ -1000,6 +1000,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     let gapNotifiedOperationId: string | null = null;
     let inFlight = false;
     let lastFailure = '';
+    let lastExternalQuestionId = '';
+    let lastExternalApprovalId = '';
     const projectRoot = info.boundary ?? '';
     const schedule = (delayMs: number) => {
       if (timer !== undefined) clearTimeout(timer);
@@ -1091,13 +1093,35 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const question = snapshot.pendingInteractions.find((item) => item.type === 'question'
           && !resolvedExternalInteractions.current.has(item.requestId));
         if (question !== undefined && Array.isArray(question.details.questions) && question.details.questions.every(isAskQuestion)) {
+          if (lastExternalQuestionId !== question.requestId) {
+            lastExternalQuestionId = question.requestId;
+            setPanel(null);
+            setDetail(null);
+            setSessionPicker(null);
+            setSearch(null);
+            setExpanded(false);
+          }
           setQuery((current) => current?.external === true && current.id === question.requestId
             ? current
             : { id: question.requestId, questions: question.details.questions as AskQuestion[], at: 0, picked: {}, external: true });
-        } else setQuery((current) => current?.external === true ? null : current);
+        } else {
+          lastExternalQuestionId = '';
+          setQuery((current) => current?.external === true ? null : current);
+        }
         const approval = snapshot.pendingInteractions.find((item) => item.type === 'approval'
           && !resolvedExternalInteractions.current.has(item.requestId));
         if (approval !== undefined) {
+          if (lastExternalApprovalId !== approval.requestId) {
+            lastExternalApprovalId = approval.requestId;
+            setPanel(null);
+            setDetail(null);
+            setSessionPicker(null);
+            setSearch(null);
+            setExpanded(false);
+            setApprovalExpanded(false);
+            setApprovalCursor(0);
+            setRememberOpen(false);
+          }
           const args = isRecord(approval.details.args) ? approval.details.args : {};
           const shown = typeof approval.details.command === 'string' ? approval.details.command
             : typeof args.path === 'string' ? args.path
@@ -1140,7 +1164,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
                 detailsLoading: false,
                 external: true,
               });
-        } else setAsk((current) => current?.external === true ? null : current);
+        } else {
+          lastExternalApprovalId = '';
+          setAsk((current) => current?.external === true ? null : current);
+        }
         lastFailure = '';
         nextDelay = snapshot.state === 'running' ? 0 : 1_000;
       } catch (error) {
@@ -2354,7 +2381,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       exitTui();
       return;
     }
-    if (panel !== null || sessionPicker !== null && ask === null && query === null) return;
+    if ((panel !== null || sessionPicker !== null) && ask === null && query === null) return;
     if (ask === null && query === null) {
       if (hit('model-picker', input, key)) { openPicker('model'); return; }
       if (hit('mode-picker', input, key)) { openPicker('mode'); return; }
@@ -2372,7 +2399,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         setDetail(detail === null ? { seq: null, kind: 'transcript', rows: [], cursor: Number.MAX_SAFE_INTEGER, anchor: null, loading: true } : null);
         setExpanded(detail === null);
         if (detail === null) {
-          void client.request('session.read', { sessionId, fullResults: true }).then((read) => {
+          const readPromise = externalControl
+            ? client.request('session.observe', { projectRoot: info.boundary ?? '', sessionId, fullResults: true })
+            : client.request('session.read', { sessionId, fullResults: true });
+          void readPromise.then((read) => {
             if (activeSession.current !== sessionId) return;
             const complete = read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq })));
             setDetail((current) => current?.kind === 'transcript' ? { ...current, rows: complete, loading: false } : current);
@@ -2651,7 +2681,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       setCaret(last.length);
       return;
     }
-    if (hit('send', input, key) || hit('newline-alt', input, key)) {
+    if (hit('send', input, key) || hit('newline', input, key) || hit('newline-alt', input, key)) {
       if (hit('newline', input, key) || hit('newline-alt', input, key)) {
         const inserted = draft.slice(0, caret) + '\n' + draft.slice(caret);
         setDraft(inserted);

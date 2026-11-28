@@ -152,3 +152,22 @@ test('failures do not collapse: they keep the code, the target and the reason', 
   assert.match(lines[0], /✗ write notes\.md 失败 \(policy_write_denied\)/u);
   assert.ok(lines.join('\n').includes('审批规则拒绝了此写入。'));
 });
+
+test('markdownLines aligns blockquote code spans and multiline <br> spans', async () => {
+  const { markdownLines, EMPHASIS } = await import('../dist/tui/markdown.js');
+  const quotedCode = markdownLines('> ```ts\n> const x = 1;\n> ```', 80);
+  const codeLine = quotedCode.find((line) => line.text.includes('const x = 1;'));
+  assert.ok(codeLine !== undefined);
+  assert.ok(codeLine.text.startsWith('│ '), codeLine.text);
+  assert.ok(codeLine.spans !== undefined);
+  assert.equal(codeLine.spans.map((span) => span.text).join(''), codeLine.text);
+
+  const brLines = markdownLines('> **first  \n> second**', 80);
+  assert.equal(brLines.length, 2);
+  assert.equal(brLines[0]!.text, '│ first');
+  assert.equal(brLines[1]!.text, '│ second');
+  assert.equal(brLines[0]!.spans?.map((span) => span.text).join(''), '│ first');
+  assert.equal(brLines[1]!.spans?.map((span) => span.text).join(''), '│ second');
+  assert.equal(brLines[0]!.spans?.some((span) => span.scope === EMPHASIS.strong && span.text === 'first'), true);
+  assert.equal(brLines[1]!.spans?.some((span) => span.scope === EMPHASIS.strong && span.text === 'second'), true);
+});

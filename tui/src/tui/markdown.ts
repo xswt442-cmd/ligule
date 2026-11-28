@@ -97,6 +97,19 @@ function withSpans(kind: MarkdownLine['kind'], spans: MarkdownSpan[]): MarkdownL
   return spans.some((span) => span.scope !== undefined) ? { kind, text, spans } : { kind, text };
 }
 
+function splitSpanRows(spans: readonly MarkdownSpan[]): MarkdownSpan[][] {
+  const rows: MarkdownSpan[][] = [[]];
+  for (const span of spans) {
+    for (const [index, part] of span.text.split('\n').entries()) {
+      if (index > 0) rows.push([]);
+      if (part !== '') {
+        rows[rows.length - 1].push(span.scope === undefined ? { text: part } : { text: part, scope: span.scope });
+      }
+    }
+  }
+  return rows;
+}
+
 function codeLines(text: string, language?: string): MarkdownLine[] {
   const name = language?.split(/\s+/)[0];
   if (name === undefined || renderer.getLanguage(name) === undefined) {
@@ -105,14 +118,11 @@ function codeLines(text: string, language?: string): MarkdownLine[] {
   const result = renderer.highlight(text, { language: name, ignoreIllegals: true });
   if (result.errorRaised !== undefined) throw result.errorRaised;
   if (!(result._emitter instanceof TerminalEmitter)) throw new Error('tui_highlight_emitter_invalid');
-  const rows: MarkdownSpan[][] = [[]];
-  for (const span of result._emitter.spans) {
-    for (const [index, part] of span.text.split('\n').entries()) {
-      if (index > 0) rows.push([]);
-      if (part !== '') rows[rows.length - 1].push({ text: part, scope: span.scope });
-    }
-  }
-  return rows.map((spans) => ({ kind: 'code', text: spans.map((span) => span.text).join(''), spans }));
+  return splitSpanRows(result._emitter.spans).map((spans) => ({
+    kind: 'code',
+    text: spans.map((span) => span.text).join(''),
+    spans,
+  }));
 }
 
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -136,7 +146,15 @@ export function markdownLines(text: string, columns = 80): MarkdownLine[] {
     for (const value of tokens) {
       const token = value as MarkedToken;
       if (token.type === 'code') {
-        lines.push(...codeLines(token.text, token.lang).map((line) => ({ ...line, text: prefix + line.text })));
+        lines.push(...codeLines(token.text, token.lang).map((line) => (
+          prefix === ''
+            ? line
+            : {
+                ...line,
+                text: prefix + line.text,
+                ...(line.spans === undefined ? {} : { spans: prefixed(prefix, [...line.spans]) }),
+              }
+        )));
       } else if (token.type === 'heading') {
         lines.push(withSpans('heading', prefixed(prefix, inline(token.tokens))));
       } else if (token.type === 'list') {
@@ -173,8 +191,9 @@ export function markdownLines(text: string, columns = 80): MarkdownLine[] {
         }
       } else if (token.type === 'paragraph' || token.type === 'text') {
         const spans = token.tokens === undefined ? [{ text: token.text }] : inline(token.tokens);
-        const line = withSpans('text', prefixed(prefix, spans));
-        lines.push(...line.text.split('\n').map((part, index) => (index === 0 ? { ...line, text: part } : { kind: 'text' as const, text: part })));
+        for (const row of splitSpanRows(spans)) {
+          lines.push(withSpans('text', prefixed(prefix, row)));
+        }
       } else if (token.type === 'space') {
         if (lines.length > 0 && lines.at(-1)?.text !== '') lines.push({ kind: 'text', text: '' });
       } else if (token.type === 'hr') {

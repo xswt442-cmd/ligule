@@ -219,8 +219,6 @@ function writeSettings(client: Client, state: ClientSettingsState, update: Setti
     if (!state.writable) throw Object.assign(new Error('prefs_reload_required'), { code: 'prefs_reload_required' });
     const current = state.settings ?? readSettings();
     const settings = settingsFrom(typeof update === 'function' ? update(current) : update);
-    state.settings = settings;
-    cacheSettings(settings);
     const result = await client.call('prefs.write', {
       json: JSON.stringify(settings),
       version: version ?? state.version,
@@ -229,7 +227,9 @@ function writeSettings(client: Client, state: ClientSettingsState, update: Setti
     if (typeof updated?.version !== 'string') {
       throw Object.assign(new Error('prefs_write_version_invalid'), { code: 'prefs_write_version_invalid' });
     }
+    state.settings = settings;
     state.version = updated.version;
+    cacheSettings(settings);
   });
   state.tail = pending.then(
     () => undefined,
@@ -269,9 +269,7 @@ export function loadSettings(client: Client): Promise<Settings> {
 
       const legacy = cachedLegacySettings();
       if (legacy !== undefined) {
-        state.settings = legacy;
         await writeSettings(client, state, legacy, '');
-        cacheSettings(legacy);
         return legacy;
       }
       cacheSettings(settings);
@@ -291,7 +289,6 @@ export function loadSettings(client: Client): Promise<Settings> {
 
 /** 更新首屏缓存；正式保存必须使用最近一次成功读取的版本。 */
 export async function saveSettings(client: Client, settings: Settings): Promise<void> {
-  cacheSettings(settings);
   const state = clientSettings.get(client);
   if (state === undefined || !state.writable) {
     throw Object.assign(new Error('prefs_reload_required'), { code: 'prefs_reload_required' });

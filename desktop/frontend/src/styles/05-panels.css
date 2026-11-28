@@ -557,6 +557,176 @@
 }
 .md-code code { font-family: var(--mono); font-size: 1em; line-height: 1.55; background: none; padding: 0; }
 
+/* 浅色主题（羊皮纸 / 蓝天）下的代码块语法高亮配色，覆盖 github-dark 的暗底浅字。 */
+:root[data-palette="parchment"] .hljs,
+[data-palette="parchment"] .hljs,
+:root[data-palette="sky"] .hljs,
+[data-palette="sky"] .hljs {
+  color: var(--fg);
+}
+:root[data-palette="parchment"] .hljs-doctag,
+[data-palette="parchment"] .hljs-doctag,
+:root[data-palette="parchment"] .hljs-keyword,
+[data-palette="parchment"] .hljs-keyword,
+:root[data-palette="parchment"] .hljs-meta .hljs-keyword,
+[data-palette="parchment"] .hljs-meta .hljs-keyword,
+:root[data-palette="parchment"] .hljs-template-tag,
+[data-palette="parchment"] .hljs-template-tag,
+:root[data-palette="parchment"] .hljs-template-variable,
+[data-palette="parchment"] .hljs-template-variable,
+:root[data-palette="parchment"] .hljs-type,
+[data-palette="parchment"] .hljs-type,
+:root[data-palette="parchment"] .hljs-variable.language_,
+[data-palette="parchment"] .hljs-variable.language_,
+:root[data-palette="sky"] .hljs-doctag,
+[data-palette="sky"] .hljs-doctag,
+:root[data-palette="sky"] .hljs-keyword,
+[data-palette="sky"] .hljs-keyword,
+:root[data-palette="sky"] .hljs-meta .hljs-keyword,
+[data-palette="sky"] .hljs-meta .hljs-keyword,
+:root[data-palette="sky"] .hljs-template-tag,
+[data-palette="sky"] .hljs-template-tag,
+:root[data-palette="sky"] .hljs-template-variable,
+[data-palette="sky"] .hljs-template-variable,
+:root[data-palette="sky"] .hljs-type,
+[data-palette="sky"] .hljs-type,
+:root[data-palette="sky"] .hljs-variable.language_,
+[data-palette="sky"] .hljs-variable.language_ {
+  color: #cf222e;
+}
+:root[data-palette="parchment"] .hljs-title,
+[data-palette="parchment"] .hljs-title,
+:root[data-palette="parchment"] .hljs-title.class_,
+[data-palette="parchment"] .hljs-title.class_,
+:root[data-palette="parchment"] .hljs-title.function_,
+[data-palette="parchment"] .hljs-title.function_,
+:root[data-palette="sky"] .hljs-title,
+[data-palette="sky"] .hljs-title,
+:root[data-palette="sky"] .hljs-title.class_,
+[data-palette="sky"] .hljs-title.class_,
+:root[data-palette="sky"] .hljs-title.function_,
+[data-palette="sky"] .hljs-title.function_ {
+  color: #8250df;
+}
+:root[data-palette="parchment"] .hljs-attr,
+[data-palette="parchment"] .hljs-attr,
+:root[data-palette="parchment"] .hljs-attribute,
+[data-palette="parchment"] .hljs-attribute,
+:root[data-palette="parchment"] .hljs-literal,
+[data-palette="parchment"] .hljs-literal,
+:root[data-palette="parchment"] .hljs-meta,
+[data-palette="parchment"] .hljs-meta,
+:root[data-palette="parchment"] .hljs-number,
+[data-palette="parchment"] .hljs-number,
+:root[data-palette="parchment"] .hljs-operator,
+[data-palette="parchment"] .hljs-operator,
+:root[data-palette="parchment"] .hljs-variable,
+[data-palette="parchment"] .hljs-variable,
+:root[data-palette="parchment"] .hljs-selector-attr,
+[data-palette="parchment"] .hljs-selector-attr,
+:root[data-palette="parchment"] .hljs-selector-class,
+[data-palette="parchment"] .hljs-selector-class,
+:root[data-palette="parchment"] .hljs-selector-id,
+[data-palette="parchment"] .hljs-selector-id,
+:root[data-palette="sky"] .hljs-attr,
+[data-palette="sky"] .hljs-attr,
+:root[data-palette="sky"] .hljs-attribute,
+[data-palette="sky"] .hljs-attribute,
+:root[data-palette="sky"] .hljs-literal,
+[data-palette="sky"] .hljs-literal,
+:root[data-palette="sky"] .hljs-meta,
+[data-palette="sky"] .hljs-meta,
+:root[data-palette="sky"] .hljs-number,
+[data-palette="sky"] .hljs-number,
+:root[data-palette="sky"] .hljs-operator,
+[data-palette="sky"] .hljs-operator,
+:root[data-palette="sky"] .hljs-variable,
+[data-palette="sky"] .hljs-variable,
+:root[data-palette="sky"] .hljs-selector-attr,
+[data-palette="sky"] .hljs-selector-attr,
+:root[data-palette="sky"] .hljs-selector-class,
+[data-palette="sky"] .hljs-selector-class,
+:root[data-palette="sky"] .hljs-selector-id,
+[data-palette="sky"] .hljs-selector-id {
+  color: #0550ae;
+}
+:root[data-palette="parchment"] .hljs-regexp,
+[data-palette="parchment"] .hljs-regexp,
+:root[data-palette="parchment"] .hljs-string,
+[data-palette="parchment"] .hljs-string,
+:root[data-palette="parchment"] .hljs-meta .hljs-string,
+[data-palette="parchment"] .hljs-meta .hljs-string,
+:root[data-palette="sky"] .hljs-regexp,
+[data-palette="sky"] .hljs-regexp,
+:root[data-palette="sky"] .hljs-string,
+[data-palette="sky"] .hljs-string,
+:root[data-palette="sky"] .hljs-meta .hljs-string,
+[data-palette="sky"] .hljs-meta .hljs-string {
+  color: #0a3069;
+}
+:root[data-palette="parchment"] .hljs-built_in,
+[data-palette="parchment"] .hljs-built_in,
+:root[data-palette="parchment"] .hljs-symbol,
+[data-palette="parchment"] .hljs-symbol,
+:root[data-palette="sky"] .hljs-built_in,
+[data-palette="sky"] .hljs-built_in,
+:root[data-palette="sky"] .hljs-symbol,
+[data-palette="sky"] .hljs-symbol {
+  color: #953800;
+}
+:root[data-palette="parchment"] .hljs-comment,
+[data-palette="parchment"] .hljs-comment,
+:root[data-palette="parchment"] .hljs-code,
+[data-palette="parchment"] .hljs-code,
+:root[data-palette="parchment"] .hljs-formula,
+[data-palette="parchment"] .hljs-formula,
+:root[data-palette="sky"] .hljs-comment,
+[data-palette="sky"] .hljs-comment,
+:root[data-palette="sky"] .hljs-code,
+[data-palette="sky"] .hljs-code,
+:root[data-palette="sky"] .hljs-formula,
+[data-palette="sky"] .hljs-formula {
+  color: #57606a;
+}
+:root[data-palette="parchment"] .hljs-name,
+[data-palette="parchment"] .hljs-name,
+:root[data-palette="parchment"] .hljs-quote,
+[data-palette="parchment"] .hljs-quote,
+:root[data-palette="parchment"] .hljs-selector-tag,
+[data-palette="parchment"] .hljs-selector-tag,
+:root[data-palette="parchment"] .hljs-selector-pseudo,
+[data-palette="parchment"] .hljs-selector-pseudo,
+:root[data-palette="sky"] .hljs-name,
+[data-palette="sky"] .hljs-name,
+:root[data-palette="sky"] .hljs-quote,
+[data-palette="sky"] .hljs-quote,
+:root[data-palette="sky"] .hljs-selector-tag,
+[data-palette="sky"] .hljs-selector-tag,
+:root[data-palette="sky"] .hljs-selector-pseudo,
+[data-palette="sky"] .hljs-selector-pseudo {
+  color: #116329;
+}
+:root[data-palette="parchment"] .hljs-subst,
+[data-palette="parchment"] .hljs-subst,
+:root[data-palette="sky"] .hljs-subst,
+[data-palette="sky"] .hljs-subst {
+  color: var(--fg);
+}
+:root[data-palette="parchment"] .hljs-addition,
+[data-palette="parchment"] .hljs-addition,
+:root[data-palette="sky"] .hljs-addition,
+[data-palette="sky"] .hljs-addition {
+  color: #116329;
+  background-color: #dafbe1;
+}
+:root[data-palette="parchment"] .hljs-deletion,
+[data-palette="parchment"] .hljs-deletion,
+:root[data-palette="sky"] .hljs-deletion,
+[data-palette="sky"] .hljs-deletion {
+  color: #82071e;
+  background-color: #ffebe9;
+}
+
 /* 代码块下方的复制按钮和结果提示右对齐，不影响代码文本布局。 */
 .md-code-wrap { margin: 0.5rem 0; }
 .md-code-wrap .md-code { margin: 0; }

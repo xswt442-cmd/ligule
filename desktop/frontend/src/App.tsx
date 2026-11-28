@@ -1413,12 +1413,18 @@ export function App({ transport }: { transport: Transport }) {
                 if (Number.isSafeInteger(seq)) collected.set(seq, event);
               }
             };
-            let page = await client.call('session.read', { sessionId: id, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+            let page = await client.call(observing ? 'session.observe' : 'session.read', {
+              ...(observing ? { projectRoot: root } : {}),
+              sessionId: id, limit: RENDER_WINDOW, fullResults: true,
+            }, 15_000) as { events: Record_[]; hasMore: boolean };
             if (openRequest.current !== request) return false;
             remember(page.events);
             let older = olderRecoveryPage(page, missing);
             for (let reads = 0; older !== null && reads < 8; reads += 1) {
-              const previous = await client.call('session.read', { sessionId: id, before: older.before, limit: RENDER_WINDOW, fullResults: true }, 15_000) as { events: Record_[]; hasMore: boolean };
+              const previous = await client.call(observing ? 'session.observe' : 'session.read', {
+                ...(observing ? { projectRoot: root } : {}),
+                sessionId: id, before: older.before, limit: RENDER_WINDOW, fullResults: true,
+              }, 15_000) as { events: Record_[]; hasMore: boolean };
               if (openRequest.current !== request) return false;
               remember(previous.events);
               older = olderRecoveryPage(previous, missing);
@@ -1784,7 +1790,7 @@ export function App({ transport }: { transport: Transport }) {
     allowSend.current.delete(sessionId);
     patchQueue(sessionId, () => ({ items: rest, paused: false }));
     void submit(next, sessionId);
-  }, [inputOwner, patchQueue, queues, reading, running, sessionId, submit]);
+  }, [inputOwner, link, patchQueue, queues, reading, running, sessionId, submit]);
 
   // 将队列项收回草稿；草稿已有内容时保留原文，不拼接两段输入。
   const recoverQueueItem = useCallback((index: number, all: boolean) => {

@@ -373,3 +373,84 @@ test('TUI restores persisted records once when overlapping gap refreshes return 
     }
   });
 });
+
+test('external control Ctrl+O uses session.observe and incoming approval closes open panels without blocking approval keys', async () => {
+  await withTuiHost(async (context) => {
+    const sessionId = 'tui-external-control-panel-approval';
+    const session = createSessionLog({
+      directory: context.sessionDirectory,
+      id: sessionId,
+      meta: { projectRoot: context.projectDirectory },
+    });
+    await session.append({ kind: 'user', text: 'Run external check.', origin: 'controller' });
+    await session.acquire();
+
+    let pending: { requestId: string; sessionId: string; operationId: string; type: 'approval'; createdAt: number; details: Record<string, unknown> }[] = [];
+    const actions: RecordedAction[] = [];
+    const runtime = createAgentControlRuntime(context.projectDirectory, async (requestedSession, request) => {
+      assert.equal(requestedSession, sessionId);
+      actions.push(request);
+      if (request.action === 'status') {
+        return {
+          operationId: 'external-panel-op',
+          sessionId,
+          state: pending.length > 0 ? 'waiting_approval' : 'running',
+          ownership: 'external',
+          phase: pending.length > 0 ? 'awaiting_input' : null,
+          progress: null,
+          pendingInteractions: pending,
+          events: [],
+          nextCursor: 0,
+          hasMoreEvents: false,
+          eventGap: false,
+          firstAvailableCursor: 1,
+          queue: [],
+          queuePaused: false,
+          currentOperationId: 'external-panel-op',
+        };
+      }
+      if (request.action === 'reply') {
+        pending = [];
+        return { sessionId, requestId: request.requestId, source: 'human', resolved: true };
+      }
+      return { ok: true };
+    });
+
+    try {
+      await runtime.register(sessionId);
+      await withApp(context, async ({ stdin, wait, frame, type }) => {
+        await type(`/resume ${sessionId}`);
+        await wait(() => frame().includes('External session connected') || frame().includes('外控会话已连接'));
+
+        // Ctrl+O 打开完整历史时应调用 session.observe（而非 session.read）
+        const observeBefore = context.requests.filter((r) => r.method === 'session.observe').length;
+        const readBefore = context.requests.filter((r) => r.method === 'session.read').length;
+        stdin.write('\u000f');
+        await wait(() => context.requests.filter((r) => r.method === 'session.observe').length > observeBefore);
+        assert.equal(context.requests.filter((r) => r.method === 'session.read').length, readBefore, 'external control Ctrl+O must not call session.read');
+        stdin.write('\u001b');
+        await wait(() => !frame().includes('完整历史') && !frame().includes('Full conversation'));
+
+        // 打开面板后收到新审批，面板应自动关闭且 y 键可直接批准
+        stdin.write('\u0010');
+        await wait(() => frame().includes('选择模型') || frame().includes('local-test-model'));
+        pending = [{
+          requestId: 'ext-approval-1',
+          sessionId,
+          operationId: 'external-panel-op',
+          type: 'approval',
+          createdAt: Date.now(),
+          details: { tool: 'exec', command: 'echo ok', args: { command: 'echo ok' }, rememberable: false },
+        }];
+        await wait(() => frame().includes('echo ok') && !frame().includes('选择模型'));
+        stdin.write('y');
+        await wait(() => actions.some((action) => action.action === 'reply' && action.requestId === 'ext-approval-1'));
+        const reply = actions.find((action) => action.action === 'reply' && action.requestId === 'ext-approval-1')!;
+        assert.equal(reply.decision, 'allow');
+      });
+    } finally {
+      await runtime.close();
+      await session.close();
+    }
+  });
+});

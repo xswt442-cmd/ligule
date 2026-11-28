@@ -166,6 +166,8 @@ export const KEYMAP: Readonly<Record<TerminalAction, Binding>> = {
 // 单独按下 `Control` 或 `Meta` 不构成有效快捷键。
 const BARE_MODIFIERS = ['control', 'shift', 'alt', 'meta'];
 const MODIFIERS = ['ctrl', 'shift', 'alt', 'meta'];
+// `specOf` 仅产出这三种修饰键，且按固定顺序排列。
+const PARSE_MODIFIERS = ['ctrl', 'shift', 'meta'] as const;
 
 // 将规范按键名称映射为界面显示名称，例如 `pageup` 显示为 `PageUp`。
 const KEY_NAMES: Readonly<Record<string, string>> = {
@@ -214,15 +216,18 @@ export function parseSpec(text: string): string | null {
   if (parts.some((part) => part === '')) return null;
   const key = parts[parts.length - 1]!;
   const mods = parts.slice(0, -1);
-  if (mods.some((mod) => !MODIFIERS.includes(mod))) return null;
-  const aliases: Record<string, string> = { esc: 'escape', return: 'enter', arrowup: 'uparrow', up: 'arrowup', down: 'arrowdown', left: 'arrowleft', right: 'arrowright', pgup: 'pageup', pgdn: 'pagedown', del: 'delete', space: ' ' };
+  if (mods.some((mod) => !PARSE_MODIFIERS.includes(mod as typeof PARSE_MODIFIERS[number]))) return null;
+  if (new Set(mods).size !== mods.length) return null;
+  const orderedMods = PARSE_MODIFIERS.filter((mod) => mods.includes(mod));
+  const aliases: Record<string, string> = { esc: 'escape', return: 'enter', arrowup: 'arrowup', up: 'arrowup', down: 'arrowdown', left: 'arrowleft', right: 'arrowright', pgup: 'pageup', pgdn: 'pagedown', del: 'delete', space: ' ' };
   const named = aliases[key] ?? key;
   if (BARE_MODIFIERS.includes(named) || !(KEY_NAMES[named] !== undefined || named.length === 1)) return null;
-  return [...mods, named].join('+');
+  return [...orderedMods, named].join('+');
 }
 
-/** 应用用户键位覆盖；返回未知动作和无效按键，其他有效绑定照常应用。 */
+/** 应用用户键位覆盖；先恢复默认绑定，再返回未知动作和无效按键，其他有效绑定照常应用。 */
 export function applyOverrides(overrides: Record<string, string>): { readonly applied: TerminalAction[]; readonly refused: string[] } {
+  Object.assign(CURRENT, defaultSpecs());
   const applied: TerminalAction[] = [];
   const refused: string[] = [];
   for (const [action, text] of Object.entries(overrides)) {

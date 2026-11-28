@@ -53,8 +53,12 @@ export type Client = {
 
 // 将 Host 错误、客户端生成的超时或传输错误统一为稳定错误码，供界面显示和判断。
 export function code(error: unknown): string {
-  const shaped = error as { code?: string; message?: string };
-  return shaped.code ?? shaped.message ?? String(error);
+  if (error !== null && typeof error === 'object') {
+    const shaped = error as { code?: unknown; message?: unknown };
+    if (typeof shaped.code === 'string' && shaped.code !== '') return shaped.code;
+    if (typeof shaped.message === 'string' && shaped.message !== '') return shaped.message;
+  }
+  return String(error);
 }
 
 export function createClient(transport: Transport): Client {
@@ -92,11 +96,11 @@ export function createClient(transport: Transport): Client {
       return { kind: 'unparsed' };
     }
     if (typeof message.notify === 'string') {
-      for (const handle of notifications) handle(message);
+      for (const handle of [...notifications]) handle(message);
       return { kind: 'notification', message };
     }
     if (typeof message.method === 'string') {
-      for (const handle of requests) handle(message);
+      for (const handle of [...requests]) handle(message);
       return { kind: 'request', message };
     }
     if (typeof message.id === 'string') {
@@ -107,7 +111,7 @@ export function createClient(transport: Transport): Client {
   }
 
   transport.onFrame((text) => receive(text));
-  transport.onFault?.(() => discard('host_closed'));
+  transport.onFault?.((reason) => discard(reason || 'host_closed'));
 
   function discard(reason: string): number {
     let dropped = 0;

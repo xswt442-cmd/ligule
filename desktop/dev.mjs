@@ -49,8 +49,9 @@ async function waitForFrontend(child) {
       const response = await fetch('http://localhost:5188/');
       if (response.ok) return;
     } catch {
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // ignore until deadline
     }
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error('Vite did not become ready at http://localhost:5188/');
 }

@@ -32,6 +32,11 @@ for (const [action, binding] of Object.entries(KEYMAP)) {
 }
 // 加载用户覆盖项时，应应用有效绑定并逐项报告无效绑定。
 assert.equal(parseSpec('Ctrl+Shift+K'), 'ctrl+shift+k');
+assert.equal(parseSpec('shift+ctrl+k'), 'ctrl+shift+k');
+assert.equal(parseSpec('meta+k'), 'ctrl+k');
+assert.equal(parseSpec('ctrl+ctrl+k'), null, '重复修饰键应被拒绝');
+assert.equal(parseSpec('meta+ctrl+k'), null, 'meta 与 ctrl 重复时应被拒绝');
+assert.equal(parseSpec('arrowup'), 'arrowup');
 assert.equal(parseSpec('esc'), 'escape');
 assert.equal(parseSpec('hyper+k'), null, '表里没有的那一个修饰键不猜');
 assert.equal(parseSpec('ctrl+'), null, '缺一记键名不算一记键');

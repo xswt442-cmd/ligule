@@ -51,9 +51,13 @@ test('the key table is the one place both the dispatch and the names on screen r
 
 test('a personal key binding is read, applied, or refused by name', () => {
   assert.equal(parseSpec('Ctrl+Shift+K'), 'ctrl+shift+k');
+  assert.equal(parseSpec('shift+ctrl+k'), 'ctrl+shift+k');
+  assert.equal(parseSpec('arrowup'), 'arrowup');
   assert.equal(parseSpec('  enter '), 'enter');
   assert.equal(parseSpec('up'), 'arrowup');
   assert.equal(parseSpec('ctrl+'), null, '缺一记键名不算一记键');
+  assert.equal(parseSpec('ctrl+ctrl+k'), null, '重复修饰键不接受');
+  assert.equal(parseSpec('alt+k'), null, 'TUI 不接受 specOf 永不产出的 alt');
   assert.equal(parseSpec('hyper+k'), null, '表里没有的那一个修饰键不猜');
   assert.equal(parseSpec('Control'), null, '光按住修饰键不是一记绑定');
   const outcome = applyOverrides({ send: 'ctrl+x', 表里没有: 'ctrl+y' });
@@ -62,7 +66,8 @@ test('a personal key binding is read, applied, or refused by name', () => {
   assert.equal(hit('send', 'x', { ctrl: true }), true, '改过之后那一记键落的是发送');
   assert.equal(hit('send', '', { return: true }), false, '原先那一记键不再落发送');
   assert.equal(keyHint('send'), 'Ctrl+X', '画面说的那串字跟着换');
-  applyOverrides(defaultSpecs());
+  // 重新应用空覆盖时必须先重置为默认值，不能残留之前的覆盖。
+  applyOverrides({});
   assert.equal(keyHint('send'), 'Enter', '回到默认那一份');
 });
 
@@ -143,6 +148,42 @@ test('/bind changes what a key does and what the screen says about it', options,
     assert.equal(started(), 1, 'Enter 已经不是发送那一条了，第二次按它不发');
   } finally {
     applyOverrides(defaultSpecs());
+    instance.unmount();
+  }
+}));
+
+test('<App> Shift+Enter inserts a newline instead of sending or doing nothing', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { setTimeout: delay } = await import('node:timers/promises');
+  const { App } = await import('../dist/tui/app.js');
+
+  const stdout = new PassThrough() as PassThroughStream & { columns: number; isTTY: boolean };
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const instance = render(createElement(App, {
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout: stdout as unknown as NodeJS.WriteStream, stdin: stdin as unknown as NodeJS.ReadStream, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const lastFrame = () => completeFrame(painted);
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    stdin.write('first');
+    await delay(40);
+    // CSI u 编码的 Shift+Enter（ESC [ 13 ; 2 u）
+    stdin.write('\u001b[13;2u');
+    await delay(40);
+    stdin.write('second');
+    await waitFor(() => lastFrame().includes('second'), { read: lastFrame });
+    assert.equal(requests.filter((request) => request.method === 'run.start').length, 0, 'Shift+Enter 不应发送消息');
+    stdin.write('\r');
+    await waitFor(() => requests.some((request) => request.method === 'run.start'), { read: () => JSON.stringify(requests) });
+    const run = requests.find((request) => request.method === 'run.start')!;
+    assert.equal((run.params as { input?: string }).input, 'first\nsecond');
+  } finally {
     instance.unmount();
   }
 }));

@@ -1,6 +1,7 @@
 // 检查客户端如何匹配响应、处理超时并清理重连前的等待调用。
 import assert from 'node:assert/strict';
-import { createClient, type Frame, type Transport } from '../../src/protocol.ts';
+import { code, createClient, type Frame, type Transport } from '../../src/protocol.ts';
+import { loadSettings, readSettings, saveSettings, updateSettings } from '../../src/settings.ts';
 
 const sent: Frame[] = [];
 const handlers: Array<(text: string) => void> = [];
@@ -71,5 +72,67 @@ const stopAgain = client.onNotification(() => { seen = 'second'; });
 stopAgain();
 reply({ notify: 'delta', sessionId: 's1', event: { type: 'text', text: 'z' } });
 assert.equal(seen, '', '重复退订不会复活回调');
+
+// code(error) 对 null/undefined 不应抛错。
+assert.equal(code(null), 'null');
+assert.equal(code(undefined), 'undefined');
+
+// 回调内部退订自己时，不应跳过后续监听者。
+const order: string[] = [];
+let unsubFirst = () => {};
+unsubFirst = client.onNotification(() => {
+  order.push('first');
+  unsubFirst();
+});
+const unsubSecond = client.onNotification(() => {
+  order.push('second');
+});
+reply({ notify: 'delta', sessionId: 's1', event: { type: 'text', text: 'snapshot' } });
+assert.deepEqual(order, ['first', 'second']);
+unsubSecond();
+
+// settings.ts: Host 写入冲突或失败时不得提前污染内存或 localStorage 缓存。
+const storage = new Map<string, string>();
+(globalThis as unknown as { localStorage: Storage }).localStorage = {
+  getItem: (key: string) => storage.get(key) ?? null,
+  setItem: (key: string, value: string) => { storage.set(key, value); },
+  removeItem: (key: string) => { storage.delete(key); },
+  clear: () => { storage.clear(); },
+  key: (index: number) => [...storage.keys()][index] ?? null,
+  get length() { return storage.size; },
+};
+
+let failWrite = false;
+const settingsClient = {
+  call: async (method: string, params: Record<string, unknown>) => {
+    if (method === 'prefs.read') {
+      return { version: 'v1', settings: { palette: 'parchment', fontUi: 15 } };
+    }
+    if (method === 'prefs.write') {
+      if (failWrite) throw Object.assign(new Error('prefs_version_conflict'), { code: 'prefs_version_conflict' });
+      return { version: 'v2', settings: JSON.parse(String(params.json)) };
+    }
+    throw new Error(`unexpected_method:${method}`);
+  },
+} as unknown as ReturnType<typeof createClient>;
+
+const initial = await loadSettings(settingsClient);
+assert.equal(initial.palette, 'parchment');
+assert.equal(readSettings().palette, 'parchment');
+
+failWrite = true;
+await assert.rejects(
+  saveSettings(settingsClient, { ...initial, palette: 'forest' }),
+  { code: 'prefs_version_conflict' },
+);
+assert.equal(readSettings().palette, 'parchment', 'saveSettings 冲突时不得提前写入 localStorage');
+
+await loadSettings(settingsClient);
+failWrite = true;
+await assert.rejects(
+  updateSettings(settingsClient, (current) => ({ ...current, fontUi: 22 })),
+  { code: 'prefs_version_conflict' },
+);
+assert.equal(readSettings().fontUi, 15, 'updateSettings 冲突时不得提前写入 localStorage');
 
 console.log('桌面前端的协议检查通过');

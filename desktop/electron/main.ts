@@ -102,11 +102,15 @@ async function boot(): Promise<void> {
 
 app.on('before-quit', event => {
   if (confirmedQuit) return;
+  if (native === undefined) {
+    confirmedQuit = true;
+    return;
+  }
   event.preventDefault();
-  if (native !== undefined) requestQuit();
+  requestQuit();
 });
 app.on('activate', () => native?.restore());
-void app.whenReady().then(boot).catch(async () => {
+void app.whenReady().then(boot).catch(async (error: unknown) => {
   try {
     if (host !== undefined) await host.stop();
   } catch {
@@ -115,7 +119,9 @@ void app.whenReady().then(boot).catch(async () => {
     try { detachIpc?.(); } catch { console.error('desktop_ipc_cleanup_failed'); }
     try { native?.dispose(); } catch { console.error('desktop_native_cleanup_failed'); }
   }
-  console.error('desktop_start_failed');
+  const detail = error instanceof Error ? ((error as { code?: unknown }).code ?? error.message) : String(error);
+  const summary = typeof detail === 'string' ? detail.split(/\r?\n/u)[0]!.slice(0, 200) : 'unknown';
+  console.error('desktop_start_failed', summary);
   dialog.showErrorBox('ligule', 'Desktop 启动失败，请检查随包运行时。\nDesktop could not start. Check the bundled runtime.');
   confirmedQuit = true;
   app.exit(1);

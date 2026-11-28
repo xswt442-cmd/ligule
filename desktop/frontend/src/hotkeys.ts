@@ -15,6 +15,7 @@ export type Binding = { readonly spec: string; readonly view: KeyView; readonly 
 
 // 修饰键顺序固定，规范化和显示都使用同一顺序。
 const MODIFIERS = ['ctrl', 'shift', 'alt', 'meta'] as const;
+const PARSE_MODIFIERS = ['ctrl', 'shift', 'alt'] as const;
 // 单独按下 `Control` 或 `Meta` 等修饰键不构成有效绑定。
 const BARE_MODIFIERS = ['control', 'shift', 'alt', 'meta'];
 
@@ -88,12 +89,15 @@ export const CURRENT = defaultSpecs();
 export function parseSpec(text: string): string | null {
   const parts = text.trim().toLowerCase().split('+').map((part) => part.trim());
   if (parts.some((part) => part === '')) return null;
-  const mods = parts.slice(0, -1);
-  if (mods.some((mod) => !MODIFIERS.includes(mod as typeof MODIFIERS[number]))) return null;
+  const rawMods = parts.slice(0, -1);
+  if (rawMods.some((mod) => !MODIFIERS.includes(mod as typeof MODIFIERS[number]))) return null;
+  const mods = rawMods.map((mod) => (mod === 'meta' ? 'ctrl' : mod));
+  if (new Set(mods).size !== mods.length) return null;
+  const orderedMods = PARSE_MODIFIERS.filter((mod) => mods.includes(mod));
   const aliases: Record<string, string> = { esc: 'escape', return: 'enter', up: 'arrowup', down: 'arrowdown', left: 'arrowleft', right: 'arrowright', pgup: 'pageup', pgdn: 'pagedown', del: 'delete', space: ' ' };
   const key = aliases[parts[parts.length - 1]!] ?? parts[parts.length - 1]!;
   if (BARE_MODIFIERS.includes(key) || (KEY_NAMES[key] === undefined && key.length !== 1)) return null;
-  return [...mods, key].join('+');
+  return [...orderedMods, key].join('+');
 }
 
 /** 应用用户覆盖前恢复默认绑定，再应用有效项，并报告未知动作或无效按键。 */

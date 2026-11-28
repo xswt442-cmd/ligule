@@ -45,11 +45,52 @@ function renderInline(token: Token, key: string): ReactNode {
       const href = safeHref(at.href ?? '');
       const body = inline(at.children ?? at.text ?? '', key);
       if (href === '') return <span key={key}>{body}</span>;
-      return <a key={key} href={href} title={at.title} target="_blank" rel="noreferrer noopener">{body}</a>;
+      return <ExternalLink key={key} href={href} title={at.title}>{body}</ExternalLink>;
     }
     // 将行内 HTML 标记作为普通文本显示，不执行模型生成的标签。
     default: return <span key={key}>{typeof (token as { raw?: string }).raw === 'string' ? (token as { raw: string }).raw : ''}</span>;
   }
+}
+
+function isProjectHelpLink(address: string): boolean {
+  try {
+    const url = new URL(address);
+    return url.protocol === 'https:' && url.username === '' && url.password === '' && url.port === ''
+      && ((url.hostname === 'github.com'
+          && (url.pathname === '/xswt442-cmd/ligule' || url.pathname.startsWith('/xswt442-cmd/ligule/')))
+        || (url.hostname === 'www.npmjs.com' && url.pathname === '/package/ligule'));
+  } catch {
+    return false;
+  }
+}
+
+function ExternalLink({ href, title, children }: { href: string; title?: string; children: ReactNode }) {
+  const [note, setNote] = useState<'idle' | 'copied' | 'blocked'>('idle');
+  const t = useText();
+  const desktop = typeof window !== 'undefined' && (window as Window & { liguleDesktop?: unknown }).liguleDesktop !== undefined;
+  const blockedInDesktop = desktop && !isProjectHelpLink(href);
+  return <span className="md-link-wrap">
+    <a
+      href={href}
+      title={title}
+      target="_blank"
+      rel="noreferrer noopener"
+      onClick={(event) => {
+        if (!blockedInDesktop) return;
+        event.preventDefault();
+        if (navigator.clipboard?.writeText !== undefined) {
+          void navigator.clipboard.writeText(href).then(
+            () => setNote('copied'),
+            () => setNote('blocked'),
+          );
+        } else {
+          setNote('blocked');
+        }
+      }}
+    >{children}</a>
+    {note === 'copied' && <span className="row-note"> {t('（已复制链接，请在浏览器中打开）', '(Link copied; open in browser)')}</span>}
+    {note === 'blocked' && <span className="row-note"> {t(`（外部链接已阻止：${href}）`, `(External link blocked: ${href})`)}</span>}
+  </span>;
 }
 
 function safeHref(href: string): string {
@@ -93,6 +134,11 @@ function block(tokens: Token[], key: string): ReactNode[] {
     }
     if (token.type === 'paragraph') {
       out.push(<p key={id}>{inline((at as Tokens.Paragraph).tokens ?? (at as Tokens.Paragraph).text, id)}</p>);
+      return;
+    }
+    if (token.type === 'text') {
+      const textToken = at as Tokens.Text;
+      out.push(<span key={id}>{inline(textToken.tokens ?? textToken.text, id)}</span>);
       return;
     }
     if (token.type === 'code') {
