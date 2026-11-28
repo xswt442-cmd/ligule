@@ -7,9 +7,9 @@ import { decode, type ExecControlArguments, type ExecLogSnapshot, type ManagedEx
 import {
   executionLogEncodedBytes, MAX_EXECUTION_LOG_RAW_BYTES, readExecutionLog, removeExecutionLog, scanExecutionLogs,
   writeExecutionLog, type ExecutionLogReference,
-} from '../session/execution-log.js';
-import type { SessionEvent } from '../session/format.js';
-import { checkedCheckDeclaration, checkedCheckScopeSamples, type CheckDeclaration, type CheckScopeSample } from '../session/checks.js';
+} from '../storage/execution-log.js';
+import type { SessionEvent } from '../session/event-types.js';
+import { checkedCheckDeclaration, checkedCheckScopeSamples, type CheckDeclaration, type CheckScopeSample } from '../checks.js';
 
 const MAX_ACTIVE_PER_RUN = 4;
 const MAX_ACTIVE_PER_SESSION = 8;

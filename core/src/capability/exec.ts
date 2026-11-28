@@ -18,7 +18,7 @@ import type { WindowsCommandLaunch } from './windows-command.js';
 import { permissionDenial, type PermissionContext } from '../permission.js';
 import type { ShellSelection } from './shell.js';
 import { assertInterpreterIdentity, assertScriptBinding, bindScript, commandUsesNodeRuntime, readBoundScript, resolveNodeRuntime, type ScriptBinding } from './script-binding.js';
-import { CHECK_DECLARATION_SCHEMA, checkedCheckDeclaration, type CheckDeclaration } from '../session/checks.js';
+import { CHECK_DECLARATION_SCHEMA, checkedCheckDeclaration, type CheckDeclaration } from '../checks.js';
 import type { ExecLogChunk, ExecLogSnapshot } from './exec-log-types.js';
 
 export type { ExecLogChunk, ExecLogSnapshot } from './exec-log-types.js';
