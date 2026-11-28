@@ -10,7 +10,7 @@
   </p>
   <p>
     <a href="https://nodejs.org"><img alt="Node.js" src="https://img.shields.io/static/v1?label=node&message=%3E%3D24&color=339933&logo=node.js&logoColor=white"></a>
-    <a href="https://img.shields.io/npm/v/ligule"><img alt="npm" src="https://img.shields.io/npm/v/ligule?label=CLI%20%2F%20TUI&color=4d6bfe"></a>
+    <a href="https://www.npmjs.com/package/ligule"><img alt="npm" src="https://img.shields.io/npm/v/ligule?label=CLI%20%2F%20TUI&color=4d6bfe"></a>
     <a href="https://github.com/xswt442-cmd/ligule/releases/latest"><img alt="Desktop release" src="https://img.shields.io/github/v/release/xswt442-cmd/ligule?label=Desktop&color=657483"></a>
     <a href="desktop/README.en.md"><img alt="Windows" src="https://img.shields.io/badge/Windows-4d6bfe?logo=windows&logoColor=white"></a>
     <a href="desktop/README.en.md"><img alt="Linux" src="https://img.shields.io/badge/Linux-fcc624?logo=linux&logoColor=black"></a>
@@ -67,8 +67,8 @@ Configure services and models in Desktop Settings. The CLI/TUI use the same conf
 
 - [简体中文使用手册](docs/guide.zh-CN.md) · [User guide](docs/guide.en.md)
 - [Agent Control（MCP）指南](docs/agent-control/guide.zh-CN.md) · [Agent Control guide (English)](docs/agent-control/guide.en.md)
-- [架构说明](docs/development/ARCHITECTURE.zh-cn.md) · [Architecture](docs/development/ARCHITECTURE.en.md)
-- [贡献与验证](docs/development/CONTRIBUTING.zh-cn.md) · [Contributing and checks](docs/development/CONTRIBUTING.en.md)
+- [架构说明](docs/development/ARCHITECTURE.zh-CN.md) · [Architecture](docs/development/ARCHITECTURE.en.md)
+- [贡献与验证](.github/CONTRIBUTING.md) · [测试说明](docs/development/TESTING.zh-CN.md) · [Testing](docs/development/TESTING.en.md)
 - [CLI/TUI changelog](tui/CHANGELOG.md) · [Desktop changelog](desktop/CHANGELOG.md)
 - [Maintainer release procedure](docs/development/RELEASE.md)
 

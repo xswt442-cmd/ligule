@@ -1,5 +1,7 @@
 # Host extensions
 
+[简体中文](extensions.zh-CN.md) · [English](extensions.en.md)
+
 Ligule extensions are trusted Node.js modules loaded by the Host from paths declared in user configuration or from the user's extension directory. They run in the Host process; they are not an operating-system sandbox. Core remains private to the repository and is not a separately published SDK.
 
 ## Enable an extension

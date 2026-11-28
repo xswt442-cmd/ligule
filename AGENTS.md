@@ -1,6 +1,6 @@
 # Ligule engineering guide
 
-Follow this file and the nearest module `AGENTS.md`. Current implementation and tests take precedence over historical notes. See [architecture](docs/development/ARCHITECTURE.en.md), [contributing](docs/development/CONTRIBUTING.en.md), and the [engineering standard](.github/engineering/ENGINEERING_STANDARD.md).
+Follow this file and the nearest module `AGENTS.md`. Current implementation and tests take precedence over historical notes. See [architecture](docs/development/ARCHITECTURE.en.md), [contributing](.github/CONTRIBUTING.md), and the [engineering standard](.github/engineering/ENGINEERING_STANDARD.md).
 
 ## Architecture and safety
 

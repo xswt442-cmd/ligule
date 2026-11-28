@@ -12,17 +12,17 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 **改进**
 
-- `edit` 支持一次精确修改多个唯一且互不重叠的片段；旧单锚点参数仍可用，结果提供有界 Diff。
-- 同一 Host 对同一路径的 `create`、`write`、`edit`、`delete` 按顺序执行；文件操作报错后会复核目标，并区分已确认状态与无法确认的结果。
+- `edit` 支持一次精确修改多个唯一且互不重叠的片段。旧单锚点参数仍可用，结果提供有界 Diff。
+- 同一 Host 对同一路径的 `create`、`write`、`edit`、`delete` 按顺序执行。文件操作报错后会复核目标，并区分已确认状态与无法确认的结果。
 
 **修复**
 
-- 外控事件发生缺口后，从 Host 刷新持久转录并按 Session 序号显示尚未见过的记录；过期刷新不会回退当前游标，也不会伪造未持久化的实时增量。
-- 检查记录带有开始/结束时间与执行日志引用；导出与会话展示这些事实，旧记录把缺失字段显示为未知，不再推断完整性。
-- 导出件包含每条执行命令的引用、时段、退出结果、有界日志摘录与基线正文；无法导出时写明原因。
-- 通过 include、includeIf 或 worktree 配置定义的仓库过滤器会被识别并拒绝执行；会话文件边界窄于 Git 仓库根目录时，Git 状态与 diff 明确拒绝读取，不再返回边界外的内容。
+- 外控事件发生缺口后，从 Host 刷新持久转录并按 Session 序号显示尚未见过的记录。过期刷新不会回退当前游标，也不会伪造未持久化的实时增量。
+- 检查记录带有开始/结束时间与执行日志引用。导出与会话展示这些事实，旧记录把缺失字段显示为未知，不再推断完整性。
+- 导出件包含每条执行命令的引用、时段、退出结果、有界日志摘录与基线正文。无法导出时写明原因。
+- 通过 include、includeIf 或 worktree 配置定义的仓库过滤器会被识别并拒绝执行。会话文件边界窄于 Git 仓库根目录时，Git 状态与 diff 明确拒绝读取，不再返回边界外的内容。
 - Side Chat 用同一版本的有界快照核对选中内容，来自后续页的选择不再被误判为无法验证。
-- Operation Session 只保留其手动命令的记录与控制；来源权限收窄后，写文件、导出或启动新 Run 仍然被拒绝。
+- Operation Session 只保留其手动命令的记录与控制。来源权限收窄后，写文件、导出或启动新 Run 仍然被拒绝。
 - 随包指南不再出现内部阶段编号。
 - 运行结束时的资源收口失败会记录为 `run_resources_settle_failed` 或 `run_resources_finish_failed`，并保留原始失败原因与失败资源名，不再只显示通用运行时错误。
 
@@ -50,10 +50,13 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 **改进**
 
-- 审批方式改为四档：`always`（每次都要审批）、`ask`（逐次审批）、`auto`（自动判定）、`never`（完全不审批）。`/policy`、审批方式选择器和底部配置行同步更新；选择 `never` 前必须先确认，并说明规则表里的 allow/ask/deny 不再参与判定。
-- 旧配置、旧会话记录和旧授权里的 `none`、以及旧语义的 `never` 一律按 `ask` 读取，历史数据不会自动变成“跳过审批”；新写入的记录带语义标记，可与旧记录区分。
-- 用户配置可用 `[reviewer]` 表启用可选的自动审批复审：它默认关闭，只在 `auto` 且确定性策略认不出命令形状时调用一次模型做只读判断；复审不选自己的模型或端点，跟随当前 Run 的会话模型与凭据，项目配置只能收紧预算、不能自行启用；复审只能回答 allow / deny / ask-human，超时、超预算与不合规回复一律转人工审批，规则拒绝、硬拒绝、强制人审、私有网络与外部访问永远不交给模型；结论以 `policyReview` 事件记入会话（可跳过、不进入模型上下文）。未配置时 `auto` 行为不变。
-- `/usage` 显示本会话的 Token 用量，主 Agent 与复审分成两份账：缓存命中是输入的子集、不重复计入，端点没有报回的数字保持未知而不是记成 0；外控读取同一份 `usage.get` 汇总。会话有复审记录时，`/usage` 还会显示最近一次复审的裁决、原因码与证据条数。
+- 审批方式改为四档：`always`（每次都要审批）、`ask`（逐次审批）、`auto`（自动判定）、`never`（完全不审批）。`/policy`、审批方式选择器和底部配置行同步更新，选择 `never` 前必须先确认 allow/ask/deny 规则不再参与判定。
+- 旧配置、旧会话记录和旧授权里的 `none`、以及旧语义的 `never` 一律按 `ask` 读取，历史数据不会自动变成“跳过审批”。新写入的记录带语义标记，可与旧记录区分。
+- 用户配置可用 `[reviewer]` 表启用可选的自动审批复审：
+  - 它默认关闭，只在 `auto` 且确定性策略无法识别命令形状时调用一次模型做只读判断，并跟随当前 Run 的会话模型与凭据。
+  - 项目配置只能收紧预算，不能自行启用。复审只能回答 allow / deny / ask-human，超时、超预算与不合规回复一律转人工审批。
+  - 规则拒绝、硬拒绝、强制人审、私有网络与外部访问永远不交给模型，结论以 `policyReview` 事件记入会话（可跳过、不进入模型上下文）。未配置时 `auto` 行为不变。
+- `/usage` 显示本会话的 Token 用量，主 Agent 与复审分成两份账。缓存命中是输入的子集、不重复计入，端点没有报回的数字保持未知而不是记成 0，外控读取同一份 `usage.get` 汇总（有复审记录时显示最近一次复审的裁决、原因码与证据条数）。
 - Agent Control 的 `ligule_run_get` 可在授权项目中只读查询已保存回执；控制器重启后无需重新打开 Session 或占用写锁，任务不会因此重放。
 
 **修复**
@@ -67,8 +70,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 - Approval modes are now `always` (every call waits), `ask`, `auto`, and `never` (skip the policy layer). `/policy`, the mode picker, and the bottom configuration line follow the new set; choosing `never` requires a confirmation that explains allow/ask/deny rules no longer take part.
 - Legacy `none` values and the old `never` meaning are read as `ask` in existing config, session records, and grants, so history never silently becomes “skip approvals”. Newly written records carry a semantics marker that separates them from old ones.
-- `/usage` shows this session's token usage with the main agent and the reviewer accounted separately: cached tokens are a subset of the input and are never added again, numbers the endpoint did not report stay unknown instead of becoming zero, and external control reads the same `usage.get` aggregate. When the session has review records, `/usage` also shows the last verdict with its reason code and evidence count.
 - A `[reviewer]` table in the user configuration can enable an optional automatic approval reviewer. It is off by default and only runs under `auto`, when the deterministic policy cannot recognise the command shape; it never picks its own model or endpoint and follows the session model and credential of the current run, while a project configuration can only tighten its budgets and never enable it; it may answer only allow / deny / ask-human, and timeouts, exhausted budgets and unusable replies always fall back to asking a human. Deny rules, hard denials, forced manual approval, private networks and external access are never handed to the model. Decisions are recorded as `policyReview` session events (skippable, never part of the model context). Without the table, `auto` behaves exactly as before.
+- `/usage` shows this session's token usage with the main agent and the reviewer accounted separately: cached tokens are a subset of the input and are never added again, numbers the endpoint did not report stay unknown instead of becoming zero, and external control reads the same `usage.get` aggregate. When the session has review records, `/usage` also shows the last verdict with its reason code and evidence count.
 - Agent Control `ligule_run_get` can read a persisted receipt in the authorized project without reopening the Session or taking its writer lock after a controller restart. The lookup does not replay work.
 
 **Fixed**
@@ -87,9 +90,9 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - 窄终端下状态行按可用列宽截断并保留打断提示；MCP 调用的目标从实际嵌套参数中提取，避免显示错误目标。
 - 权限结果仅在实际提高权限时标记为升级，避免普通策略判断被误报为权限升级。
 
-- `run.wait` 必须明确指定 `origin`，但该字段不授予权限。可信本地 UI 可读取本 Session 的所有回执；经过认证的 Agent Control 桥接受限于 human 与当前 Grant scope；其他 Host 只能读取自己的 controller scope。Host 按持久 Run 归属与调用方上下文授权。跨 scope 的 `requestKey` 多重匹配返回 `run_request_key_ambiguous`，应使用 `runId`。
-- POSIX MCP Server 使用独立进程组；撤销、取消或 Host 关闭时有界地发送终止信号并清理仍存活的所属子进程，失败保留为可重试错误。主动通过 `setpgid` 移入其他进程组或通过 `setsid` 创建新会话的后代不在原进程组边界内。
-- `delete` 只使用操作系统回收站；系统后端报错后会复核原目标对象身份及顶层元数据，仍匹配时返回后端错误；不核对文件正文或递归目录内容，无法确认时返回 `delete_outcome_unknown`。Linux 通过 GIO 调用系统回收站。历史 `.ligule-trash` 不迁移或清理，Shell 删除继续使用自己的 Policy 与审批链。
+- `run.wait` 必须明确指定不授予权限的 `origin`：可信本地 UI 可读取本 Session 所有回执，认证的 Agent Control 桥接受限于 human 与当前 Grant scope，其他 Host 只读自身 controller scope。跨 scope 的 `requestKey` 多重匹配返回 `run_request_key_ambiguous`（应使用 `runId`）。
+- POSIX MCP Server 使用独立进程组，撤销、取消或 Host 关闭时有界地发送终止信号并清理仍存活的所属子进程（失败保留为可重试错误）。主动通过 `setpgid` 移入其他进程组或通过 `setsid` 创建新会话的后代不在原进程组边界内。
+- `delete` 只使用操作系统回收站（Linux 通过 GIO 调用），系统后端报错后会复核原目标对象身份及顶层元数据。仍匹配时返回后端错误，无法确认时返回 `delete_outcome_unknown`（不核对文件正文或递归目录内容），历史 `.ligule-trash` 不迁移或清理，Shell 删除继续使用自己的 Policy 与审批链。
 - 用户层 `[telemetry]` 可显式开启有界本地 JSONL 事件日志和可选的本机 OTLP Trace；默认关闭，导出不含对话正文或工具内容。
 - `[loop].maxParallelTools` 限制范围为 1–32，默认 4，防止一次模型响应启动不受限的工具并发。
 - `ligule run --json` 输出可校验的 Host 终态与调用统计，不输出回答正文；必须在命令行显式加 `--allow-full-access` 才会使用当前操作系统用户的完整权限运行，并且没有 OS 沙箱。Policy 的审批和拒绝规则继续生效。
@@ -117,7 +120,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 - 外控新增 `ligule_session_close` 关闭空闲会话并释放名额，人工接管同样释放名额；会话历史继续保留。
 - `full` 模式新增 `todo_write`，支持每轮独立、持久保存历史的完整任务清单，内部子代理各自隔离。
-- 委派运行支持整个任务和单次模型请求的期限、父子共享模型调用次数上限；失败结果保留已确认的用量与部分正文。`full` 新增 `present`，记录工作区文件交付时的类型、大小和 SHA-256。图片按 Session 引用保留，过期且未引用的图片可有界清理。
+- 委派运行支持整个任务和单次模型请求的期限、父子共享模型调用次数上限，失败结果保留已确认的用量与部分正文。`full` 新增 `present` 记录工作区文件交付时的类型、大小和 SHA-256，过期且未引用的图片可有界清理。
 
 ### English
 
@@ -240,7 +243,7 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 - 终端界面输入 `/` 即可浏览全部命令，按名称或说明筛选并滚动选择；固定命令参数支持 Tab 补全，补全仅修改草稿，权限升级仍需确认。
 - `/sessions` 和不带参数的 `/resume` 支持按名称、编号或工具模式筛选；列表优先显示会话名称，筛选文字与聊天草稿分别管理。
-- 欢迎区改为左对齐；运行阶段使用 Host 确认的状态，输入区限制显示高度。选择菜单、会话列表、历史和审批面板打开时让普通编辑区让位；工具调用先显示目标摘要，完整内容可从 Ctrl+O 查看。颜色使用继承终端调色板的 ANSI 角色，空间不足时禁用审批操作。
+- 欢迎区改为左对齐，运行阶段使用 Host 确认的状态，输入区限制显示高度，并在菜单或审批打开时让出普通编辑区。工具调用先显示目标摘要（完整内容可从 Ctrl+O 查看），颜色继承终端调色板并在空间不足时禁用审批操作。
 - `/queue list` 可查看待发送消息及队列状态。
 - 长问题与选项可分页阅读，回答输入区保持可见；审批和历史详情中的粘贴不会修改隐藏草稿。
 

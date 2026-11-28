@@ -1,14 +1,28 @@
 # Architecture
 
-[简体中文](ARCHITECTURE.zh-cn.md) · [English](ARCHITECTURE.en.md)
+[简体中文](ARCHITECTURE.zh-CN.md) · [English](ARCHITECTURE.en.md)
 
-The workspace has three source modules: `core/` is the shared Agent Core, `tui/` is the CLI/TUI product, and `desktop/` is the Electron product. Dependencies point `tui → core ← desktop`; Core itself keeps Kernel, Host, Session, Model, Policy, and Tools as distinct concepts. The products ship independently through npm `ligule` and GitHub Releases. Core has no independent release. The [kernel](../../core/src/kernel/kernel.ts) executes registered tools and applies the decision chain. The [Host](../../core/src/host/host.ts) assembles that kernel with a project environment, model provider, session log, and client protocol.
+This guide explains ligule's runtime layout, an Agent Loop turn, and session data flow based on the current source. The workspace has three source modules: `core/` is the shared Agent Core, `tui/` is the CLI/TUI product, and `desktop/` is the Electron product. Dependencies point `tui → core ← desktop`; Core itself keeps Kernel, Host, Session, Model, Policy, and Tools as distinct concepts. The products ship independently through npm `ligule` and GitHub Releases. Core has no independent release. The [kernel](../../core/src/kernel/kernel.ts) executes registered tools and applies the decision chain. The [Host](../../core/src/host/host.ts) assembles that kernel with a project environment, model provider, session log, and client protocol.
 
 This guide is for contributors reading or changing the repository. It explains component ownership, dependency direction, one request's execution path, and session recovery. The linked source files remain authoritative for protocol fields and module details.
 
-The user configuration layer can enable bounded local JSONL event logging with `[telemetry].enabled = true`; optional `otlpEndpoint` exports bounded OpenTelemetry traces to a loopback-only OTLP/HTTP protobuf endpoint. It is disabled by default, project configuration cannot enable it, and storage or export failure does not affect Agent execution. Local JSONL storage has a fixed safety cap of four 64 KiB segments plus the bounded manifests; segment retention is not a user-level setting because changing the count requires a safe manifest transition. A local storage failure disables that telemetry writer and emits a sanitized error code through the Host logger; `flush()` reports the failure to direct callers. Events and traces omit prompts, reasoning, tool arguments/results, file paths, and credentials. Session JSONL remains the recovery source of truth; the local JSONL is a structured application event log, not OpenTelemetry Logs, and Ligule does not include a trace viewer.
+The user configuration layer can enable bounded local JSONL event logging with `[telemetry].enabled = true`; optional `otlpEndpoint` exports bounded OpenTelemetry traces to a loopback-only OTLP/HTTP protobuf endpoint. It is disabled by default, project configuration cannot enable it, and storage or export failure does not affect Agent execution.
+
+Local JSONL storage has a fixed safety cap of four 64 KiB segments plus the bounded manifests; segment retention is not a user-level setting because changing the count requires a safe manifest transition. A local storage failure disables that telemetry writer and emits a sanitized error code through the Host logger; `flush()` reports the failure to direct callers. Events and traces omit prompts, reasoning, tool arguments/results, file paths, and credentials. Session JSONL remains the recovery source of truth; the local JSONL is a structured application event log, not OpenTelemetry Logs, and Ligule does not include a trace viewer.
 
 The CLI npm package bundles the private Core's compiled code, modes, and metadata. Core's external runtime dependencies are merged into the public package manifest, so npm installs the native dependencies for the consumer's system. Packing excludes the build machine's external dependency tree, and the same tarball is verified on Windows and Linux.
+
+## Contents
+
+- [Source and package dependencies](#source-and-package-dependencies)
+- [Runtime map](#runtime-map)
+- [Delegated runs and external sessions](#delegated-runs-and-external-sessions)
+- [Kernel, plugins, tools, and capabilities](#kernel-plugins-tools-and-capabilities)
+- [One Agent Loop turn](#one-agent-loop-turn)
+- [Session records and recovery](#session-records-and-recovery)
+- [Session data flow](#session-data-flow)
+- [Host protocol and clients](#host-protocol-and-clients)
+- [Related guides](#related-guides)
 
 ## Source and package dependencies
 
@@ -42,12 +56,12 @@ Desktop has separate manifests: `desktop/electron/` uses the packaged Electron h
 
 ```sh
 pnpm --filter ligule run check-pack -- --work-root testplace/tmp/package-check-example-1
-pnpm --filter ligule run verify-install -- testplace/tmp/package-check-example-1/ligule-0.1.0.tgz --work-root testplace/tmp/install-check-example-1
+pnpm --filter ligule run verify-install -- testplace/tmp/package-check-example-1/ligule-<version>.tgz --work-root testplace/tmp/install-check-example-1
 ```
 
 Replace the example directory names with unused names; pass the tarball path produced in the check-pack work root to `verify-install`. Both checks must use the same actual archive; do not infer the final package from workspace manifests alone.
 
-### Extracted Core seams
+### Core module boundaries
 
 These modules hold shared data rules or projections; Host and Kernel remain owners of lifecycle and execution:
 
@@ -62,23 +76,7 @@ These modules hold shared data rules or projections; Host and Kernel remain owne
 | [`media.ts`](../../core/src/media.ts) | Define image-reference validation and shared limits without taking storage or Session ownership. |
 | [`tui.ts`](../../core/src/tui.ts) | Provide the supported Core facade used by the CLI/TUI adapter; implementations stay in their owning modules. |
 
-## Runtime and execution
-
-- [Runtime map](#runtime-map)
-- [Kernel, plugins, tools, and capabilities](#kernel-plugins-tools-and-capabilities)
-- [One Agent Loop turn](#one-agent-loop-turn)
-
-## Session data and recovery
-
-- [Session records and recovery](#session-records-and-recovery)
-- [Session data flow](#session-data-flow)
-
-## Host and clients
-
-- [Host protocol and clients](#host-protocol-and-clients)
-- [Related guides](#related-guides)
-
-### Runtime map
+## Runtime map
 
 ```mermaid
 flowchart LR
@@ -106,11 +104,13 @@ flowchart LR
 
 The [project environment loader](../../core/src/host/environment.ts) supplies configuration layers and extension sources to CLI and Desktop Host entries. The [provider factory](../../core/src/host/provider.ts) validates the selected model wire format, capabilities and retry settings; an unconfigured Host accepts settings requests and rejects model runs explicitly. The [session mode transaction](../../core/src/host/session-mode.ts) owns restriction installation, prompt fragments, rollback, and the persisted mode fact. Host keeps session locks, active turns, routing and resource cleanup. TUI record projection lives in [transcript.ts](../../tui/src/tui/transcript.ts); Desktop's [stream buffer](../../desktop/frontend/src/session-stream.ts) separates partial output by session.
 
-`ligule mcp-server --project <absolute-root>` exposes local control tools through the [MCP adapter](../../core/src/host/mcp-server.ts). The [control facade](../../core/src/host/control.ts) calls the same Host, tracks process-local operations, and limits session operations to the project authorized at startup. By default, it denies operations that require approval. With `--operator`, clients can reply to real pending approvals and questions and change supported session settings; hard denials cannot be overridden. Trusted TUI/Desktop clients can create project-bound [Agent Control Grants](../../core/src/host/agent-control.ts); `--grant <id>` bounds session Permission, network access, and Policy to the Grant's defaults and ceilings, which the Host revalidates on requests. Disconnect cancels runs and releases session locks. Session JSONL persists session records, while operation IDs and the message queue exist only in the current process. See the [Agent Control via MCP guide](../agent-control/guide.en.md).
+`ligule mcp-server --project <absolute-root>` exposes local control tools through the [MCP adapter](../../core/src/host/mcp-server.ts). The [control facade](../../core/src/host/control.ts) calls the same Host, tracks process-local operations, and limits session operations to the project authorized at startup. By default, it denies operations that require approval. With `--operator`, clients can reply to real pending approvals and questions and change supported session settings; hard denials cannot be overridden.
+
+Trusted TUI/Desktop clients can create project-bound [Agent Control Grants](../../core/src/host/agent-control.ts); `--grant <id>` bounds session Permission, network access, and Policy to the Grant's defaults and ceilings, which the Host revalidates on requests. Disconnect cancels runs and releases session locks. Session JSONL persists session records, while operation IDs and the message queue exist only in the current process. See the [Agent Control via MCP guide](../agent-control/guide.en.md).
 
 An active Run can accept bounded in-run input through `run.steer`; external control uses the same Host path through the `session.control` `steer` action. The Host binds the target `runId`, derives the source from the trusted connection, and does not accept a caller-claimed Human source. Required `runInput` events in Session format v3 or later record acceptance and application separately; the model projection and Reviewer evidence include only applied input. Inputs apply after a tool group settles and before the next Provider request. Natural completion closes input admission synchronously so a racing input cannot be lost. A pending approval or question is cancelled, and a late reply cannot affect the prior action. v0–v2 Sessions remain readable but do not accept `run.steer`.
 
-### Delegated runs and external sessions
+## Delegated runs and external sessions
 
 A run can carry a `DelegationSpec` with an optional `mode` and `outputSchema`, validated by the shared [delegation contract](../../core/src/delegation.ts). The internal `subagent` tool and MCP `ligule_run` / `ligule_run_start` share structured-output validation and the `RunResult` result type. An external MCP run continues in its original session; it does not automatically create a child session.
 
@@ -118,7 +118,9 @@ An internal subagent creates a derived Kernel and Loop in the same Host process,
 
 The wait-style `subagent` tool remains available. `subagent_start/status/message/wait/cancel` and the Host `subrun.start/status/message/wait/cancel` methods use the same manager and child Session. The child Session ID is also the stable `subrunId`; its Run Acceptance stores the parent Session, Run and optional tool call in Session format v4. A child can be queried after Host restart from its persisted Session and result sidecar, but an interrupted child is reported as `unknown` and is never replayed. A wait timeout does not cancel a child. Parent completion closes child admission and waits for active children; parent failure, cancellation or Host close cancels them and waits for their recorded terminal state.
 
-An external client reaches the authorized Host Session through local stdio MCP and the Control facade. Trusted TUI/Desktop clients use local Agent Control IPC to observe status, answer interactions, or take over a task. The Host remains the Session writer; session locks prevent two Hosts from writing the same record at once. Reply results and control events use `source=human` or `source=controller` to distinguish local users from MCP operators; only local-user replies can save approval memory. Takeover cancels the active external turn, clears unsent controller messages, releases the Host session lock, and emits an ownership-transfer event. Revoking workspace trust makes the local Host stop managed processes started from that trust; other Hosts recheck the shared trust record and stop those processes when revocation is detected. Session JSONL stores messages and tool events. Operation IDs, the event cache, pending requests, and the message queue belong to the Control process; after a restart, reopen a Session for live status, interactions, record reads, or further work, and do not reuse old operation IDs. An authorized durable receipt can instead be read with `ligule_run_get` without opening the Session writer. `run.wait` requires an explicit origin but does not authorize itself from that field. A trusted local UI can read both human and controller Receipts in its Session; the authenticated Agent Control bridge can read human Receipts and controller Receipts from its active Grant; other Hosts can read only their controller scope. The Host derives the scope from the persisted Run and verifies it against the caller context. A `requestKey` that matches multiple visible scopes returns `run_request_key_ambiguous`; use the unique `runId` to select a Receipt. The Host checks the matching receipt before returning a result.
+An external client reaches the authorized Host Session through local stdio MCP and the Control facade. Trusted TUI/Desktop clients use local Agent Control IPC to observe status, answer interactions, or take over a task. The Host remains the Session writer; session locks prevent two Hosts from writing the same record at once. Reply results and control events use `source=human` or `source=controller` to distinguish local users from MCP operators; only local-user replies can save approval memory. Takeover cancels the active external turn, clears unsent controller messages, releases the Host session lock, and emits an ownership-transfer event. Revoking workspace trust makes the local Host stop managed processes started from that trust; other Hosts recheck the shared trust record and stop those processes when revocation is detected.
+
+Session JSONL stores messages and tool events. Operation IDs, the event cache, pending requests, and the message queue belong to the Control process; after a restart, reopen a Session for live status, interactions, record reads, or further work, and do not reuse old operation IDs. An authorized durable receipt can instead be read with `ligule_run_get` without opening the Session writer. `run.wait` requires an explicit origin but does not authorize itself from that field. A trusted local UI can read both human and controller Receipts in its Session; the authenticated Agent Control bridge can read human Receipts and controller Receipts from its active Grant; other Hosts can read only their controller scope. The Host derives the scope from the persisted Run and verifies it against the caller context. A `requestKey` that matches multiple visible scopes returns `run_request_key_ambiguous`; use the unique `runId` to select a Receipt. The Host checks the matching receipt before returning a result.
 
 ```mermaid
 flowchart LR
@@ -130,7 +132,7 @@ flowchart LR
   Host --> Log[(Session JSONL)]
 ```
 
-### Kernel, plugins, tools, and capabilities
+## Kernel, plugins, tools, and capabilities
 
 The kernel starts with an empty tool registry. The Host installs plugins through the [assembly loader](../../core/src/kernel/assembly.ts); a plugin registers tools and returns cleanup actions. The selected [tool mode](../../core/src/kernel/modes.ts) restricts which registered tools enter the model manifest and selects named prompt fragments. It does not implement tools or provide an approval decision.
 
@@ -146,32 +148,19 @@ The built-in `delete` tool calls only the operating system recycle bin; Linux us
 
 `edit` keeps the legacy `anchor` / `replacement` form and also supports exact multi-range updates through `changes[]`. Both forms read the file at call time and add no prior full-read requirement. The legacy form requires one unique anchor. Multi-range calls require each nonempty `oldText` to occur exactly once and the selected original ranges not to overlap; a call accepts at most 32 changes and a combined 64 KiB of `oldText` and `newText`. Changes are applied by their positions in the original text. The display diff is capped at 8 KiB and explicitly marks truncation. An external writer can still change the file between reading, matching, and writing, so these checks do not provide cross-process atomic compare-and-swap.
 
-Within one Host, registered `create`, `write`, `edit`, and `delete` operations are queued by the final target path after boundary resolution; sessions and subagents hosted by that Host share the queue. Permission and the target path are rechecked after waiting. If a `create`, `write`, or `edit` path resolves to a different file, the call fails with `write_target_changed`; `delete` uses its own target snapshot and fails with `delete_target_changed`. The queue does not coordinate other Hosts or processes, provide exactly-once execution, or prevent writes from external callers that do not use it. After a filesystem error, `create`, `write`, and `edit` compare the current target with the before and expected contents: a confirmed write is returned as success, a confirmed unchanged target returns `<operation>_failed_unchanged`, and an unconfirmed result returns `<operation>_outcome_unknown`, requiring a reread before deciding whether to retry. `delete` uses the recycle-bin state check described above.
+Within one Host, registered `create`, `write`, `edit`, and `delete` operations are queued by the final target path after boundary resolution; sessions and subagents hosted by that Host share the queue. Permission and the target path are rechecked after waiting. If a `create`, `write`, or `edit` path resolves to a different file, the call fails with `write_target_changed`; `delete` uses its own target snapshot and fails with `delete_target_changed`. The queue does not coordinate other Hosts or processes, provide exactly-once execution, or prevent writes from external callers that do not use it.
 
-The Host keeps Permission and Policy as separate per-session state. Before Policy runs, Permission checks each tool's resource-access category for reads, writes, command execution, network, or external processes. Policy then decides whether to ask for approval or refuse. The interactive TUI and Desktop can change session Permission; enabling `full-access` and `unrestricted` network requires separate confirmation. Command execution probes the selected Shell and platform capabilities through [`permission-capabilities.ts`](../../core/src/capability/permission-capabilities.ts). Linux uses bubblewrap and reports its measured filesystem isolation. When a restricted command uses Node from a hidden directory, the sandbox read-only maps only that executable and the distribution's npm/Corepack files to a fixed path; the user home and package-manager caches remain hidden. Windows `workspace-write` uses a per-run `WRITE_RESTRICTED` token and temporary workspace ACLs; it is `partial`, requires explicit project trust, risk confirmation, and unrestricted network access, and cannot confine reads or network. Hard links, writable ancestor `FILE_DELETE_CHILD` permissions, and concurrent ACL changes remain escape risks. Windows `read-only` uses AppContainer only if the selected Shell can enter the actual workspace; otherwise Kernel preflight refuses it. When available, it blocks workspace writes and Shell networking, while public readable system files remain visible. Project scripts and Git commands require workspace trust; Git commands also require per-call approval because repository configuration can run hooks, helpers, or aliases. `full-access` Shell runs with the current operating-system user's permissions and requires unrestricted networking and available process management. MCP `--operator` does not manage Permission, and Policy hard denials cannot be overridden by approval.
+After a filesystem error, `create`, `write`, and `edit` compare the current target with the before and expected contents: a confirmed write is returned as success, a confirmed unchanged target returns `<operation>_failed_unchanged`, and an unconfirmed result returns `<operation>_outcome_unknown`, requiring a reread before deciding whether to retry. `delete` uses the recycle-bin state check described above.
+
+The Host keeps Permission and Policy as separate per-session state. Before Policy runs, Permission checks each tool's resource-access category for reads, writes, command execution, network, or external processes; Policy then decides whether to ask for approval or refuse. Command execution probes the selected Shell and platform capabilities through [`permission-capabilities.ts`](../../core/src/capability/permission-capabilities.ts). The interactive TUI and Desktop can change session Permission; see the [User guide: Sandbox and Shell isolation](../guide.en.md#sandbox-and-shell-isolation) for per-platform isolation details, limits, and `full-access` rules.
 
 The `fetch` tool resolves addresses before Policy evaluation and pins each socket to an approved IP. It follows only same-origin redirects; each redirected resolution must remain within the original approved IP set. The result records the addresses actually contacted. Special-purpose IPv4/IPv6 ranges use the IANA `Forwardable` and `Globally Reachable` attributes to map into existing policy classes: forwardable but non-global destinations use `private` and require approval, non-destination or non-forwardable ranges use `unspecified` and are denied, and explicitly globally reachable assignments remain `public`. `shownBytes` counts source response bytes retained before UTF-8 decoding.
 
-The default `minimal` mode also offers `managed_process` for commands such as development servers that must outlive one tool call. Start commands use the `exec` capability and retain its Permission, Script Binding, workspace trust, and Policy checks, including existing `exec` deny rules. Start requires an HTTP loopback health URL and waits for a 2xx response before returning a Session-scoped handle, port, and ready state; failed probes use bounded backoff, and cancellation or process exit interrupts the wait. Status, bounded logs, and explicit stop are scoped to the same Session; logs return at most 16 KiB. If a stop cannot confirm process exit, the result reports failure with `terminationPending: true`; if the process has exited but Exec or Guardian resource cleanup is unconfirmed, it reports `cleanupPending: true`; both flags can be true when both facts remain unconfirmed. When startup and process-tree termination both fail, the start error retains its original code and reports both failures; the status view exposes them separately as `startupFailure` and `terminationFailure`. Later close/stop calls reuse an in-flight Lease request and retry failed resource cleanup with a bound. Up to 128 confirmed terminal entries are retained by completion order; entries with unknown liveness or unfinished cleanup are never evicted. Ordinary `exec` still waits for the command to finish and lets Guardian clean descendants. Managed processes stay in the Guardian/Job Object process tree and stop on run cancellation, Permission change, Session/Host close, or Grant revocation; Grants revoked or expired elsewhere are revalidated once per second. The health URL only limits Host probing; the command and active platform Permission determine the actual listen address and network access.
+The default `minimal` mode also offers `managed_process` for commands such as development servers that must outlive one tool call. Start commands use the `exec` capability and retain its Permission, Script Binding, workspace trust, and Policy checks, including existing `exec` deny rules. Start requires an HTTP loopback health URL and waits for a 2xx response before returning a Session-scoped handle, port, and ready state; failed probes use bounded backoff, and cancellation or process exit interrupts the wait. Status, bounded logs, and explicit stop are scoped to the same Session; logs return at most 16 KiB.
 
-The [Agent Loop](../../core/src/kernel/loop.ts) performs one user turn and any model/tool iterations it requires:
+If a stop cannot confirm process exit, the result reports failure with `terminationPending: true`; if the process has exited but Exec or Guardian resource cleanup is unconfirmed, it reports `cleanupPending: true`; both flags can be true when both facts remain unconfirmed. When startup and process-tree termination both fail, the start error retains its original code and reports both failures; the status view exposes them separately as `startupFailure` and `terminationFailure`. Later close/stop calls reuse an in-flight Lease request and retry failed resource cleanup with a bound. Up to 128 confirmed terminal entries are retained by completion order; entries with unknown liveness or unfinished cleanup are never evicted. Ordinary `exec` still waits for the command to finish and lets Guardian clean descendants. Managed processes stay in the Guardian/Job Object process tree and stop on run cancellation, Permission change, Session/Host close, or Grant revocation; Grants revoked or expired elsewhere are revalidated once per second. The health URL only limits Host probing; the command and active platform Permission determine the actual listen address and network access.
 
-1. Append the user event and the effective turn settings to the session.
-2. Render the system prompt, build the registered tool manifest, and project the session into model messages.
-3. If configured, compact the request before sending it or once after a provider reports an oversized request.
-4. Stream a model response and append its reasoning, text, and tool calls to the session.
-5. Run each tool call through the kernel, append its result, then continue the loop when the model requested more work.
-6. Append one terminal turn event for completion, cancellation, or failure.
-
-The [model adapters](../../core/src/model/) implement the supported HTTP message formats. The Host selects a provider from the effective model service and reads credentials only when making a request.
-
-HTTP adapters require their protocol terminator and a supported finish reason. They emit a `finish` event; the Loop rejects output exhaustion and empty responses before declaring completion. Complete tool-call batches are parsed and schema-checked before execution. Schema refusals become tool results that the model can handle; invalid provider JSON or an incomplete stream fails the turn without replaying tools. Compaction summaries apply the same completion checks before writing a checkpoint.
-
-`model.outputTokens` is the request budget, distinct from legacy capability reductions. Services retain their compatible string `models` list and optionally attach `modelSettings` entries keyed by model ID. The selected entry supplies its display name, context window, and request output budget. A per-model output declaration can raise the conservative default for an unknown endpoint; it cannot raise verified endpoint/model ceilings or explicit capability reductions. Legacy configurations without that declaration retain their conservative ceiling. The [budget resolver](../../core/src/model/output-budget.ts) validates the effective limits; the same selected context window controls Host compaction. Provider reconstruction and session generation adoption keep changes at turn boundaries.
-
-Host run progress is ephemeral, scoped to one active session/run, and derived from Loop, compaction, and approval/input events. `status.get` and `progress` notifications expose phase/timestamps/counts; active progress snapshots also carry the TaskBudget state so TUI and Desktop can display remaining execution time, cumulative interaction wait, and the Host's pause decision without polling the full status view. Activity notifications are coalesced while the Host snapshot retains actual event times. Terminal cleanup clears progress. No progress heartbeat is written into Session JSONL, and no default inactivity timer cancels runs.
-
-### One Agent Loop turn
+## One Agent Loop turn
 
 ```mermaid
 sequenceDiagram
@@ -213,15 +202,30 @@ sequenceDiagram
   Adapter-->>User: Show session updates
 ```
 
-The loop appends the user input and effective turn settings, builds the model view, streams a response, and records each assistant event. Tool calls pass through kernel validation and policy before execution. The loop records their results and continues while the model requests more work. It appends one terminal status when the turn completes, is cancelled, or fails.
+The [Agent Loop](../../core/src/kernel/loop.ts) performs one user turn and any model/tool iterations it requires:
+
+1. Append the user event and the effective turn settings to the session.
+2. Render the system prompt, build the registered tool manifest, and project the session into model messages.
+3. If configured, compact the request before sending it or once after a provider reports an oversized request.
+4. Stream a model response and append its reasoning, text, and tool calls to the session.
+5. Run each tool call through the kernel, append its result, then continue the loop when the model requested more work.
+6. Append one terminal turn event for completion, cancellation, or failure.
+
+The [model adapters](../../core/src/model/) implement the supported HTTP message formats. The Host selects a provider from the effective model service and reads credentials only when making a request. HTTP adapters require their protocol terminator and a supported finish reason. They emit a `finish` event; the Loop rejects output exhaustion and empty responses before declaring completion. Complete tool-call batches are parsed and schema-checked before execution. Schema refusals become tool results that the model can handle; invalid provider JSON or an incomplete stream fails the turn without replaying tools. Compaction summaries apply the same completion checks before writing a checkpoint.
 
 Calls declared serial and tools that complete the run form ordering barriers. Consecutive independent calls run in a rolling pool capped by project `[loop].maxParallelTools`, which ranges from 1 to 32 and defaults to 4; internal subagents inherit the parent cap. On cancellation or an internal kernel/runtime error, the loop stops starting queued calls, waits for started calls to settle and clean up, then writes exactly one `tool_skipped` result for each unstarted call ID. Started tool effects are not rolled back. Overflow recovery is limited to one compaction retry per `run`; the allowance belongs to that run, so a later turn in the same Session receives a fresh allowance.
 
-### Session records and recovery
+`model.outputTokens` is the request budget, distinct from legacy capability reductions. Services retain their compatible string `models` list and optionally attach `modelSettings` entries keyed by model ID. The selected entry supplies its display name, context window, and request output budget. A per-model output declaration can raise the conservative default for an unknown endpoint; it cannot raise verified endpoint/model ceilings or explicit capability reductions. Legacy configurations without that declaration retain their conservative ceiling. The [budget resolver](../../core/src/model/output-budget.ts) validates the effective limits; the same selected context window controls Host compaction. Provider reconstruction and session generation adoption keep changes at turn boundaries.
+
+Host run progress is ephemeral, scoped to one active session/run, and derived from Loop, compaction, and approval/input events. `status.get` and `progress` notifications expose phase/timestamps/counts; active progress snapshots also carry the TaskBudget state so TUI and Desktop can display remaining execution time, cumulative interaction wait, and the Host's pause decision without polling the full status view. Activity notifications are coalesced while the Host snapshot retains actual event times. Terminal cleanup clears progress. No progress heartbeat is written into Session JSONL, and no default inactivity timer cancels runs.
+
+## Session records and recovery
 
 The append-only [session JSONL record](../../core/src/session/session.ts) is the source of truth for a conversation. Its first line identifies the record and project; later lines hold user and assistant messages, tool calls and results, turn state, model selection, Permission, Policy overrides, denial counters, and other events. Policy snapshots are ignorable to older readers and stay out of model messages and checkpoints. Session locks prevent two processes from writing the same record at once.
 
-While a Provider response streams, [`stream-draft.ts`](../../core/src/session/stream-draft.ts) writes a separate provisional `<sessionId>.stream.json` snapshot. The first text or reasoning delta is saved immediately; later writes occur after 250 ms or 16 KiB of new content. Each channel keeps at most its last 8,192 UTF-16 characters and reports its total character count and whether earlier content was truncated. The bounded JSON snapshot is at most 128 KiB and is replaced atomically after a flushed temporary write. It is not a Session event, does not enter `modelView()`, and is removed once the assistant response is persisted. A later writer never deletes leftover temporary snapshot files whose ownership it cannot establish. Host session read/observe and MCP `ligule_session_read` expose it separately as `provisionalOutput` with `provisional: true`; if the snapshot is invalid, they return `provisionalOutputError: session_stream_invalid` while still returning persisted records. A matching persisted `responseId` suppresses the leftover snapshot. A forced process termination can lose the latest batch that has not reached a snapshot write. The UI does not automatically restore or render this field; it is available through the protocol.
+While a Provider response streams, [`stream-draft.ts`](../../core/src/session/stream-draft.ts) writes a separate provisional `<sessionId>.stream.json` snapshot. The first text or reasoning delta is saved immediately; later writes occur after 250 ms or 16 KiB of new content. Each channel keeps at most its last 8,192 UTF-16 characters and reports its total character count and whether earlier content was truncated. The bounded JSON snapshot is at most 128 KiB and is replaced atomically after a flushed temporary write. It is not a Session event, does not enter `modelView()`, and is removed once the assistant response is persisted.
+
+A later writer never deletes leftover temporary snapshot files whose ownership it cannot establish. Host session read/observe and MCP `ligule_session_read` expose it separately as `provisionalOutput` with `provisional: true`; if the snapshot is invalid, they return `provisionalOutputError: session_stream_invalid` while still returning persisted records. A matching persisted `responseId` suppresses the leftover snapshot. A forced process termination can lose the latest batch that has not reached a snapshot write. The UI does not automatically restore or render this field; it is available through the protocol.
 
 By default, records and sidecars live at `dataRoot()/workspaces/<readable-path>--<stable-hash>/sessions/`. Read-only listing and search include the former shared and project-local locations without migrating files; opening a legacy session copies it into the workspace folder and preserves the source.
 
@@ -233,7 +237,7 @@ When a session is reopened, recovery repairs dispatched tool calls that have no 
 
 Harbor evaluation exports a selected persisted Session turn through [`sessionTurnToAtif()`](../../core/src/session/atif.ts) as ATIF-v1.8. This is an evaluation projection, not a complete execution replay: each persisted assistant response counts as one logical LLM call; hidden HTTP retries and system compaction are not counted. Subagent trajectories and image payloads are not embedded. Spill content is restored only after validation against the same Session directory; preview-only content is marked `spill_content_missing`, and unresolved references fail export. Omissions appear in `extra.ligule.missing_features` and per-call flags, so metrics that require missing evidence remain unknown. See the [Harbor adapter notes](../../evals/harbor/README.md).
 
-### Session data flow
+## Session data flow
 
 ```mermaid
 flowchart TD
@@ -259,12 +263,12 @@ Configuration layers are combined into a snapshot while the Host creates a proje
 
 Configuration edits hold the target file lock through version checking, TOML editing, effective-configuration validation, and atomic replacement. The Host validates model changes before persistence, including shared defaults without project overrides, shared user changes in other loaded projects, and explicit session model selections. Rejected edits do not modify the file. Valid changes still apply at the existing session turn boundary. Both streaming SSE and non-streaming JSON adapters emit the same completion, usage, text, reasoning, and tool-call events into the Loop.
 
-### Host protocol and clients
+## Host protocol and clients
 
 The Host protocol defines methods, request parameters, approval requests, question requests, and notifications in one [protocol table](../../core/src/host/protocol.ts). [`connection.ts`](../../core/src/host/connection.ts) carries newline-delimited JSON messages. The Host validates method parameters before dispatch and owns all session state; clients use protocol methods to create or open sessions, start and cancel turns, read records, answer requests, and change supported settings.
 
 The CLI's single-turn commands call the Host directly. The TUI uses the same protocol over an in-memory connection. The desktop UI uses a TypeScript client through the fixed Preload API and Electron IPC; Main forwards frames without interpreting Host methods or session data. These transports differ, while the Host methods and kernel behavior remain shared.
 
-### Related guides
+## Related guides
 
-The [glossary](GLOSSARY.en.md) defines shared terms. [Contributing and checks](CONTRIBUTING.en.md) lists development commands and validation scope. The [user guide](../guide.en.md) explains CLI, TUI, and desktop workflows.
+The [glossary](GLOSSARY.en.md) defines shared terms. [Contributing](../../.github/CONTRIBUTING.md) and [Testing](TESTING.en.md) list development commands and validation scope. The [user guide](../guide.en.md) explains CLI, TUI, and desktop workflows.

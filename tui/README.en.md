@@ -4,7 +4,7 @@
   <p>A command-line and interactive terminal AI assistant built on the shared Agent Core</p>
   <p><a href="README.md">简体中文</a> · <a href="../README.en.md">Project home</a> · <a href="https://www.npmjs.com/package/ligule">npm</a></p>
   <p>
-    <a href="https://img.shields.io/npm/v/ligule"><img alt="npm" src="https://img.shields.io/npm/v/ligule?label=CLI%20%2F%20TUI&color=4d6bfe"></a>
+    <a href="https://www.npmjs.com/package/ligule"><img alt="npm" src="https://img.shields.io/npm/v/ligule?label=CLI%20%2F%20TUI&color=4d6bfe"></a>
     <a href="https://nodejs.org"><img alt="Node.js" src="https://img.shields.io/static/v1?label=node&message=%3E%3D24&color=339933&logo=node.js&logoColor=white"></a>
   </p>
 </div>
@@ -57,6 +57,6 @@ CLI/TUI shares the [Agent Core](../core/README.en.md) session and tool semantics
 
 - [User guide](../docs/guide.en.md) · [Agent Control via MCP](../docs/agent-control/guide.en.md)
 - [CLI/TUI changelog](CHANGELOG.md)
-- [Contributing and checks](../docs/development/CONTRIBUTING.en.md)
+- [Contributing and checks](../.github/CONTRIBUTING.md) · [Testing](../docs/development/TESTING.en.md)
 
 [MIT](LICENSE)

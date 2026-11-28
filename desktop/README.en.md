@@ -27,4 +27,4 @@ File/command Permission and dangerous-operation Policy apply independently. Full
 
 - [Desktop user guide](../docs/guide.en.md) · [Agent Control via MCP](../docs/agent-control/guide.en.md)
 - [Desktop changelog](CHANGELOG.md)
-- [Contributing and checks](../docs/development/CONTRIBUTING.en.md) · [Maintainer release procedure](../docs/development/RELEASE.md)
+- [Contributing and checks](../.github/CONTRIBUTING.md) · [Testing](../docs/development/TESTING.en.md) · [Maintainer release procedure](../docs/development/RELEASE.md)

@@ -19,7 +19,7 @@ uv run --no-project --with harbor==0.25.0 harbor datasets download terminal-benc
 ## Run
 
 ```sh
-pnpm run bench:agent -- --tarball testplace/pack/ligule-0.1.2.tgz
+pnpm run bench:agent -- --tarball testplace/pack/ligule-<version>.tgz
 pnpm run bench:agent -- --dataset-dir testplace/benchmarks/datasets/terminal-bench@2.0 --output testplace/benchmarks/agent-run
 pnpm run bench:agent -- --tasks fix-git,db-wal-recovery --timeout-ms 7200000
 pnpm run bench:agent -- --collect-only --output <existing-run-directory>

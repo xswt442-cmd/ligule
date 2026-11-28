@@ -22,13 +22,16 @@ const bilingualPairs = [
   [join(repoRoot, 'desktop', 'README.md'), join(repoRoot, 'desktop', 'README.en.md')],
   [zhPath, enPath],
   [join(repoRoot, 'docs', 'agent-control', 'guide.zh-CN.md'), join(repoRoot, 'docs', 'agent-control', 'guide.en.md')],
-  [join(repoRoot, 'docs', 'development', 'ARCHITECTURE.zh-cn.md'), join(repoRoot, 'docs', 'development', 'ARCHITECTURE.en.md')],
-  [join(repoRoot, 'docs', 'development', 'GLOSSARY.zh-cn.md'), join(repoRoot, 'docs', 'development', 'GLOSSARY.en.md')],
-  [join(repoRoot, 'docs', 'development', 'CONTRIBUTING.zh-cn.md'), join(repoRoot, 'docs', 'development', 'CONTRIBUTING.en.md')],
+  [join(repoRoot, 'docs', 'development', 'ARCHITECTURE.zh-CN.md'), join(repoRoot, 'docs', 'development', 'ARCHITECTURE.en.md')],
+  [join(repoRoot, 'docs', 'development', 'GLOSSARY.zh-CN.md'), join(repoRoot, 'docs', 'development', 'GLOSSARY.en.md')],
+  [join(repoRoot, 'docs', 'development', 'TESTING.zh-CN.md'), join(repoRoot, 'docs', 'development', 'TESTING.en.md')],
+  [join(repoRoot, 'docs', 'development', 'extensions.zh-CN.md'), join(repoRoot, 'docs', 'development', 'extensions.en.md')],
 ];
 const maintainedDocs = [
   ...bilingualPairs.flatMap((pair) => pair),
   join(repoRoot, 'tui', 'CHANGELOG.md'),
+  join(repoRoot, 'desktop', 'CHANGELOG.md'),
+  join(repoRoot, '.github', 'CONTRIBUTING.md'),
   join(repoRoot, 'docs', 'development', 'RELEASE.md'),
 ];
 // 根指南描述全局规则，局部指南描述各模块和 Desktop 子目录的约定。
@@ -116,9 +119,16 @@ test('所有受维护文档的相对链接与锚点都落在仓库内', () => {
 });
 
 test('所有中英文配对文档的章节数对应', () => {
-  const headings = (text: string) => text.split('\n').filter((line) => /^##\s/.test(line)).length;
+  const counts = (text: string) => {
+    const lines = text.split('\n');
+    return {
+      h2: lines.filter((line) => /^##\s/.test(line)).length,
+      h3: lines.filter((line) => /^###\s/.test(line)).length,
+      h4: lines.filter((line) => /^####\s/.test(line)).length,
+    };
+  };
   for (const [zh, en] of bilingualPairs) {
-    assert.equal(headings(readFileSync(zh, 'utf8')), headings(readFileSync(en, 'utf8')), `${zh} 与 ${en} 的章节数不同`);
+    assert.deepEqual(counts(readFileSync(zh, 'utf8')), counts(readFileSync(en, 'utf8')), `${zh} 与 ${en} 的章节数不同`);
   }
 });
 
@@ -176,10 +186,10 @@ test('workspace and product READMEs present the products and link to maintained 
   const readme = readFileSync(join(repoRoot, 'tui', 'README.md'), 'utf8');
   const englishReadme = readFileSync(join(repoRoot, 'tui', 'README.en.md'), 'utf8');
   assert.match(rootReadme, /共享 Agent Core/);
-  assert.match(rootReadme, /docs\/development\/ARCHITECTURE\.zh-cn\.md/);
+  assert.match(rootReadme, /docs\/development\/ARCHITECTURE\.zh-CN\.md/);
   assert.match(readme, /docs\/guide\.zh-CN\.md/);
-  assert.match(readme, /\.\.\/docs\/development\/CONTRIBUTING\.zh-cn\.md/);
-  assert.match(englishReadme, /\.\.\/docs\/development\/CONTRIBUTING\.en\.md/);
+  assert.match(readme, /\.\.\/\.github\/CONTRIBUTING\.md/);
+  assert.match(englishReadme, /\.\.\/\.github\/CONTRIBUTING\.md/);
   assert.doesNotMatch(readme, /github\.com\/xswt442-cmd\/ligule\/blob\/main/);
   assert.doesNotMatch(englishReadme, /github\.com\/xswt442-cmd\/ligule\/blob\/main/);
   assert.match(readme, /CHANGELOG\.md/);
@@ -212,18 +222,18 @@ test('docs 根目录只放双语使用手册，且都有正文', () => {
   }
 });
 
-test('development 文档文件名使用大写主体与小写语言标记', () => {
+test('development 文档使用一致的 .zh-CN.md 与 .en.md 命名', () => {
   const files = readdirSync(join(repoRoot, 'docs', 'development'))
     .filter((name) => name.endsWith('.md'))
     .sort();
   assert.deepEqual(files, [
     'ARCHITECTURE.en.md',
-    'ARCHITECTURE.zh-cn.md',
-    'CONTRIBUTING.en.md',
-    'CONTRIBUTING.zh-cn.md',
+    'ARCHITECTURE.zh-CN.md',
     'GLOSSARY.en.md',
-    'GLOSSARY.zh-cn.md',
+    'GLOSSARY.zh-CN.md',
     'RELEASE.md',
+    'TESTING.en.md',
+    'TESTING.zh-CN.md',
     'extensions.en.md',
     'extensions.zh-CN.md',
   ]);

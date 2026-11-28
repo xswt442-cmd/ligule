@@ -8,4 +8,4 @@ The [repository guide](../AGENTS.md) applies. Electron Main/Preload own native w
 - Packaged Node, native dependencies, and `@vscode/ripgrep` must match the target OS and architecture. Do not reuse `vendor/` across platforms. Verify Electron Fuses and the real packaged executable; a successful build alone does not prove runtime or installer safety.
 - Keep acceptance evidence in ignored local directories. Validate Windows and Linux separately; never infer macOS behavior from either platform.
 
-Use [contributing checks](../docs/development/CONTRIBUTING.en.md): `pnpm --filter ligule-desktop run build`, frontend checks, Electron security/behavior tests, runtime integrity checks, and real-window tests when behavior changes.
+Use [contributing checks](../.github/CONTRIBUTING.md) and [testing guide](../docs/development/TESTING.en.md): `pnpm --filter ligule-desktop run build`, frontend checks, Electron security/behavior tests, runtime integrity checks, and real-window tests when behavior changes.
