@@ -35,7 +35,7 @@ import { registerWorkspace, workspaceIdentity } from '../kernel/workspace.js';
 import { isTrusted, setTrusted } from '../kernel/workspace-trust.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
 import { modelServices, modelSelection, resolveModel, type ModelSelection } from '../kernel/model-services.js';
-import { POLICY_SEMANTICS, createDecisionChain, isPolicyMode, isPolicyRule, policyArgsHash, readPersistedPolicyMode, readPolicyMode, type DecisionChain, type PolicyAskResult, type PolicyMode, type PolicyState } from '../kernel/policy.js';
+import { POLICY_SEMANTICS, createDecisionChain, isPolicyMode, isPolicyRule, policyArgsHash, readPersistedPolicyMode, readPolicyMode, type DecisionChain, type PolicyMode, type PolicyState } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
@@ -104,17 +104,17 @@ import { apiRoot } from '../model/http.js';
 import { thinkingCapabilityOf } from '../model/thinking.js';
 import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type HostRequest } from './connection.js';
-import { APPROVAL_METHOD, QUESTION_METHOD, SIDE_SELECTION_MAX_BYTES, VIEW_REQUEST_METHOD, requiredString, validateCall, type HostMethodParams } from './protocol.js';
+import { SIDE_SELECTION_MAX_BYTES, VIEW_REQUEST_METHOD, requiredString, validateCall, type HostMethodParams } from './protocol.js';
 import { createConfig, mergePolicyRules } from '../kernel/config.js';
 import { dataRoot, loadConfigLayers } from '../kernel/config-file.js';
-import { createTelemetry, currentTelemetryContext, emitTelemetry, telemetryEnabled, type TelemetryOptions } from '../kernel/telemetry.js';
+import { createTelemetry, type TelemetryOptions } from '../kernel/telemetry.js';
 import type { SkillRegistry } from '../kernel/skills.js';
 import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
 import { providerFromConfig, modelSelectionOf, type HostGenerationOptions, type HostProvider } from './provider.js';
 import { createSessionReview, trustedReviewerConfig } from './session-review.js';
-import { approvalArgsDigest, summarizeApproval } from './approval.js';
+import { approvalArgsDigest } from './approval.js';
 import { runAcceptanceScope, runLivenessOf } from './run-records.js';
 import { runResourcesOf } from './run-resources.js';
 import { createFileChangeStore } from '../session/file-changes.js';
@@ -125,6 +125,7 @@ import { checkEventOf, sampleCheckScope } from './checks.js';
 import { parseInitialGenerationSettings } from './session-initial-settings.js';
 import { settingsToolCatalog as buildSettingsToolCatalog } from './tool-catalog.js';
 import { createSessionCompaction } from './session-compaction.js';
+import { advanceRunInputRevision, createSessionInteractions, settleRunAsks, type PendingApprovalDetails, type PolicyRememberScope } from './session-interactions.js';
 import { createSessionMcp } from './session-mcp.js';
 import type {
   AdoptionResult, DelegatedRunResult, EnvironmentSeed, Host, HostClientConnection, HostConfigSnapshot, HostOptions,
@@ -136,7 +137,6 @@ export { shownConfigOf } from './handlers/config.js';
 export type { EnvironmentSeed, Host, HostOptions, HostProgressSnapshot, HostSessionState } from './types.js';
 
 type ModeState = SessionModeState;
-type PolicyRememberScope = 'session' | 'project' | 'user';
 
 function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'path' | 'argsHash'>): string {
   return JSON.stringify([rule.tool, rule.match ?? '', rule.target ?? '', rule.path ?? '', rule.argsHash ?? '']);
@@ -162,37 +162,6 @@ interface ExtensionPromptFragment {
   readonly name: string;
   readonly text: string;
   readonly source: string;
-}
-
-function trackAsk(state: HostSessionBase, pending: PendingRunAsk, runId?: string): void {
-  state.asks.add(pending);
-  if (runId === undefined) return;
-  const asks = state.asksByRun.get(runId) ?? new Set<PendingRunAsk>();
-  asks.add(pending);
-  state.asksByRun.set(runId, asks);
-}
-
-function untrackAsk(state: HostSessionBase, pending: PendingRunAsk, runId?: string): void {
-  state.asks.delete(pending);
-  if (runId === undefined) return;
-  const asks = state.asksByRun.get(runId);
-  asks?.delete(pending);
-  if (asks?.size === 0) state.asksByRun.delete(runId);
-}
-
-function settleRunAsks(state: HostSessionBase, runId: string): string[] {
-  const pending = [...(state.asksByRun.get(runId) ?? [])];
-  for (const ask of pending) ask.settle();
-  return pending.map((ask) => ask.requestId);
-}
-
-function runInputRevisionOf(state: HostSessionBase, runId: string | undefined): number {
-  return runId === undefined ? 0 : state.runInputRevisions?.get(runId) ?? 0;
-}
-
-function advanceRunInputRevision(state: HostSessionBase, runId: string): void {
-  const revisions = state.runInputRevisions ??= new Map();
-  revisions.set(runId, runInputRevisionOf(state, runId) + 1);
 }
 
 function modelConfigOf(config: HostConfigSnapshot): Record<string, unknown> {
@@ -776,7 +745,7 @@ export function createHost({
   const retiringSessions = new Set<string>();
   const retirementProgress = new Map<string, HostSessionRetirement>();
   const retirementTasks = new Map<string, Promise<void>>();
-  const pendingApprovalDetails = new Map<string, { sessionId: string; args: Record<string, unknown>; argumentSha256: string }>();
+  const pendingApprovalDetails: PendingApprovalDetails = new Map();
   const building = new Set<Promise<unknown>>();
   let closing: Promise<void> | undefined;
   async function recordOperationFinished(state: HostSessionState, terminal: {
@@ -1646,6 +1615,14 @@ export function createHost({
       refreshGrant: agentControl === undefined ? undefined : activeDelegation,
     });
     if (review !== undefined) state.reviewer = review.reviewer;
+    const interactions = createSessionInteractions({
+      state, projectRoot: env.projectRoot, connection, permissionControl, canPersistRules: state.environment.store !== undefined,
+      pendingApprovalDetails, telemetry, logger,
+      recordActivity: (kind, tool, requestId, callId) => appendToolActivity(state as HostSessionState, kind, tool, requestId, callId),
+      setWaiting: (waiting, kind) => updateWaitingForUser(state as HostSessionState, connection, waiting, kind),
+      rememberRule: (tool, input, command, scope, target, digest) =>
+        rememberPolicyRule(state as HostSessionState, tool, input, command, scope, target, digest),
+    });
     const chain = createDecisionChain({
       ...policy,
       rules: mergePolicyRules([
@@ -1653,139 +1630,7 @@ export function createHost({
         { source: 'config', rules: policy?.rules ?? [] },
       ]).rules as PolicyRule[],
       ...(review === undefined ? {} : { review: review.recordReview }),
-      ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced, rememberable, scriptBinding, callId, identityDigest }): Promise<PolicyAskResult> => {
-        const telemetryContext = telemetryEnabled(telemetry) ? currentTelemetryContext() : undefined;
-        const telemetryApprovalRunId = telemetryContext?.runId
-          ?? (telemetryContext?.sessionId === undefined || telemetryContext.sessionId === id ? state.activeRunId : undefined);
-        const rememberScopes: PolicyRememberScope[] = permissionControl && rememberable
-          ? ['session', ...(state.environment.store === undefined ? [] : ['project' as const, 'user' as const])]
-          : [];
-        const requestId = randomUUID();
-        const childRunId = currentKernelExecutionContext()?.runId;
-        const interactionRunId = childRunId ?? state.activeRunId;
-        const requestSteeringRevision = runInputRevisionOf(state, interactionRunId);
-        let summary;
-        try {
-          summary = summarizeApproval({
-            requestId, sessionId: id, runId: state.progressId, callId, identityDigest, tool, args: input, command, reason,
-            policy, policySource, policyForced,
-            ...(shell === undefined ? {} : { shell, executable }),
-          });
-        } catch (error) {
-          const failure = error instanceof KernelError ? error : new KernelError('policy_approval_unreviewable', { cause: error });
-          return { decision: 'unavailable' as const, code: failure.code, reason: 'This operation could not be reviewed safely.' };
-        }
-        const approvalArgs = structuredClone(input) as Record<string, unknown>;
-        pendingApprovalDetails.set(requestId, { sessionId: id, args: approvalArgs, argumentSha256: summary.argumentSha256 });
-        let approvalActive = true;
-        let settle = (): void => {};
-        const cancelled = new Promise<{ decision: 'cancelled'; code: string }>((resolve) => {
-          settle = () => { approvalActive = false; resolve({ decision: 'cancelled', code: 'policy_approval_cancelled' }); };
-        });
-        const pendingAsk = { requestId, settle };
-        trackAsk(state, pendingAsk, interactionRunId);
-        if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'approval', true);
-        const endInteraction = state.taskBudget?.startInteraction();
-        updateWaitingForUser(state as HostSessionState, connection, true, 'approval');
-        const approvalStartedAt = telemetryContext === undefined ? 0n : process.hrtime.bigint();
-        if (telemetryContext?.executionId !== undefined) emitTelemetry(telemetry, { type: 'approval.started',
-          executionId: telemetryContext.executionId, ...(telemetryApprovalRunId === undefined ? {} : { runId: telemetryApprovalRunId }),
-          sessionId: telemetryContext.sessionId ?? id,
-          ...(telemetryContext.userSeq === undefined ? {} : { userSeq: telemetryContext.userSeq }),
-          ...(telemetryContext.parentExecutionId === undefined ? {} : { parentExecutionId: telemetryContext.parentExecutionId }),
-          ...(telemetryContext.parentRunId === undefined ? {} : { parentRunId: telemetryContext.parentRunId }),
-          ...(telemetryContext.parentCallId === undefined ? {} : { parentCallId: telemetryContext.parentCallId }),
-          ...(callId === undefined ? {} : { callId }), requestId });
-        try {
-          // 仅在等待事件已经落盘后才向客户端发起审批，避免持久化失败时出现未记账的等待状态。
-          await appendToolActivity(state as HostSessionState, 'awaiting_approval', tool, requestId, callId);
-          const answer = await Promise.race([
-            connection.request(APPROVAL_METHOD, {
-              ...summary,
-              projectRoot: env.projectRoot,
-              rememberable: rememberScopes.length > 0,
-              rememberScopes,
-              ...(state.operationSourceSessionId === undefined ? {} : { sourceSessionId: state.operationSourceSessionId }),
-              ...(scriptBinding === undefined ? {} : { scriptBinding }),
-            }).then(async (value) => {
-              if (!approvalActive || requestSteeringRevision !== runInputRevisionOf(state, interactionRunId)) {
-                return { decision: 'cancelled' as const, code: 'policy_approval_cancelled' };
-              }
-              const response = isRecord(value) ? value : value === true ? { decision: 'allow' } : value === false ? { decision: 'deny' } : {};
-              const source = response.source === 'controller' ? 'controller' as const : 'human' as const;
-              if (response.decision === 'allow') {
-                if (approvalArgsDigest(input) !== summary.argumentSha256) {
-                  return { decision: 'error' as const, code: 'policy_approval_arguments_changed' };
-                }
-                const rememberScope = response.rememberScope;
-                if (rememberScope === undefined) return { decision: 'allow' as const, source };
-                if (source !== 'human') return { decision: 'error' as const, code: 'policy_memory_trusted_user_required' };
-                if (rememberScope !== 'session' && rememberScope !== 'project' && rememberScope !== 'user') {
-                  return { decision: 'error' as const, code: 'policy_memory_unavailable' };
-                }
-                if (!rememberScopes.includes(rememberScope)) return { decision: 'error' as const, code: 'policy_memory_unavailable' };
-                const rememberTarget = response.rememberTarget;
-                if (rememberTarget !== undefined && rememberTarget !== 'file' && rememberTarget !== 'workspace'
-                  && rememberTarget !== 'tool' && rememberTarget !== 'command') {
-                  return { decision: 'error' as const, code: 'policy_memory_target_invalid' };
-                }
-                try {
-                  await rememberPolicyRule(
-                    state as HostSessionState, tool, input, command, rememberScope, rememberTarget, identityDigest,
-                  );
-                } catch (error) {
-                  const failure = error instanceof KernelError ? error : new KernelError('policy_memory_write_failed', { cause: error });
-                  logger?.log?.('approval memory was not saved', { tool, code: failure.code });
-                  return { decision: 'error' as const, code: failure.code, reason: failure.detail ?? 'the remembered rule was not saved' };
-                }
-                return { decision: 'allow' as const, source };
-              }
-              if (response.decision === 'deny') {
-                return {
-                  decision: 'deny' as const,
-                  source,
-                  code: source === 'human' ? 'ask_declined' : 'controller_declined',
-                  reason: source === 'human' ? 'the user declined' : 'the controller declined',
-                };
-              }
-              if (response.decision === 'unavailable' || response.decision === 'error'
-                || response.decision === 'cancelled' || response.decision === 'timeout') {
-                const decision = response.decision as 'unavailable' | 'error' | 'cancelled' | 'timeout';
-                return {
-                  decision,
-                  code: typeof response.code === 'string' ? response.code : 'policy_approval_channel_error',
-                  ...(typeof response.reason === 'string' ? { reason: response.reason } : {}),
-                };
-              }
-              return { decision: 'error' as const, code: 'policy_approval_response_invalid' };
-            }, (error) => {
-              const code = errorCode(error) ?? 'policy_approval_channel_error';
-              logger?.log?.(`approval failed for ${tool}`, { tool, code });
-              return { decision: 'error' as const, code, reason: 'approval channel failed' };
-            }),
-            cancelled,
-          ]);
-          if (telemetryContext?.executionId !== undefined) emitTelemetry(telemetry, { type: 'approval.finished', executionId: telemetryContext.executionId,
-            ...(telemetryApprovalRunId === undefined ? {} : { runId: telemetryApprovalRunId }), sessionId: telemetryContext.sessionId ?? id,
-            ...(telemetryContext.userSeq === undefined ? {} : { userSeq: telemetryContext.userSeq }),
-            ...(telemetryContext.parentExecutionId === undefined ? {} : { parentExecutionId: telemetryContext.parentExecutionId }),
-            ...(telemetryContext.parentRunId === undefined ? {} : { parentRunId: telemetryContext.parentRunId }),
-            ...(telemetryContext.parentCallId === undefined ? {} : { parentCallId: telemetryContext.parentCallId }),
-            ...(callId === undefined ? {} : { callId }), requestId,
-            durationMs: Number((process.hrtime.bigint() - approvalStartedAt) / 1_000_000n),
-            decision: answer.decision === 'allow' ? 'allow' : answer.decision === 'deny' ? 'deny'
-              : answer.decision === 'cancelled' ? 'cancelled' : 'error',
-            ...(answer.decision === 'error' || answer.decision === 'cancelled' ? { errorCode: answer.code } : {}) });
-          return answer;
-        } finally {
-          approvalActive = false;
-          endInteraction?.();
-          pendingApprovalDetails.delete(requestId);
-          untrackAsk(state, pendingAsk, interactionRunId);
-          if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'approval', false);
-          updateWaitingForUser(state as HostSessionState, connection, false, 'approval');
-        }
-      },
+      ask: interactions.askApproval,
     });
     const grant = await activeDelegation();
     if (grant !== undefined) chain.setMode(grant.defaultPolicy);
@@ -1938,50 +1783,7 @@ export function createHost({
     const basePlugins = [...loaded, ...(search.plugin === undefined ? [] : [search.plugin])];
     // 提问属于父会话，因为派生执行没有客户端可以回答。
     // 提问和审批走不同流程；只有支持交互回答的客户端才注册提问工具。
-    const asked = interactive === false ? [] : [createAskUserPlugin({
-      ask: async (questions) => {
-        const childRunId = currentKernelExecutionContext()?.runId;
-        const interactionRunId = childRunId ?? state.activeRunId;
-        const questionSteeringRevision = runInputRevisionOf(state, interactionRunId);
-        const requestId = randomUUID();
-        let settle = (): void => {};
-        const cancelled = new Promise<'cancelled'>((resolve) => {
-          settle = () => resolve('cancelled');
-        });
-        const pendingAsk = { requestId, settle };
-        trackAsk(state, pendingAsk, interactionRunId);
-        if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'question', true);
-        const endInteraction = state.taskBudget?.startInteraction();
-        updateWaitingForUser(state as HostSessionState, connection, true, 'input');
-        try {
-          await appendToolActivity(state as HostSessionState, 'awaiting_user', 'ask_user', requestId);
-          const outcome = await Promise.race([
-            // 交互等待受整次任务累计等待预算约束。
-            connection.request(QUESTION_METHOD, { requestId, sessionId: id, projectRoot: env.projectRoot, questions }).then((value) => {
-              if (questionSteeringRevision !== runInputRevisionOf(state, interactionRunId)) {
-                throw new KernelError('ask_user_cancelled', { detail: `${id}: the question was superseded by steering input` });
-              }
-              return value;
-            }),
-            cancelled,
-          ]);
-          if (outcome === 'cancelled') {
-            throw new KernelError('ask_user_cancelled', { detail: `${id}: the round was cancelled while the question waited for an answer` });
-          }
-          return outcome;
-        } catch (error) {
-          if (error instanceof KernelError) throw error;
-          // 明确返回客户端答复失败或通道断开；Host 不能代替用户编造答案。
-          logger?.log?.('ask user request failed', { sessionId: id, code: errorCode(error), reason: errorMessage(error) ?? String(error) });
-          throw new KernelError('ask_user_host_gone', { detail: `${id}: ${errorMessage(error) ?? String(error)}` });
-        } finally {
-          endInteraction?.();
-          untrackAsk(state, pendingAsk, interactionRunId);
-          if (childRunId !== undefined) state.subagents?.interaction(childRunId, 'question', false);
-          updateWaitingForUser(state as HostSessionState, connection, false, 'input');
-        }
-      },
-    })];
+    const asked = interactive === false ? [] : [createAskUserPlugin({ ask: interactions.askQuestion })];
     const subagents = createSubagentPlugin({
       config,
       fileWriteQueue,
