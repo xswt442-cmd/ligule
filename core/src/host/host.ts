@@ -446,7 +446,7 @@ export function createHost({
   async function assertDelegationProject(grant: DelegationGrant, root: string): Promise<void> {
     let actual: string;
     try { actual = await realpath(root); }
-    catch { throw new KernelError('agent_control_project_forbidden'); }
+    catch (cause) { throw new KernelError('agent_control_project_forbidden', { cause }); }
     const expected = process.platform === 'win32' ? grant.projectRoot.toLowerCase() : grant.projectRoot;
     const found = process.platform === 'win32' ? actual.toLowerCase() : actual;
     if (found !== expected) throw new KernelError('agent_control_project_forbidden');
@@ -474,10 +474,10 @@ export function createHost({
     } catch (error) {
       if (error instanceof KernelError) throw error;
       const reason = errorCode(error);
-      if (reason === 'ENOENT') throw new KernelError('host_project_root_missing', { detail: asked });
+      if (reason === 'ENOENT') throw new KernelError('host_project_root_missing', { detail: asked, cause: error });
       // 区分路径中有文件阻断和目标路径不存在这两种情况。
-      if (reason === 'ENOTDIR') throw new KernelError('host_project_root_not_directory', { detail: asked });
-      throw new KernelError('host_project_root_unreadable', { detail: `${asked}: ${reason ?? String(error)}` });
+      if (reason === 'ENOTDIR') throw new KernelError('host_project_root_not_directory', { detail: asked, cause: error });
+      throw new KernelError('host_project_root_unreadable', { detail: `${asked}: ${reason ?? String(error)}`, cause: error });
     }
   }
 
@@ -3147,8 +3147,8 @@ export function createHost({
           const path = recordPathOf(sessionId, env);
           try {
             await access(path);
-          } catch {
-            throw new KernelError('session_not_found', { detail: sessionId });
+          } catch (error) {
+            throw new KernelError('session_not_found', { detail: sessionId, cause: error });
           }
           const record = await readSessionRecord(path);
           return { sessionId, summary: summarizeUsage(record.events) };

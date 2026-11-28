@@ -77,12 +77,12 @@ function textPath(value: unknown, { allowDot = false } = {}): string {
 function safeResolutionError(error: unknown): never {
   const code = error instanceof KernelError ? error.code : undefined;
   if (code === 'path_escapes_boundary' || code === 'path_escapes_through_link' || code === 'path_escapes_workspace') {
-    throw new KernelError(code);
+    throw new KernelError(code, { cause: error });
   }
-  if (code === 'path_hard_linked') throw new KernelError(code);
-  if (code === 'boundary_missing' || code === 'boundary_required') throw new KernelError('project_boundary_unavailable');
-  if (code === 'path_parent_missing' || code === 'path_not_found') throw new KernelError('project_file_not_found');
-  throw new KernelError('project_file_path_unavailable');
+  if (code === 'path_hard_linked') throw new KernelError(code, { cause: error });
+  if (code === 'boundary_missing' || code === 'boundary_required') throw new KernelError('project_boundary_unavailable', { cause: error });
+  if (code === 'path_parent_missing' || code === 'path_not_found') throw new KernelError('project_file_not_found', { cause: error });
+  throw new KernelError('project_file_path_unavailable', { cause: error });
 }
 
 function relativeFromCanonicalWorkingDirectory(workingDirectory: string, target: string): string {
@@ -198,8 +198,8 @@ export async function listProjectDirectory(config: CapabilityConfig, pathValue: 
   let info;
   try { info = await stat(target); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('project_directory_not_found');
-    throw new KernelError('project_directory_unreadable');
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('project_directory_not_found', { cause: error });
+    throw new KernelError('project_directory_unreadable', { cause: error });
   }
   if (!info.isDirectory()) throw new KernelError('project_path_not_directory');
 
@@ -211,7 +211,7 @@ export async function listProjectDirectory(config: CapabilityConfig, pathValue: 
   const parent = relativeFromCanonicalWorkingDirectory(workingRoot, target);
   let directory;
   try { directory = await opendir(target); }
-  catch { throw new KernelError('project_directory_unreadable'); }
+  catch (error) { throw new KernelError('project_directory_unreadable', { cause: error }); }
   try {
     for await (const entry of directory) {
       scannedEntries += 1;
@@ -228,8 +228,8 @@ export async function listProjectDirectory(config: CapabilityConfig, pathValue: 
       const path = parent === '.' ? entry.name : `${parent}/${entry.name}`;
       entries.push({ name: entry.name, path, kind });
     }
-  } catch {
-    throw new KernelError('project_directory_unreadable');
+  } catch (error) {
+    throw new KernelError('project_directory_unreadable', { cause: error });
   } finally {
     await directory.close().catch(() => undefined);
   }
@@ -258,8 +258,8 @@ export async function searchProjectFiles(config: CapabilityConfig, queryValue: u
   let info;
   try { info = await stat(searchRoot); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('project_directory_not_found');
-    throw new KernelError('project_directory_unreadable');
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('project_directory_not_found', { cause: error });
+    throw new KernelError('project_directory_unreadable', { cause: error });
   }
   if (!info.isDirectory()) throw new KernelError('project_path_not_directory');
 
@@ -274,8 +274,8 @@ export async function searchProjectFiles(config: CapabilityConfig, queryValue: u
       paths.push(path);
       if (paths.length >= requiredMatches) break;
     }
-  } catch {
-    throw new KernelError('project_file_search_unavailable');
+  } catch (error) {
+    throw new KernelError('project_file_search_unavailable', { cause: error });
   }
   const incomplete = scan.incomplete;
   const prefix = relativeFromCanonicalWorkingDirectory(workingRoot, searchRoot);
@@ -344,8 +344,8 @@ export async function readProjectFile(config: CapabilityConfig, sessionId: strin
   let info;
   try { info = await stat(target); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('project_file_not_found');
-    throw new KernelError('project_file_unreadable');
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new KernelError('project_file_not_found', { cause: error });
+    throw new KernelError('project_file_unreadable', { cause: error });
   }
   if (!info.isFile()) throw new KernelError('project_file_not_regular');
   const displayPath = relativeFromCanonicalWorkingDirectory(workingRoot, target);
@@ -357,8 +357,8 @@ export async function readProjectFile(config: CapabilityConfig, sessionId: strin
     artifact = await readFileArtifact({ path: displayPath }, sessionId, workingDirectoryOf(config), boundaryOf(config),
       undefined, FILE_CHANGE_MAX_FILE_BYTES, FILE_CHANGE_MAX_FILE_BYTES);
   } catch (error) {
-    if (error instanceof KernelError && error.code === 'artifact_file_changed') throw new KernelError('project_file_changed');
-    throw new KernelError('project_file_unreadable');
+    if (error instanceof KernelError && error.code === 'artifact_file_changed') throw new KernelError('project_file_changed', { cause: error });
+    throw new KernelError('project_file_unreadable', { cause: error });
   }
   const bytes = artifact.preview ?? Buffer.alloc(0);
   if (bytes.length > FILE_CHANGE_MAX_FILE_BYTES) {
@@ -370,8 +370,8 @@ export async function readProjectFile(config: CapabilityConfig, sessionId: strin
   if (mimeType.startsWith('image/') && mimeType !== 'image/svg+xml') {
     if (Number(offset) !== 0) throw new KernelError('project_file_offset_invalid');
     const preview = await previewFileArtifact(artifact.artifact, workingDirectoryOf(config), boundaryOf(config)).catch((error: unknown) => {
-      if (error instanceof KernelError && error.code === 'artifact_modified') throw new KernelError('project_file_changed');
-      throw new KernelError('project_file_image_preview_failed');
+      if (error instanceof KernelError && error.code === 'artifact_modified') throw new KernelError('project_file_changed', { cause: error });
+      throw new KernelError('project_file_image_preview_failed', { cause: error });
     });
     if (preview.type !== 'image') {
       return { path: displayPath, size: bytes.length, version, encoding: 'binary', mimeType, offsetBytes: 0, nextOffsetBytes: null };
@@ -445,7 +445,7 @@ export async function saveProjectFile(config: CapabilityConfig, sessionId: strin
   const target = await resolveProjectPath(config, path, false, true);
   let initialInfo;
   try { initialInfo = await lstat(target); }
-  catch { throw new KernelError('project_file_not_found'); }
+  catch (error) { throw new KernelError('project_file_not_found', { cause: error }); }
   if (!initialInfo.isFile() || initialInfo.isSymbolicLink()) throw new KernelError('project_file_not_regular');
   if (initialInfo.size > FILE_CHANGE_MAX_FILE_BYTES) throw new KernelError('project_file_too_large');
 
@@ -455,7 +455,7 @@ export async function saveProjectFile(config: CapabilityConfig, sessionId: strin
     if (currentTarget !== target) throw new KernelError('project_file_target_changed');
     let currentInfo;
     try { currentInfo = await lstat(currentTarget); }
-    catch { throw new KernelError('project_file_target_changed'); }
+    catch (error) { throw new KernelError('project_file_target_changed', { cause: error }); }
     if (!sameFileIdentity(initialInfo, currentInfo)) throw new KernelError('project_file_target_changed');
 
     const displayPath = path;
@@ -504,14 +504,14 @@ export async function saveProjectFile(config: CapabilityConfig, sessionId: strin
       if (!mutationAttempted) {
         if (error instanceof KernelError) throw error;
         const code = (error as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT') throw new KernelError('project_file_target_changed');
-        if (code === 'EACCES' || code === 'EPERM') throw new KernelError('project_file_permission_denied');
-        throw new KernelError('project_file_save_unavailable');
+        if (code === 'ENOENT') throw new KernelError('project_file_target_changed', { cause: error });
+        if (code === 'EACCES' || code === 'EPERM') throw new KernelError('project_file_permission_denied', { cause: error });
+        throw new KernelError('project_file_save_unavailable', { cause: error });
       }
       writeFailed = true;
     } finally {
       try { await handle?.close(); }
-      catch { if (mutationAttempted) writeFailed = true; else throw new KernelError('project_file_target_changed'); }
+      catch (error) { if (mutationAttempted) writeFailed = true; else throw new KernelError('project_file_target_changed', { cause: error }); }
     }
 
     if (!mutationAttempted || beforeBytes === undefined) throw new KernelError('project_file_save_state_invalid');
