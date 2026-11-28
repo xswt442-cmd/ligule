@@ -49,6 +49,7 @@ import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { readConfig, writeConfig } from './handlers/config.js';
 import { handleProjectRequest } from './handlers/project.js';
+import { handleSubrunRequest } from './handlers/subrun.js';
 import { createWorkspacePrefsHandlers } from './handlers/workspace-prefs.js';
 import { listProjectDirectory, readProjectFile } from './project-files.js';
 import { projectGitDiffVersion, readProjectGitDiff } from './project-git.js';
@@ -100,7 +101,7 @@ import { createMediaStore } from '../capability/media.js';
 import { checkedImageReferences } from '../media.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
-import { createSubagentPlugin, type SubagentRuntime } from '../tools/subagent.js';
+import { createSubagentPlugin } from '../tools/subagent.js';
 import { createCompactPlugin } from '../tools/compact.js';
 import { createCustomToolsPlugin, discoverCustomTools } from '../tools/custom.js';
 import { createAskUserPlugin } from '../tools/ask-user.js';
@@ -3349,9 +3350,6 @@ export function createHost({
         assertVisibleRunScope(scope);
         if (grant !== undefined) assertGrantSessionScope(grant, state);
       };
-      const requireSubrunParent = async (state: HostSessionState, parentRunId: string): Promise<void> => {
-        await requireRunReference(state, parentRunId);
-      };
 
       // 方法级准入只在分派前判定一次：Operation Session 能做什么（capabilities.ts）与
       // 哪些方法整方法要求可信本地 UI（entry.ts）各自只有一份声明，业务分支不再重复。
@@ -4028,130 +4026,21 @@ export function createHost({
           });
           return { ...accepted, cancelledInteractions: cancelledInteractionIds.length, cancelledInteractionIds };
         }
-        case 'subrun.start': {
-          const state = open(sessionId);
-          const parentRunId = requiredString(message.params.parentRunId, 'parentRunId');
-          await requireSubrunParent(state, parentRunId);
-          if (state.activeRunId !== parentRunId || state.running === undefined) throw new KernelError('subagent_parent_not_active');
-          const source = runOriginOf(undefined, 'human', mayRecordHumanRun(controlTrust, bridge));
-          const task = requiredString(message.params.task, 'task');
-          const presetId = message.params.presetId === undefined ? undefined : requiredString(message.params.presetId, 'presetId');
-          const child = await state.subagents.start({
-            task,
-            ...(presetId === undefined ? {} : { presetId }),
-            ...(message.params.mode === undefined ? {} : { mode: message.params.mode as Parameters<SubagentRuntime['start']>[0]['mode'] }),
-            ...(message.params.outputTokens === undefined ? {} : { outputTokens: message.params.outputTokens }),
-            ...(message.params.thinkingEffort === undefined ? {} : { thinkingEffort: message.params.thinkingEffort as Parameters<SubagentRuntime['start']>[0]['thinkingEffort'] }),
-            ...(message.params.loopIterations === undefined ? {} : { loopIterations: message.params.loopIterations }),
-            ...(message.params.modelCalls === undefined ? {} : { modelCalls: message.params.modelCalls }),
-            ...(message.params.outputSchema === undefined ? {} : { outputSchema: message.params.outputSchema }),
-          }, {
-            signal: state.running.signal,
-            permission: state.permission,
-            runId: parentRunId,
-          }, source);
-          const taskLabel = Array.from(task.trim()).slice(0, 256).join('');
-          try {
-            await state.session.append({ kind: 'subrunStarted', ignorable: true, source, parentRunId,
-              subrunId: child.subrunId, childSessionId: child.sessionId, childRunId: child.runId,
-              ...(presetId === undefined ? {} : { presetId }), taskLabel, startedAt: new Date().toISOString() });
-          } catch (cause) {
-            let cleanup = 'not_confirmed';
-            try {
-              const cancellation = await state.subagents.cancel({
-                subrunId: child.subrunId, runId: child.runId, parentRunId,
-              });
-              cleanup = cancellation.cancelRequested ? 'requested' : cancellation.state;
-              if (cancellation.cancelRequested) {
-                const settled = await state.subagents.wait([child.subrunId], parentRunId, 30_000);
-                cleanup = settled.timedOut ? 'pending' : settled.subruns[0]?.state ?? 'unknown';
-              }
-            } catch {
-              cleanup = 'failed';
-            }
-            logger?.log?.('subrun relationship could not be recorded', {
-              code: 'subrun_activity_record_failed', sessionId, parentRunId,
-              subrunId: child.subrunId, childRunId: child.runId, cleanup,
-            });
-            throw new KernelError('subrun_activity_record_failed', {
-              cause, detail: `child=${child.subrunId}; cleanup=${cleanup}`,
-            });
-          }
-          return child;
-        }
-        case 'subrun.list': {
-          const state = open(sessionId);
-          const parentRunId = requiredString(message.params.parentRunId, 'parentRunId');
-          await requireSubrunParent(state, parentRunId);
-          return await state.subagents.list(parentRunId, {
-            ...(message.params.cursor === undefined ? {} : { cursor: requiredString(message.params.cursor, 'cursor') }),
-            ...(message.params.limit === undefined ? {} : { limit: message.params.limit as number }),
-          });
-        }
-        case 'preset.list': {
-          const state = open(sessionId);
-          if (grant !== undefined) assertGrantSessionScope(grant, state);
-          return await state.subagents.listPresets({
-            ...(message.params.cursor === undefined ? {} : { cursor: requiredString(message.params.cursor, 'cursor') }),
-            ...(message.params.limit === undefined ? {} : { limit: message.params.limit as number }),
-          });
-        }
-        case 'preset.preview': {
-          const state = open(sessionId);
-          if (grant !== undefined) assertGrantSessionScope(grant, state);
-          const parentRunId = message.params.parentRunId === undefined
-            ? state.activeRunId : requiredString(message.params.parentRunId, 'parentRunId');
-          if (parentRunId !== undefined) {
-            await requireSubrunParent(state, parentRunId);
-            if (state.activeRunId !== parentRunId) throw new KernelError('subagent_parent_not_active');
-          }
-          return await state.subagents.previewPreset(requiredString(message.params.presetId, 'presetId'), {
-            ...(message.params.mode === undefined ? {} : { mode: message.params.mode as Parameters<SubagentRuntime['previewPreset']>[1]['mode'] }),
-            ...(message.params.outputTokens === undefined ? {} : { outputTokens: message.params.outputTokens as number }),
-            ...(message.params.thinkingEffort === undefined ? {} : { thinkingEffort: message.params.thinkingEffort as Parameters<SubagentRuntime['previewPreset']>[1]['thinkingEffort'] }),
-            ...(message.params.loopIterations === undefined ? {} : { loopIterations: message.params.loopIterations as number }),
-            ...(message.params.modelCalls === undefined ? {} : { modelCalls: message.params.modelCalls as number }),
-            ...(message.params.outputSchema === undefined ? {} : { outputSchema: message.params.outputSchema as Record<string, unknown> }),
-          }, {
-            permission: state.permission,
-            ...(parentRunId === undefined ? {} : { runId: parentRunId }),
-          });
-        }
-        case 'subrun.status': {
-          const state = open(sessionId);
-          const parentRunId = requiredString(message.params.parentRunId, 'parentRunId');
-          await requireSubrunParent(state, parentRunId);
-          return await state.subagents.status(requiredString(message.params.subrunId, 'subrunId'), parentRunId);
-        }
-        case 'subrun.message': {
-          const state = open(sessionId);
-          const parentRunId = requiredString(message.params.parentRunId, 'parentRunId');
-          await requireSubrunParent(state, parentRunId);
-          const source = runOriginOf(undefined, 'human', mayRecordHumanRun(controlTrust, bridge));
-          const runId = requiredString(message.params.runId, 'runId');
-          return await state.subagents.message({
-            subrunId: requiredString(message.params.subrunId, 'subrunId'),
-            runId,
-            parentRunId,
-            input: requiredString(message.params.input, 'input'),
-          }, source, () => settleRunAsks(state, runId));
-        }
-        case 'subrun.wait': {
-          const state = open(sessionId);
-          const parentRunId = requiredString(message.params.parentRunId, 'parentRunId');
-          await requireSubrunParent(state, parentRunId);
-          const subrunIds = message.params.subrunIds;
-          if (!Array.isArray(subrunIds)) throw new KernelError('protocol_args_invalid');
-          return await state.subagents.wait(subrunIds as string[], parentRunId, message.params.timeoutMs ?? 30_000);
-        }
+        case 'subrun.start':
+        case 'subrun.list':
+        case 'preset.list':
+        case 'preset.preview':
+        case 'subrun.status':
+        case 'subrun.message':
+        case 'subrun.wait':
         case 'subrun.cancel': {
           const state = open(sessionId);
-          const parentRunId = requiredString(message.params.parentRunId, 'parentRunId');
-          await requireSubrunParent(state, parentRunId);
-          return await state.subagents.cancel({
-            subrunId: requiredString(message.params.subrunId, 'subrunId'),
-            runId: requiredString(message.params.runId, 'runId'),
-            parentRunId,
+          return await handleSubrunRequest(message.method, message.params, sessionId, state, {
+            requireParent: (parentRunId) => requireRunReference(state, parentRunId),
+            assertPresetScope() { if (grant !== undefined) assertGrantSessionScope(grant, state); },
+            settleAsks: (runId) => settleRunAsks(state, runId),
+            source: runOriginOf(undefined, 'human', mayRecordHumanRun(controlTrust, bridge)),
+            logger,
           });
         }
         case 'policy.set': {
