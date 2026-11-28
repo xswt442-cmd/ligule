@@ -1,7 +1,7 @@
 import { KernelError } from '../kernel/error.js';
 import type { ConfigSnapshot } from '../kernel/config.js';
 import type { ModelProvider } from '../kernel/loop.js';
-import { resolveModel } from '../kernel/model-services.js';
+import { resolveModel, type ModelSelection } from '../kernel/model-services.js';
 import { createMessagesProvider } from '../model/messages.js';
 import { createChatCompletionsProvider } from '../model/chat-completions.js';
 import { DEFAULT_RETRY, type ProviderCapabilities, type RetryPolicy } from '../model/http.js';
@@ -29,6 +29,12 @@ export interface HostProvider extends ModelProvider {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function modelSelectionOf(model: Record<string, unknown>): ModelSelection | undefined {
+  return isRecord(model.selection) && typeof model.selection.provider === 'string' && typeof model.selection.model === 'string'
+    ? { provider: model.selection.provider, model: model.selection.model }
+    : undefined;
 }
 
 function retryOf(model: Record<string, unknown>): RetryPolicy {

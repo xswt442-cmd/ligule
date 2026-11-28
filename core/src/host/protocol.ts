@@ -954,6 +954,11 @@ for (const [name, method] of Object.entries(METHODS)) {
 
 const METHOD_SPECS = new Map<string, MethodSpec>(Object.entries(METHODS));
 
+export function requiredString(value: unknown, field: string): string {
+  if (typeof value !== 'string') throw new KernelError('protocol_args_invalid', { detail: `${field} must be a string` });
+  return value;
+}
+
 export function validateCall(name: string, params: unknown): asserts params is HostMethodParams {
   const method = METHOD_SPECS.get(name);
   if (method === undefined) throw new KernelError('protocol_method_unknown', { detail: name });

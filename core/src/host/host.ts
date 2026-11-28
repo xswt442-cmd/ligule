@@ -47,6 +47,7 @@ import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDir
 import { adoptForSessionDirectory } from '../session/adopt.js';
 import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
+import { readConfig, writeConfig } from './handlers/config.js';
 import { handleProjectRequest } from './handlers/project.js';
 import { createWorkspacePrefsHandlers } from './handlers/workspace-prefs.js';
 import { listProjectDirectory, readProjectFile } from './project-files.js';
@@ -110,15 +111,15 @@ import { apiRoot } from '../model/http.js';
 import { thinkingCapabilityOf } from '../model/thinking.js';
 import type { ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { createConnection, type HostRequest } from './connection.js';
-import { APPROVAL_METHOD, QUESTION_METHOD, SIDE_SELECTION_MAX_BYTES, VIEW_REQUEST_METHOD, validateCall, type HostMethodParams } from './protocol.js';
-import { createConfig, mergePolicyRules, type ConfigSnapshot } from '../kernel/config.js';
+import { APPROVAL_METHOD, QUESTION_METHOD, SIDE_SELECTION_MAX_BYTES, VIEW_REQUEST_METHOD, requiredString, validateCall, type HostMethodParams } from './protocol.js';
+import { createConfig, mergePolicyRules } from '../kernel/config.js';
 import { dataRoot, loadConfigLayers } from '../kernel/config-file.js';
 import { createTelemetry, currentTelemetryContext, emitTelemetry, telemetryEnabled, type TelemetryOptions } from '../kernel/telemetry.js';
 import type { SkillRegistry } from '../kernel/skills.js';
 import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
-import { providerFromConfig, hostProviderFromConfig, type HostGenerationOptions, type HostProvider } from './provider.js';
+import { providerFromConfig, modelSelectionOf, type HostGenerationOptions, type HostProvider } from './provider.js';
 import { createSessionReviewer, narrowReviewerSettings, reviewerRouteFields, reviewerSettings } from './reviewer.js';
 import type { PolicyReviewRecord, PolicyReviewRequest } from '../kernel/policy.js';
 import type { ReviewFacts } from '../kernel/reviewer.js';
@@ -133,11 +134,12 @@ import { checkEventOf, sampleCheckScope } from './checks.js';
 import { parseInitialGenerationSettings } from './session-initial-settings.js';
 import { settingsToolCatalog as buildSettingsToolCatalog } from './tool-catalog.js';
 import type {
-  DelegatedRunResult, EnvironmentSeed, Host, HostClientConnection, HostConfigSnapshot, HostOptions,
+  AdoptionResult, DelegatedRunResult, EnvironmentSeed, Host, HostClientConnection, HostConfigSnapshot, HostOptions,
   HostProgressSnapshot, HostSessionBase, HostSessionState, PendingRunAsk, ProjectEnvironment, RuntimeConfig,
   SessionGeneration,
 } from './types.js';
 export { providerFromConfig, hostProviderFromConfig } from './provider.js';
+export { shownConfigOf } from './handlers/config.js';
 export type { EnvironmentSeed, Host, HostOptions, HostProgressSnapshot, HostSessionState } from './types.js';
 
 interface InitialSessionSettings {
@@ -155,11 +157,6 @@ interface InitialSessionSettings {
   readonly persistLoopIterations: boolean;
   readonly generation: SessionGeneration;
   readonly persistGeneration: boolean;
-}
-
-interface AdoptionResult {
-  readonly applies: { sessionId: string; when: 'now' | 'round' }[];
-  readonly failure?: { code: string; detail?: string };
 }
 
 type ModeState = SessionModeState;
@@ -211,11 +208,6 @@ interface ExtensionPromptFragment {
   readonly source: string;
 }
 
-function requiredString(value: unknown, field: string): string {
-  if (typeof value !== 'string') throw new KernelError('protocol_args_invalid', { detail: `${field} must be a string` });
-  return value;
-}
-
 function trackAsk(state: HostSessionBase, pending: PendingRunAsk, runId?: string): void {
   state.asks.add(pending);
   if (runId === undefined) return;
@@ -249,12 +241,6 @@ function advanceRunInputRevision(state: HostSessionBase, runId: string): void {
 
 function modelConfigOf(config: HostConfigSnapshot): Record<string, unknown> {
   return isRecord(config.model) ? config.model : {};
-}
-
-function modelSelectionOf(model: Record<string, unknown>): ModelSelection | undefined {
-  return isRecord(model.selection) && typeof model.selection.provider === 'string' && typeof model.selection.model === 'string'
-    ? { provider: model.selection.provider, model: model.selection.model }
-    : undefined;
 }
 
 function permissionOptionsOf(
@@ -523,34 +509,6 @@ function observedSession(session: SessionLog, onEvent: (event: SessionEvent) => 
       const stored = await session.append(event);
       onEvent(stored);
       return stored;
-    },
-  };
-}
-
-// 只从明确允许的字符串字段构造公开配置。
-// 删除 URL 中可能包含密钥的用户名、密码、查询参数和片段。
-// 无法解析 URL 时省略该字段，不猜测其内容。
-function shownText(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
-}
-
-export function shownConfigOf(config: ConfigSnapshot) {
-  const model = isRecord(config.model) ? config.model : {};
-  let endpoint = shownText(model.baseURL);
-  if (endpoint !== undefined) {
-    try {
-      const url = new URL(endpoint);
-      endpoint = `${url.protocol}//${url.host}${url.pathname}`;
-    } catch {
-      endpoint = undefined;
-    }
-  }
-  return {
-    model: {
-      api: shownText(model.api),
-      baseURL: endpoint,
-      model: shownText(model.model),
-      apiKeyEnv: shownText(model.apiKeyEnv),
     },
   };
 }
@@ -4617,102 +4575,21 @@ export function createHost({
             await registry.close();
           }
         }
-        case 'config.get': {
-          // 使用明确的允许字段构造响应；参数模式本身允许出现未声明的属性。
-          // 项目配置是不可信输入，可能包含凭据或其他私密内容。
-          // 同一遍读取值、来源和文件版本，确保客户端得到一致快照。
-          // 只读取所选项目的可写配置层。请求携带项目身份，响应不返回项目路径。
-          const env = await environmentFor(message.params.projectRoot);
-          if (env.store === undefined) return {
-            ...shownConfigOf(env.config),
-            services: modelServices(env.config.model?.services),
-            selection: env.config.model?.selection === undefined ? null : modelSelection(env.config.model.selection),
-            layers: [], sources: {},
-          };
-          const { layers, sources, values, rules, ruleSources, ruleLayers, rulesSource } = await env.store.read();
-          return {
-            ...shownConfigOf(values),
-            services: modelServices(values.model?.services),
-            selection: values.model?.selection === undefined ? null : modelSelection(values.model.selection),
-            // 返回配置中的默认策略；`status.get` 返回会话当前生效的策略。
-            // 带语义标记的文件按新语义展示；没有标记的历史 none/never 仍按旧语义降级，避免界面显示成可用的新档位。
-            policyMode: values.policy.mode === undefined
-              ? undefined
-              : readPersistedPolicyMode(values.policy.mode, values.policy.semantics),
-            layers,
-            sources,
-            rules,
-            ruleSources,
-            ruleLayers,
-            rulesSource,
-          };
-        }
-        case 'config.set': {
-          // 配置存储负责允许字段、值校验和配置层到文件的映射；Host 只转发这些字段。
-          if (defaultEnvironment.store === undefined) throw new KernelError('config_write_unsupported');
-          const { value, op, index, ruleTool, ruleDecision, ruleMatch, ruleReason, ruleTarget, rulePath, ruleArgsHash,
-            serverName, serverCommand, serverArgs, serverEnv, serverCwd } = message.params;
-          const field = requiredString(message.params.field, 'field');
-          const layer = requiredString(message.params.layer, 'layer');
-          const version = requiredString(message.params.version, 'version');
-          // 协议层校验字段类型，`checkedRule` 校验规则内容。
-          const given = {
-            tool: ruleTool, decision: ruleDecision, match: ruleMatch, reason: ruleReason,
-            target: ruleTarget, path: rulePath, argsHash: ruleArgsHash,
-          };
-          const rule = Object.values(given).every((item) => item === undefined) ? undefined : given;
-          const serverGiven = { name: serverName, command: serverCommand, args: serverArgs, env: serverEnv, cwd: serverCwd };
-          const server = Object.values(serverGiven).every((item) => item === undefined) ? undefined : serverGiven;
-          const env = await environmentFor(message.params.projectRoot);
-          if (env.store === undefined) throw new KernelError('config_write_unsupported');
-          const { key, table, shadowed, shadowedBy, changed, effective, layers, ...saved } = await env.store.write({ layer, field, value, version, op, index, rule, server }, async (candidate, editedLayer) => {
-            if (!field.startsWith('model.')) return;
-            if (layer === 'user') hostProviderFromConfig(createConfig({ user: editedLayer }));
-            for (const target of layer === 'user' ? [...environments.values()] : [env]) {
-              if (target.store === undefined) continue;
-              const own = target === env ? candidate : await target.store.preview(layer, editedLayer);
-              const config = { ...target.config, ...own };
-              // 首次设置允许逐项填写未完成的模型配置；完整配置中的能力错误必须在写入前拒绝。
-              hostProviderFromConfig(config);
-              if (field === 'model.selection') deriveProvider(config);
-              if (field === 'model.services' && isRecord(config.model)) {
-                if (config.model.selection !== undefined) resolveModel(config.model);
-                for (const service of modelServices(config.model.services)) {
-                  for (const setting of service.modelSettings ?? []) {
-                    deriveProvider({
-                      ...config,
-                      model: { ...config.model, selection: { provider: service.id, model: setting.id } },
-                    });
-                  }
-                }
-              }
-              if (field !== 'model.outputTokens' && field !== 'model.services') continue;
+        case 'config.get':
+          return await readConfig(await environmentFor(message.params.projectRoot));
+        case 'config.set':
+          return await writeConfig(message.params, {
+            defaultStore: defaultEnvironment.store,
+            environmentFor,
+            environments: () => environments.values(),
+            *sessionsIn(environment) {
               for (const state of sessions.values()) {
-                if (state.environment !== target) continue;
-                const generation = state.pendingGeneration ?? state.generation;
-                if (generation.explicit !== true) continue;
-                if (field === 'model.services' && modelSelectionOf(generation.model)?.provider === 'legacy') continue;
-                const key = field === 'model.outputTokens' ? 'outputTokens' : 'services';
-                const effective = isRecord(config.model) ? config.model[key] : undefined;
-                deriveProvider({ ...config, model: { ...generation.model, [key]: effective } }, generation.options);
+                if (state.environment === environment) yield state.pendingGeneration ?? state.generation;
               }
-            }
+            },
+            deriveProvider,
+            adoptWritten,
           });
-          // 按配置层优先级计算写入后的有效模型服务设置。
-          // 返回立即采用变更的会话；其他会话在下一轮边界采用。
-          // 更高优先级配置覆盖本次写入时，不改变会话，并说明覆盖来源。
-          // 策略和审批规则变更从下一次判定开始生效。
-          const adoption = await adoptWritten(env, layer, table, key, effective, changed);
-          return {
-            ...saved,
-            shadowed,
-            ...(shadowedBy === undefined ? {} : { shadowedBy }),
-            changed,
-            ...adoption,
-            ...(key === 'rules' ? { rules: effective } : {}),
-            layers,
-          };
-        }
         case 'session.compact': {
           const state = open(sessionId);
           // 压缩只影响下一次请求的上下文，无法改变已经发出的请求。

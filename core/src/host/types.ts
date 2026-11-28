@@ -133,6 +133,11 @@ export interface SessionGeneration {
   readonly options: HostGenerationOptions;
 }
 
+export interface AdoptionResult {
+  readonly applies: { sessionId: string; when: 'now' | 'round' }[];
+  readonly failure?: { code: string; detail?: string };
+}
+
 export interface HostSessionBase {
   taskBudget?: TaskBudget;
   lastTask?: ReturnType<TaskBudget['snapshot']>;

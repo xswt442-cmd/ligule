@@ -3,7 +3,7 @@ import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../../kernel/
 import { KernelError } from '../../kernel/error.js';
 import { historyPathOf, loadHistory, rememberHistory } from '../../kernel/input-history.js';
 import { readRegistry, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../../kernel/workspace.js';
-import type { HostMethodParams } from '../protocol.js';
+import { requiredString, type HostMethodParams } from '../protocol.js';
 
 interface WorkspacePrefsContext {
   classifyProjectRoot(directory: string): Promise<void>;
@@ -33,8 +33,7 @@ export function createWorkspacePrefsHandlers({ classifyProjectRoot, isWorkspaceR
     'prefs.read': () => readPrefs(),
     async 'prefs.write'({ json, version }: HostMethodParams) {
       const value = parsePrefsJson(String(json));
-      if (typeof version !== 'string') throw new KernelError('protocol_args_invalid', { detail: 'version must be a string' });
-      return await savePrefs(prefsPathOf(), value, { version });
+      return await savePrefs(prefsPathOf(), value, { version: requiredString(version, 'version') });
     },
   } satisfies Record<string, (params: HostMethodParams) => Promise<unknown>>;
 }
